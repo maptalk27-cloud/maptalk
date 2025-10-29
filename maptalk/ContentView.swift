@@ -1,7 +1,6 @@
-// SwiftUI Map – Cyber Neon Multi‑Route (iOS 17+, Xcode 15)
-// Theme: 蓝紫霓虹风（Four Seasons 夜景 + 赛博 HUD）
-// 功能：固定坐标多 Pin、从当前位置 → 每个 Pin 多条路线、清空、居中
-// 使用：把此文件内容替换到 ContentView.swift。Info.plist 需有 NSLocationWhenInUseUsageDescription。
+// SwiftUI Map – Cyber Neon (Follow-User On)  iOS 17+, Xcode 15
+// 保留 UI/霓虹主题 + 启用定位与持续跟随用户位置。
+// Info.plist 需含 NSLocationWhenInUseUsageDescription
 
 #if os(iOS)
 import SwiftUI
@@ -9,7 +8,7 @@ import MapKit
 import CoreLocation
 import Combine
 
-// MARK: - Models
+// MARK: - Models（保留，为后续扩展
 struct Pin: Identifiable, Hashable, Equatable {
     let id = UUID()
     var title: String
@@ -21,13 +20,13 @@ struct Pin: Identifiable, Hashable, Equatable {
 struct RouteLine: Identifiable, Hashable, Equatable {
     let id = UUID()
     var coordinates: [CLLocationCoordinate2D]
-    /// Use palette index instead of `Color` to avoid Hashable issues
+    /// 霓虹配色使用索引，避免 Hashable 问题
     var colorIndex: Int
     static func == (lhs: RouteLine, rhs: RouteLine) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
-// MARK: - Location Manager
+// MARK: - Location Manager（启用）
 @MainActor
 final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
@@ -39,6 +38,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         authorizationStatus = manager.authorizationStatus
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.distanceFilter = 5 // 米：位置变化 5m 才回调，避免过于频繁
     }
 
     func request() {
@@ -62,27 +62,26 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 struct ContentView: View {
     @StateObject private var loc = LocationManager()
 
-    // 地图相机
+    // 初始给个城市级范围，拿到定位后自动切换为 camera 跟随
     @State private var region = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 47.6062, longitude: -122.3321),
         span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
     )
+    @State private var position: MapCameraPosition = .region(
+        MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 47.6062, longitude: -122.3321),
+            span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
+        )
+    )
 
-    // 固定坐标（示例：请替换为你的坐标集）
-    // 例：Seattle 周边几个点
-    private let fixedDestinations: [Pin] = [
-        Pin(title: "Kerry Park", coordinate: .init(latitude: 47.6295, longitude: -122.3590)),
-        Pin(title: "Gas Works Park", coordinate: .init(latitude: 47.6456, longitude: -122.3344)),
-        Pin(title: "Alki Beach", coordinate: .init(latitude: 47.5817, longitude: -122.4058)),
-        Pin(title: "Bellevue Downtown", coordinate: .init(latitude: 47.6149, longitude: -122.1936))
-    ]
-
-    // 运行时状态
+    // 运行时状态（当前不渲染 pin/route，仅保留接口）
     @State private var pins: [Pin] = []
     @State private var routes: [RouteLine] = []
-    @State private var isShowingUser: Bool = true
+    @State private var isShowingUser: Bool = true     // 显示系统用户点
+    @State private var mapCenter: CLLocationCoordinate2D? = nil
+    @State private var followEnabled = true
 
-    // 路线配色（蓝紫霓虹）
+    // —— 霓虹路线配色（之后用于导航渲染）——
     private let routePalette: [Color] = [
         Color.cyan.opacity(0.95),
         Color.purple.opacity(0.95),
@@ -92,31 +91,43 @@ struct ContentView: View {
         Color.indigo.opacity(0.95)
     ]
 
+    // 跟随参数
+    private let followDistance: CLLocationDistance = 1200 // 相机距地面高度（米），可按需调整
+
     var body: some View {
         NavigationStack {
             ZStack {
                 // 底层地图
-                Map(
-                    coordinateRegion: $region,
-                    interactionModes: .all,
-                    showsUserLocation: isShowingUser,
-                    annotationItems: pins
-                ) { pin in
-                    MapAnnotation(coordinate: pin.coordinate) {
-                        NeonPin()
-                            .accessibilityLabel(pin.title)
+                MapReader { _ in
+                    Map(position: $position) {
+                        if isShowingUser { UserAnnotation() }
+
+                        // 预留（不渲染）
+                        // ForEach(pins) { pin in
+                        //     Annotation(pin.title, coordinate: pin.coordinate) { NeonPin() }
+                        // }
+                        // ForEach(routes) { r in
+                        //     let c = routePalette[r.colorIndex % routePalette.count]
+                        //     MapPolyline(coordinates: r.coordinates)
+                        //         .stroke(c.opacity(0.55), style: StrokeStyle(lineWidth: 8))
+                        //     MapPolyline(coordinates: r.coordinates)
+                        //         .stroke(c, style: StrokeStyle(lineWidth: 3))
+                        // }
+                    }
+                    .onMapCameraChange(frequency: .continuous) { context in
+                        mapCenter = context.region.center
+                        region = context.region
                     }
                 }
-                // 叠加多段路线
-                .overlay {
-                    // SwiftUI 的 Map 也支持多段 polyline；这里我们用 overlay + Map-like 绘制
-                    // 用 Canvas 将路线以 Path 形式绘制在屏幕投影坐标上更灵活；
-                    // 但为简洁，使用 MapPolyline 等新 API 也可（iOS17 有 MapPolyline，但这里用自绘避免 API 差异）。
-                    RouteOverlay(region: region, routes: routes, palette: routePalette)
-                        .allowsHitTesting(false)
-                }
-                .onAppear { centerOnUserIfAvailable() }
                 .ignoresSafeArea()
+                .onAppear {
+                    // 请求权限 & 启动定位
+                    loc.request()
+                }
+                // 使用发布者响应位置变化（避免 onChange 的 Equatable 限制）
+                .onReceive(loc.$lastLocation.compactMap { $0?.coordinate }) { coord in
+                    followUser(to: coord)
+                }
 
                 // —— 赛博霓虹滤镜层（蓝紫冷光 + 轻微压黑 + 暗角）——
                 VStack { Spacer() }
@@ -133,7 +144,7 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
 
-                // 顶部 HUD（标题 + 说明）
+                // 顶部 HUD（标题）
                 VStack(spacing: 8) {
                     Text("MapTalk – Neon")
                         .font(.headline)
@@ -150,9 +161,17 @@ struct ContentView: View {
                 VStack {
                     Spacer()
                     VStack(spacing: 12) {
-                        HUDButton(systemName: "location.fill") { centerOnUserIfAvailable() }
-                        HUDButton(systemName: "mappin.and.ellipse") { dropFixedPinsAndRoutes() }
-                        HUDButton(systemName: "trash") { clearAll() }
+                        // 恢复第一个按钮为“回到我”
+                        HUDButton(systemName: "location.fill", enabled: true) {
+                            if let c = loc.lastLocation?.coordinate {
+                                followUser(to: c)
+                            } else {
+                                loc.request()
+                            }
+                        }
+                        // 其余两个保持 UI，无行为（no-op）
+                        HUDButton(systemName: "mappin.and.ellipse", enabled: false) { /* no-op */ }
+                        HUDButton(systemName: "trash", enabled: false) { /* no-op */ }
                     }
                     .padding(.trailing)
                 }
@@ -162,57 +181,13 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Actions
-    private func centerOnUserIfAvailable() {
-        loc.request()
-        if let coord = loc.lastLocation?.coordinate {
-            withAnimation(.easeInOut) {
-                region.center = coord
-                region.span = MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
-            }
-        }
-    }
-
-    private func dropFixedPinsAndRoutes() {
-        pins = fixedDestinations
-        routes.removeAll()
-
-        let start = loc.lastLocation?.coordinate ?? region.center   // fallback
-        buildRoutes(from: start, to: pins.map { $0.coordinate })
-    }
-
-    private func clearAll() {
-        withAnimation { pins.removeAll(); routes.removeAll() }
-    }
-
-    private func buildRoutes(from start: CLLocationCoordinate2D, to destinations: [CLLocationCoordinate2D]) {
-        for (idx, dest) in destinations.enumerated() {
-            var request = MKDirections.Request()
-            request.source = MKMapItem(placemark: MKPlacemark(coordinate: start))
-            request.destination = MKMapItem(placemark: MKPlacemark(coordinate: dest))
-            request.transportType = .automobile
-            request.requestsAlternateRoutes = false
-
-            MKDirections(request: request).calculate { response, error in
-                guard let route = response?.routes.first, error == nil else { return }
-                let coordsPtr = route.polyline.points()
-                let count = route.polyline.pointCount
-                var coords = [CLLocationCoordinate2D](repeating: .init(), count: count)
-                for i in 0..<count { coords[i] = coordsPtr[i].coordinate }
-
-                // 颜色循环
-                let color = routePalette[idx % routePalette.count]
-                withAnimation(.easeInOut) {
-                    routes.append(RouteLine(coordinates: coords, colorIndex: idx % routePalette.count))
-                }
-
-                // 自动缩放以包含更多路线（可选：这里只在第一条返回时缩放）
-                if idx == 0 {
-                    let box = route.polyline.boundingMapRect
-                    let reg = MKCoordinateRegion(box)
-                    withAnimation(.easeInOut) { region = reg }
-                }
-            }
+    // MARK: - Camera Follow
+    private func followUser(to coord: CLLocationCoordinate2D) {
+        var cam = MapCamera(centerCoordinate: coord, distance: followDistance)
+        cam.heading = 0
+        cam.pitch = 0
+        withAnimation(.easeInOut) {
+            position = .camera(cam)
         }
     }
 }
@@ -220,7 +195,9 @@ struct ContentView: View {
 // MARK: - HUD / Pins / Overlay
 private struct HUDButton: View {
     let systemName: String
+    var enabled: Bool = true
     let action: () -> Void
+
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
@@ -230,6 +207,8 @@ private struct HUDButton: View {
         .background(.ultraThinMaterial, in: Circle())
         .overlay(Circle().stroke(.white.opacity(0.22), lineWidth: 1))
         .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+        .disabled(!enabled)
+        .opacity(enabled ? 1.0 : 0.5)
     }
 }
 
@@ -254,11 +233,11 @@ private struct NeonPin: View {
     }
 }
 
-// 将路线投影并绘制为矢量路径的 Overlay（简洁实现）
+// 将路线投影并绘制为矢量路径的 Overlay（保留，但当前不使用）
 private struct RouteOverlay: View {
     var region: MKCoordinateRegion
     var routes: [RouteLine]
-    var palette: [Color]          // ← add this
+    var palette: [Color]
 
     var body: some View {
         GeometryReader { geo in
@@ -281,9 +260,7 @@ private struct RouteOverlay: View {
         }
     }
 
-    // 将经纬度转换到当前可视区域的屏幕坐标（近似投影）
     private func point(for coordinate: CLLocationCoordinate2D, in size: CGSize) -> CGPoint {
-        // 简化投影（适合中小尺度，本场景足够）
         let span = region.span
         let center = region.center
         let x = (coordinate.longitude - (center.longitude - span.longitudeDelta/2)) / span.longitudeDelta
