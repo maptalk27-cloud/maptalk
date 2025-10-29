@@ -118,6 +118,15 @@ struct ContentView: View {
                         mapCenter = context.region.center
                         region = context.region
                     }
+                    .simultaneousGesture(
+                        DragGesture().onChanged { _ in followEnabled = false }
+                    )
+                    .simultaneousGesture(
+                        MagnificationGesture().onChanged { _ in followEnabled = false }
+                    )
+                    .simultaneousGesture(
+                        RotationGesture().onChanged { _ in followEnabled = false }
+                    )
                 }
                 .ignoresSafeArea()
                 .onAppear {
@@ -126,7 +135,7 @@ struct ContentView: View {
                 }
                 // 使用发布者响应位置变化（避免 onChange 的 Equatable 限制）
                 .onReceive(loc.$lastLocation.compactMap { $0?.coordinate }) { coord in
-                    followUser(to: coord)
+                    if followEnabled { followUser(to: coord) }
                 }
 
                 // —— 赛博霓虹滤镜层（蓝紫冷光 + 轻微压黑 + 暗角）——
@@ -163,6 +172,7 @@ struct ContentView: View {
                     VStack(spacing: 12) {
                         // 恢复第一个按钮为“回到我”
                         HUDButton(systemName: "location.fill", enabled: true) {
+                            followEnabled = true
                             if let c = loc.lastLocation?.coordinate {
                                 followUser(to: c)
                             } else {
