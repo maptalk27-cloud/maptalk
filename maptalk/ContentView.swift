@@ -2,6 +2,7 @@
 import Combine
 import MapKit
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @StateObject private var loc = LocationManager()
@@ -77,20 +78,22 @@ struct ContentView: View {
                         }
                     }
                     .padding(.trailing)
+                    .padding(.bottom, nav.route != nil ? 160 : 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
 
                 if nav.route != nil {
-                    VStack {
+                    VStack(spacing: 0) {
                         Spacer()
                         TripInfoBox(
                             etaText: nav.etaText,
                             distanceText: nav.distanceText,
                             isComputing: nav.isComputing
                         )
-                        .padding(.horizontal)
-                        .padding(.bottom, 28)
-                        .padding(.trailing, 96)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, horizontalEdgeInset())
+                        .padding(.bottom, bottomEdgeInset())
+                        .ignoresSafeArea(edges: .bottom)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
@@ -113,6 +116,43 @@ struct ContentView: View {
         camera.pitch = 0
         withAnimation(.easeInOut) {
             position = .camera(camera)
+        }
+    }
+
+    @MainActor
+    private func bottomSafeAreaInset() -> CGFloat {
+        guard let keyWindow = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first else { return 0 }
+        return keyWindow.safeAreaInsets.bottom
+    }
+
+    private func horizontalEdgeInset() -> CGFloat {
+        // Try to mimic native Apple Maps card spacing
+        max(deviceCornerRadiusPadding(), 16)
+    }
+
+    private func bottomEdgeInset() -> CGFloat {
+        let safeInset = bottomSafeAreaInset()
+        // Align with native feel; tuck close to the home indicator
+        if safeInset > 0 {
+            return max(safeInset - 42, -8)
+        } else {
+            return 6
+        }
+    }
+
+    private func deviceCornerRadiusPadding() -> CGFloat {
+        // Estimate inset needed so rounded card visually aligns to display curve
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first else { return 22 }
+        // Use safe-area bottom to infer device corner radius; keep spacing consistent on flat devices.
+        let bottomInset = window.safeAreaInsets.bottom
+        if bottomInset > 20 {
+            return max(bottomInset - 18, 12)
+        } else {
+            return 16
         }
     }
 }
