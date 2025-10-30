@@ -46,11 +46,13 @@ struct ContentView: View {
 
                 VStack(spacing: 14) {
                     NeonTripCard()
-                    TripInfoBox(
-                        etaText: nav.etaText,
-                        distanceText: nav.distanceText,
-                        isComputing: nav.isComputing
-                    )
+                    if nav.route != nil {
+                        TripInfoBox(
+                            etaText: nav.etaText,
+                            distanceText: nav.distanceText,
+                            isComputing: nav.isComputing
+                        )
+                    }
                     Spacer()
                 }
 
