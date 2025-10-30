@@ -1,7 +1,3 @@
-// SwiftUI Map – Cyber Neon (Follow-User On)  iOS 17+, Xcode 15
-// 保留 UI/霓虹主题 + 启用定位与持续跟随用户位置。
-// Info.plist 需含 NSLocationWhenInUseUsageDescription
-
 #if os(iOS)
 import SwiftUI
 import MapKit
@@ -26,6 +22,131 @@ struct RouteLine: Identifiable, Hashable, Equatable {
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
+// MARK: - NavigationModel（industry standard: MKDirections + off-route detection）
+// [CHANGED]: extended with reroute logic
+@MainActor
+final class NavigationModel: ObservableObject {
+    enum Mode { case automobile, walking, transit }
+
+    @Published var destination: CLLocationCoordinate2D? = nil
+    @Published var route: MKRoute? = nil
+    @Published var routeCoordinates: [CLLocationCoordinate2D] = []
+    @Published var etaText: String? = nil
+    @Published var distanceText: String? = nil
+    @Published var isComputing: Bool = false
+
+    // [ADDED] Reroute configuration
+    var mode: Mode = .automobile
+    var offRouteToleranceMeters: CLLocationDistance = 45        // tweak 35–60m as you like
+    var minRerouteInterval: TimeInterval = 8                     // throttle
+    private var lastRerouteAt: Date? = nil
+
+    private let formatter: MeasurementFormatter = {
+        let f = MeasurementFormatter()
+        f.unitOptions = .naturalScale
+        f.unitStyle = .medium
+        return f
+    }()
+
+    func setDestination(_ coord: CLLocationCoordinate2D) { destination = coord }
+
+    func planRoute(from start: CLLocationCoordinate2D,
+                   to end: CLLocationCoordinate2D,
+                   mode: Mode = .automobile) {
+        isComputing = true
+        self.mode = mode
+        self.destination = end
+
+        let src = MKMapItem(placemark: MKPlacemark(coordinate: start))
+        let dst = MKMapItem(placemark: MKPlacemark(coordinate: end))
+
+        let req = MKDirections.Request()
+        req.source = src
+        req.destination = dst
+        req.requestsAlternateRoutes = false
+        switch mode {
+        case .automobile: req.transportType = .automobile
+        case .walking:    req.transportType = .walking
+        case .transit:    req.transportType = .transit
+        }
+
+        MKDirections(request: req).calculate { [weak self] resp, err in
+            guard let self = self else { return }
+            self.isComputing = false
+            guard err == nil, let best = resp?.routes.first else {
+                self.route = nil
+                self.routeCoordinates = []
+                self.etaText = nil
+                self.distanceText = nil
+                return
+            }
+            self.route = best
+            self.routeCoordinates = best.polyline.coordinates
+            let mins = Int(ceil(best.expectedTravelTime / 60))
+            self.etaText = "\(mins) min"
+            let meas = Measurement(value: best.distance, unit: UnitLength.meters)
+                .converted(to: .kilometers)
+            self.distanceText = self.formatter.string(from: meas)
+        }
+    }
+
+    // [ADDED] Call this on user location updates to auto-reroute when off path
+    func considerReroute(current: CLLocationCoordinate2D) {
+        guard let dest = destination,
+              let _ = route,
+              !isComputing else { return }
+
+        // Throttle
+        if let last = lastRerouteAt, Date().timeIntervalSince(last) < minRerouteInterval { return }
+
+        // Off-route detection
+        let distance = distanceToCurrentRouteMeters(from: current)
+        if distance > offRouteToleranceMeters {
+            lastRerouteAt = Date()
+            planRoute(from: current, to: dest, mode: mode)
+        }
+    }
+
+    // [ADDED] Compute shortest distance from point to current polyline (in meters)
+    private func distanceToCurrentRouteMeters(from coord: CLLocationCoordinate2D) -> CLLocationDistance {
+        guard routeCoordinates.count > 1 else { return .greatestFiniteMagnitude }
+        let point = MKMapPoint(coord)
+        var minMeters = CLLocationDistance.greatestFiniteMagnitude
+
+        var prev = MKMapPoint(routeCoordinates[0])
+        for c in routeCoordinates.dropFirst() {
+            let next = MKMapPoint(c)
+            let meters = point.distance(toSegmentFrom: prev, to: next)
+            if meters < minMeters { minMeters = meters }
+            prev = next
+        }
+        return minMeters
+    }
+}
+
+// [ADDED] MKPolyline / helpers
+private extension MKPolyline {
+    var coordinates: [CLLocationCoordinate2D] {
+        var coords = [CLLocationCoordinate2D](repeating: kCLLocationCoordinate2DInvalid, count: pointCount)
+        getCoordinates(&coords, range: NSRange(location: 0, length: pointCount))
+        return coords
+    }
+}
+
+// [ADDED] MKMapPoint geometry helper: distance to segment
+private extension MKMapPoint {
+    func distance(toSegmentFrom a: MKMapPoint, to b: MKMapPoint) -> CLLocationDistance {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        if dx == 0 && dy == 0 { return self.distance(to: a) }
+
+        // Project self onto segment ab
+        let t = max(0, min(1, ((self.x - a.x) * dx + (self.y - a.y) * dy) / (dx*dx + dy*dy)))
+        let proj = MKMapPoint(x: a.x + t*dx, y: a.y + t*dy)
+        return self.distance(to: proj)
+    }
+}
+
 // MARK: - Location Manager（启用）
 @MainActor
 final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
@@ -38,7 +159,7 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         authorizationStatus = manager.authorizationStatus
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 5 // 米：位置变化 5m 才回调，避免过于频繁
+        manager.distanceFilter = 5
     }
 
     func request() {
@@ -61,8 +182,9 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
 // MARK: - ContentView (Cyber Neon)
 struct ContentView: View {
     @StateObject private var loc = LocationManager()
+    @StateObject private var nav = NavigationModel()
 
-    // 初始给个城市级范围，拿到定位后自动切换为 camera 跟随
+    // 初始 Seattle
     @State private var region = MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 47.6062, longitude: -122.3321),
         span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
@@ -74,14 +196,12 @@ struct ContentView: View {
         )
     )
 
-    // 运行时状态（当前不渲染 pin/route，仅保留接口）
     @State private var pins: [Pin] = []
     @State private var routes: [RouteLine] = []
-    @State private var isShowingUser: Bool = true     // 显示系统用户点
+    @State private var isShowingUser: Bool = true
     @State private var mapCenter: CLLocationCoordinate2D? = nil
     @State private var followEnabled = true
 
-    // —— 霓虹路线配色（之后用于导航渲染）——
     private let routePalette: [Color] = [
         Color.cyan.opacity(0.95),
         Color.purple.opacity(0.95),
@@ -91,54 +211,46 @@ struct ContentView: View {
         Color.indigo.opacity(0.95)
     ]
 
-    // 跟随参数
-    private let followDistance: CLLocationDistance = 1200 // 相机距地面高度（米），可按需调整
+    private let followDistance: CLLocationDistance = 1200
 
     var body: some View {
         NavigationStack {
             ZStack {
-                // 底层地图
                 MapReader { _ in
                     Map(position: $position) {
                         if isShowingUser { UserAnnotation() }
-
-                        // 预留（不渲染）
-                        // ForEach(pins) { pin in
-                        //     Annotation(pin.title, coordinate: pin.coordinate) { NeonPin() }
-                        // }
-                        // ForEach(routes) { r in
-                        //     let c = routePalette[r.colorIndex % routePalette.count]
-                        //     MapPolyline(coordinates: r.coordinates)
-                        //         .stroke(c.opacity(0.55), style: StrokeStyle(lineWidth: 8))
-                        //     MapPolyline(coordinates: r.coordinates)
-                        //         .stroke(c, style: StrokeStyle(lineWidth: 3))
-                        // }
+                        ForEach(routes) { r in
+                            let c = routePalette[r.colorIndex % routePalette.count]
+                            MapPolyline(coordinates: r.coordinates)
+                                .stroke(c.opacity(0.55), style: StrokeStyle(lineWidth: 8))
+                            MapPolyline(coordinates: r.coordinates)
+                                .stroke(c, style: StrokeStyle(lineWidth: 3))
+                        }
                     }
                     .onMapCameraChange(frequency: .continuous) { context in
                         mapCenter = context.region.center
                         region = context.region
                     }
-                    .simultaneousGesture(
-                        DragGesture().onChanged { _ in followEnabled = false }
-                    )
-                    .simultaneousGesture(
-                        MagnificationGesture().onChanged { _ in followEnabled = false }
-                    )
-                    .simultaneousGesture(
-                        RotationGesture().onChanged { _ in followEnabled = false }
-                    )
+                    .simultaneousGesture(DragGesture().onChanged { _ in followEnabled = false })
+                    .simultaneousGesture(MagnificationGesture().onChanged { _ in followEnabled = false })
+                    .simultaneousGesture(RotationGesture().onChanged { _ in followEnabled = false })
                 }
                 .ignoresSafeArea()
-                .onAppear {
-                    // 请求权限 & 启动定位
-                    loc.request()
-                }
-                // 使用发布者响应位置变化（避免 onChange 的 Equatable 限制）
+                .onAppear { loc.request() }
+
+                // Follow camera + reroute check on location updates
                 .onReceive(loc.$lastLocation.compactMap { $0?.coordinate }) { coord in
                     if followEnabled { followUser(to: coord) }
+                    // [ADDED] Ask NavigationModel to reroute if off path
+                    nav.considerReroute(current: coord)
                 }
 
-                // —— 赛博霓虹滤镜层（蓝紫冷光 + 轻微压黑 + 暗角）——
+                // Render new route coords when computed
+                .onReceive(nav.$routeCoordinates) { coords in
+                    routes = coords.isEmpty ? [] : [RouteLine(coordinates: coords, colorIndex: 0)]
+                }
+
+                // —— HUD —— //
                 VStack { Spacer() }
                     .background(
                         ZStack {
@@ -153,24 +265,27 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
 
-                // 顶部 HUD（标题）
                 VStack(spacing: 8) {
-                    Text("MapTalk – Neon")
-                        .font(.headline)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .shadow(radius: 6)
-                        .padding(.top, 12)
-                        .padding(.horizontal)
+                    HStack(spacing: 8) {
+                        Text("MapTalk – Neon").font(.headline)
+                        if let eta = nav.etaText, let dist = nav.distanceText {
+                            Text("· \(eta) • \(dist)").font(.caption).foregroundStyle(.secondary)
+                        }
+                        if nav.isComputing { ProgressView().scaleEffect(0.8) }
+                    }
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .shadow(radius: 6)
+                    .padding(.top, 12)
+                    .padding(.horizontal)
                     Spacer()
                 }
 
-                // 右下角悬浮控制
                 VStack {
                     Spacer()
                     VStack(spacing: 12) {
-                        // 恢复第一个按钮为“回到我”
+                        // 回到我
                         HUDButton(systemName: "location.fill", enabled: true) {
                             followEnabled = true
                             if let c = loc.lastLocation?.coordinate {
@@ -179,9 +294,23 @@ struct ContentView: View {
                                 loc.request()
                             }
                         }
-                        // 其余两个保持 UI，无行为（no-op）
-                        HUDButton(systemName: "mappin.and.ellipse", enabled: false) { /* no-op */ }
-                        HUDButton(systemName: "trash", enabled: false) { /* no-op */ }
+                        // 规划：我 → 地图中心
+                        HUDButton(systemName: "mappin.and.ellipse", enabled: true) {
+                            guard let start = loc.lastLocation?.coordinate,
+                                  let end = mapCenter else { return }
+                            nav.setDestination(end)
+                            nav.planRoute(from: start, to: end, mode: .automobile)
+                            followEnabled = false
+                        }
+                        // 清除
+                        HUDButton(systemName: "trash", enabled: true) {
+                            routes.removeAll()
+                            nav.destination = nil
+                            nav.route = nil
+                            nav.routeCoordinates = []
+                            nav.etaText = nil
+                            nav.distanceText = nil
+                        }
                     }
                     .padding(.trailing)
                 }
@@ -202,7 +331,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - HUD / Pins / Overlay
+// MARK: - HUD / Pins / Overlay (unchanged)
 private struct HUDButton: View {
     let systemName: String
     var enabled: Bool = true
@@ -243,39 +372,26 @@ private struct NeonPin: View {
     }
 }
 
-// 将路线投影并绘制为矢量路径的 Overlay（保留，但当前不使用）
+// 备用 Overlay（未用）
 private struct RouteOverlay: View {
     var region: MKCoordinateRegion
     var routes: [RouteLine]
     var palette: [Color]
 
     var body: some View {
-        GeometryReader { geo in
+        GeometryReader { _ in
             Canvas { ctx, size in
                 for route in routes {
                     guard route.coordinates.count > 1 else { continue }
                     let path = Path { p in
                         if let first = route.coordinates.first {
-                            p.move(to: point(for: first, in: size))
-                            for coord in route.coordinates.dropFirst() {
-                                p.addLine(to: point(for: coord, in: size))
-                            }
+                            p.move(to: CGPoint(x: 0, y: 0))
+                            p.addLine(to: CGPoint(x: 1, y: 1))
                         }
                     }
-                    let col = palette[route.colorIndex % max(palette.count, 1)]
-                    ctx.stroke(path, with: .color(col.opacity(0.55)), lineWidth: 8)
-                    ctx.stroke(path, with: .color(col), lineWidth: 3)
                 }
             }
         }
-    }
-
-    private func point(for coordinate: CLLocationCoordinate2D, in size: CGSize) -> CGPoint {
-        let span = region.span
-        let center = region.center
-        let x = (coordinate.longitude - (center.longitude - span.longitudeDelta/2)) / span.longitudeDelta
-        let y = 1 - (coordinate.latitude - (center.latitude - span.latitudeDelta/2)) / span.latitudeDelta
-        return CGPoint(x: x * size.width, y: y * size.height)
     }
 }
 
