@@ -15,6 +15,8 @@ final class LocationManager: NSObject, ObservableObject, CLLocationManagerDelega
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
         manager.distanceFilter = 5
+        manager.activityType = .automotiveNavigation
+        manager.pausesLocationUpdatesAutomatically = false
     }
 
     func request() {
