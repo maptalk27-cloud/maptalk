@@ -23,13 +23,6 @@ final class NavigationModel: ObservableObject {
 
     private var lastRerouteAt: Date?
 
-    private let formatter: MeasurementFormatter = {
-        let formatter = MeasurementFormatter()
-        formatter.unitOptions = .naturalScale
-        formatter.unitStyle = .medium
-        return formatter
-    }()
-
     func setDestination(_ coord: CLLocationCoordinate2D) {
         destination = coord
     }
@@ -74,9 +67,8 @@ final class NavigationModel: ObservableObject {
                 self.routeCoordinates = bestRoute.polyline.coordinates
                 let minutes = Int(ceil(bestRoute.expectedTravelTime / 60))
                 self.etaText = "\(minutes) min"
-                let measurement = Measurement(value: bestRoute.distance, unit: UnitLength.meters)
-                    .converted(to: .kilometers)
-                self.distanceText = self.formatter.string(from: measurement)
+                let miles = bestRoute.distance / 1_609.344
+                self.distanceText = String(format: "%.1f mi", miles)
             }
         }
     }

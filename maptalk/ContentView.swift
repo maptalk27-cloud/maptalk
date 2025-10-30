@@ -44,8 +44,9 @@ struct ContentView: View {
 
                 NeonOverlay()
 
-                VStack(spacing: 8) {
-                    NeonTripCard(
+                VStack(spacing: 14) {
+                    NeonTripCard()
+                    TripInfoBox(
                         etaText: nav.etaText,
                         distanceText: nav.distanceText,
                         isComputing: nav.isComputing
