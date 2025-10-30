@@ -46,13 +46,6 @@ struct ContentView: View {
 
                 VStack(spacing: 14) {
                     NeonTripCard()
-                    if nav.route != nil {
-                        TripInfoBox(
-                            etaText: nav.etaText,
-                            distanceText: nav.distanceText,
-                            isComputing: nav.isComputing
-                        )
-                    }
                     Spacer()
                 }
 
@@ -86,8 +79,24 @@ struct ContentView: View {
                     .padding(.trailing)
                 }
                 .frame(maxWidth: .infinity, alignment: .trailing)
+
+                if nav.route != nil {
+                    VStack {
+                        Spacer()
+                        TripInfoBox(
+                            etaText: nav.etaText,
+                            distanceText: nav.distanceText,
+                            isComputing: nav.isComputing
+                        )
+                        .padding(.horizontal)
+                        .padding(.bottom, 28)
+                        .padding(.trailing, 96)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
             }
             .navigationBarHidden(true)
+            .animation(.spring(response: 0.4, dampingFraction: 0.85), value: nav.route != nil)
         }
     }
 
