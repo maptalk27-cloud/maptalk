@@ -17,6 +17,13 @@ final class NavigationModel: ObservableObject {
     @Published var etaText: String?
     @Published var distanceText: String?
     @Published var isComputing = false
+    @Published var useNewMatcher: Bool = {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }()
 
     var mode: Mode = .automobile
     var offRouteToleranceMeters: CLLocationDistance = 28
