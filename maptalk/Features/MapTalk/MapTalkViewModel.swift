@@ -42,12 +42,28 @@ final class MapTalkViewModel: ObservableObject {
         PreviewData.user(for: id)
     }
 
+    func region(for real: RealPost) -> MKCoordinateRegion {
+        regionAround(
+            coordinate: real.center,
+            radiusMeters: real.radiusMeters,
+            minimumRadius: 3_500
+        )
+    }
+
     func focus(on real: RealPost) {
-        region = regionAround(coordinate: real.center, radiusMeters: real.radiusMeters)
+        region = region(for: real)
+    }
+
+    func region(for rated: RatedPOI) -> MKCoordinateRegion {
+        regionAround(
+            coordinate: rated.poi.coordinate,
+            radiusMeters: 650,
+            minimumRadius: 1_800
+        )
     }
 
     func focus(on rated: RatedPOI) {
-        region = regionAround(coordinate: rated.poi.coordinate, radiusMeters: 400)
+        region = region(for: rated)
     }
 
     private func bind() {
@@ -87,8 +103,12 @@ final class MapTalkViewModel: ObservableObject {
             .assign(to: &$reals)
     }
 
-    private func regionAround(coordinate: CLLocationCoordinate2D, radiusMeters: CLLocationDistance) -> MKCoordinateRegion {
-        let clampedRadius = max(radiusMeters, 200)
+    private func regionAround(
+        coordinate: CLLocationCoordinate2D,
+        radiusMeters: CLLocationDistance,
+        minimumRadius: CLLocationDistance = 200
+    ) -> MKCoordinateRegion {
+        let clampedRadius = max(radiusMeters, minimumRadius)
         return MKCoordinateRegion(
             center: coordinate,
             latitudinalMeters: clampedRadius * 2,
