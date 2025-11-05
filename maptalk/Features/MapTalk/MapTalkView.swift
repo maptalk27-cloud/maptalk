@@ -23,12 +23,11 @@ struct MapTalkView: View {
             selectedRealId = real.id
             if previousSelection == real.id {
                 pendingRegionCause = .other
-            } else if previousSelection == nil {
+            } else if previousSelection == nil && pendingRegionCause == .initial {
                 pendingRegionCause = .initial
             } else {
                 pendingRegionCause = .real
             }
-            viewModel.focus(on: real)
             let wasActive = activeExperience != nil
             if shouldPresent || wasActive {
                 activeExperience = .real(items: realItems, currentId: real.id)
@@ -53,7 +52,6 @@ struct MapTalkView: View {
                         } else {
                             pendingRegionCause = .poi
                         }
-                        viewModel.focus(on: rated)
                         activeExperience = .poi(rated)
                         experienceDetent = .fraction(0.25)
                     },
@@ -79,7 +77,11 @@ struct MapTalkView: View {
                     RealStoriesRow(
                         reals: sortedReals,
                         selectedId: selectedRealId,
-                        onSelect: updateSelection,
+                        onSelect: { real, shouldPresent in
+                            pendingRegionCause = .real
+                            updateSelection(real, shouldPresent)
+                            viewModel.focus(on: real)
+                        },
                         userProvider: viewModel.user(for:)
                     )
                 }
@@ -99,6 +101,8 @@ struct MapTalkView: View {
                             } else {
                                 pendingRegionCause = .user
                             }
+                            selectedRealId = nil
+                            activeExperience = nil
                             viewModel.centerOnUser()
                         },
                         onTapRating: {},
@@ -111,6 +115,7 @@ struct MapTalkView: View {
         }
         .sheet(item: $activeExperience, onDismiss: {
             experienceDetent = .fraction(0.25)
+            selectedRealId = nil
         }) { experience in
             let isExpanded = experienceDetent == .large
             Group {
@@ -127,7 +132,9 @@ struct MapTalkView: View {
                         get: { selectedRealId ?? context.currentId },
                         set: { newValue in
                             if let real = context.items.first(where: { $0.id == newValue })?.real {
+                                pendingRegionCause = .real
                                 updateSelection(real, false)
+                                viewModel.focus(on: real)
                             }
                         }
                     )
@@ -188,6 +195,17 @@ struct MapTalkView: View {
         }
 
         let travelDistance = existingRegion.center.distance(to: newRegion.center)
+
+        if existingRegion.contains(newRegion.center, insetFraction: 0.92) &&
+            newRegion.dominantSpanMeters <= existingRegion.dominantSpanMeters * 1.15 {
+            let preserved = MKCoordinateRegion(center: newRegion.center, span: existingRegion.span)
+            let duration = min(0.25 + (travelDistance / 180_000.0), 0.45)
+            withAnimation(smoothAnimation(duration: duration)) {
+                self.cameraPosition = .region(preserved)
+            }
+            self.currentRegion = preserved
+            return
+        }
 
         // Reduce Motion：直接/轻量过渡
         if UIAccessibility.isReduceMotionEnabled {
@@ -461,6 +479,17 @@ private extension MKCoordinateRegion {
         } else {
             return 1.9
         }
+    }
+
+    func contains(_ coordinate: CLLocationCoordinate2D, insetFraction: Double = 1.0) -> Bool {
+        let clampedFraction = max(0.0, min(1.0, insetFraction))
+        let latRadius = span.latitudeDelta * 0.5 * clampedFraction
+        let lonRadius = span.longitudeDelta * 0.5 * clampedFraction
+
+        let latDelta = coordinate.latitude - center.latitude
+        let lonDelta = coordinate.longitude - center.longitude
+
+        return abs(latDelta) <= latRadius && abs(lonDelta) <= lonRadius
     }
 }
 
