@@ -254,6 +254,56 @@ enum PreviewData {
             visibility: .publicAll,
             createdAt: .init().addingTimeInterval(-2400),
             expiresAt: .init().addingTimeInterval(18 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: sampleFriends[0].id,
+            center: .init(latitude: 48.8566, longitude: 2.3522),
+            radiusMeters: 650,
+            mediaType: "emoji:🥐",
+            visibility: .friendsOnly,
+            createdAt: .init().addingTimeInterval(-26_000),
+            expiresAt: .init().addingTimeInterval(22 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: sampleFriends[1].id,
+            center: .init(latitude: -33.8688, longitude: 151.2093),
+            radiusMeters: 820,
+            mediaType: "emoji:🌊",
+            visibility: .publicAll,
+            createdAt: .init().addingTimeInterval(-32_000),
+            expiresAt: .init().addingTimeInterval(15 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: sampleFriends[2].id,
+            center: .init(latitude: 35.6895, longitude: 139.6917),
+            radiusMeters: 540,
+            mediaType: "emoji:🎌",
+            visibility: .friendsOnly,
+            createdAt: .init().addingTimeInterval(-14_400),
+            expiresAt: .init().addingTimeInterval(28 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: sampleFriends[3].id,
+            center: .init(latitude: -23.5505, longitude: -46.6333),
+            radiusMeters: 780,
+            mediaType: "emoji:🎭",
+            visibility: .publicAll,
+            createdAt: .init().addingTimeInterval(-21_600),
+            expiresAt: .init().addingTimeInterval(26 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: currentUser.id,
+            center: .init(latitude: 55.7558, longitude: 37.6173),
+            radiusMeters: 620,
+            mediaType: "emoji:❄️",
+            visibility: .friendsOnly,
+            createdAt: .init().addingTimeInterval(-18_000),
+            expiresAt: .init().addingTimeInterval(30 * 3600)
         )
     ]
 

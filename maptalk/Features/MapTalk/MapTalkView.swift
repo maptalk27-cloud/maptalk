@@ -13,6 +13,7 @@ struct MapTalkView: View {
     @State private var currentRegion: MKCoordinateRegion?
     @State private var pendingRegionCause: RegionChangeCause = .initial
     @State private var activeTransitionID: UUID?
+    @State private var reelAlignTrigger: Int = 0
 
     var body: some View {
         let sortedReals = viewModel.reals.sorted { $0.createdAt < $1.createdAt }
@@ -82,7 +83,8 @@ struct MapTalkView: View {
                             updateSelection(real, shouldPresent)
                             viewModel.focus(on: real)
                         },
-                        userProvider: viewModel.user(for:)
+                        userProvider: viewModel.user(for:),
+                        alignTrigger: reelAlignTrigger
                     )
                 }
             }
@@ -135,6 +137,7 @@ struct MapTalkView: View {
                                 pendingRegionCause = .real
                                 updateSelection(real, false)
                                 viewModel.focus(on: real)
+                                reelAlignTrigger += 1
                             }
                         }
                     )

@@ -5,6 +5,7 @@ struct RealStoriesRow: View {
     let selectedId: UUID?
     let onSelect: (RealPost, Bool) -> Void
     let userProvider: (UUID) -> User?
+    let alignTrigger: Int
 
     private let spacing: CGFloat = 16
 
@@ -18,10 +19,7 @@ struct RealStoriesRow: View {
                     }
                 }
             }
-            .onAppear {
-                centerOnSelected(using: proxy, animated: false)
-            }
-            .onChange(of: selectedId) { _ in
+            .onChange(of: alignTrigger) { _ in
                 centerOnSelected(using: proxy, animated: true)
             }
         }
