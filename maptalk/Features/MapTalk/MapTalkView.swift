@@ -17,6 +17,8 @@ struct MapTalkView: View {
     var body: some View {
         let sortedReals = viewModel.reals.sorted { $0.createdAt < $1.createdAt }
         let realItems = sortedReals.map { ActiveExperience.RealItem(real: $0, user: viewModel.user(for: $0.userId)) }
+        let activeRegion = currentRegion ?? viewModel.region
+        let showCountryLabels = activeRegion.dominantSpanMeters > 2_000_000
 
         let updateSelection: (RealPost, Bool) -> Void = { real, shouldPresent in
             let previousSelection = selectedRealId
@@ -45,6 +47,7 @@ struct MapTalkView: View {
                     ratedPOIs: viewModel.ratedPOIs,
                     reals: viewModel.reals,
                     userCoordinate: viewModel.userCoordinate,
+                    showCountryLabels: showCountryLabels,
                     onSelectPOI: { rated in
                         let targetRegion = viewModel.region(for: rated)
                         if let region = currentRegion,
