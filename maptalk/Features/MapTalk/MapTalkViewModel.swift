@@ -38,6 +38,18 @@ final class MapTalkViewModel: ObservableObject {
         region = MKCoordinateRegion(center: location.coordinate, span: span)
     }
 
+    func user(for id: UUID) -> User? {
+        PreviewData.user(for: id)
+    }
+
+    func focus(on real: RealPost) {
+        region = regionAround(coordinate: real.center, radiusMeters: real.radiusMeters)
+    }
+
+    func focus(on rated: RatedPOI) {
+        region = regionAround(coordinate: rated.poi.coordinate, radiusMeters: 400)
+    }
+
     private func bind() {
         let coordinateStream = environment.location.location
             .compactMap { $0?.coordinate }
@@ -73,5 +85,14 @@ final class MapTalkViewModel: ObservableObject {
             .active(in: nil)
             .receive(on: DispatchQueue.main)
             .assign(to: &$reals)
+    }
+
+    private func regionAround(coordinate: CLLocationCoordinate2D, radiusMeters: CLLocationDistance) -> MKCoordinateRegion {
+        let clampedRadius = max(radiusMeters, 200)
+        return MKCoordinateRegion(
+            center: coordinate,
+            latitudinalMeters: clampedRadius * 2,
+            longitudinalMeters: clampedRadius * 2
+        )
     }
 }

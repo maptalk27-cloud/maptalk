@@ -5,12 +5,18 @@ struct MapOverlays: MapContent {
     let ratedPOIs: [RatedPOI]
     let reals: [RealPost]
     let userCoordinate: CLLocationCoordinate2D?
+    let onSelectPOI: (RatedPOI) -> Void
+    let onSelectReal: (RealPost) -> Void
 
     var body: some MapContent {
         ForEach(ratedPOIs) { rated in
             Annotation("", coordinate: rated.poi.coordinate) {
-                POICategoryMarker(category: rated.poi.category, count: rated.ratingCount)
-                    .allowsHitTesting(false)
+                Button {
+                    onSelectPOI(rated)
+                } label: {
+                    POICategoryMarker(category: rated.poi.category, count: rated.ratingCount)
+                }
+                .buttonStyle(.plain)
             }
         }
         ForEach(reals) { real in
@@ -21,8 +27,12 @@ struct MapOverlays: MapContent {
         }
         ForEach(reals) { real in
             Annotation("", coordinate: real.center) {
-                RealAvatarMarker(user: PreviewData.user(for: real.userId))
-                    .allowsHitTesting(false)
+                Button {
+                    onSelectReal(real)
+                } label: {
+                    RealAvatarMarker(user: PreviewData.user(for: real.userId))
+                }
+                .buttonStyle(.plain)
             }
         }
         if let userCoordinate {

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 enum POICategory: String, CaseIterable, Codable {
     case viewpoint
@@ -39,6 +40,23 @@ enum POICategory: String, CaseIterable, Codable {
             return "paintpalette.fill"
         case .market:
             return "cart.fill"
+        }
+    }
+
+    var accentColor: Color {
+        switch self {
+        case .viewpoint:
+            return Theme.neonPrimary
+        case .restaurant:
+            return .orange
+        case .coffee:
+            return .brown
+        case .nightlife:
+            return Theme.neonAccent
+        case .art:
+            return Theme.neonWarning
+        case .market:
+            return .teal
         }
     }
 }
