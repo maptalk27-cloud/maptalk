@@ -68,15 +68,6 @@ struct MapTalkView: View {
 
             VStack {
                 Spacer()
-                if sortedReals.isEmpty == false {
-                    RealInfoCardCarousel(
-                        reals: sortedReals,
-                        selectedId: selectedRealId,
-                        onSelect: presentReal,
-                        userProvider: viewModel.user(for:)
-                    )
-                    .padding(.bottom, 12)
-                }
                 HStack {
                     Spacer()
                     MapTalkControls(
