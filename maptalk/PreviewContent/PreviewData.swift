@@ -209,6 +209,36 @@ enum PreviewData {
             visibility: .anonymous,
             createdAt: .init().addingTimeInterval(-10800),
             expiresAt: .init().addingTimeInterval(12 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: sampleFriends[2].id,
+            center: .init(latitude: 47.6062, longitude: -122.3321),
+            radiusMeters: 450,
+            mediaType: "emoji:🍸",
+            visibility: .friendsOnly,
+            createdAt: .init().addingTimeInterval(-7200),
+            expiresAt: .init().addingTimeInterval(10 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: sampleFriends[0].id,
+            center: .init(latitude: 47.5952, longitude: -122.3316),
+            radiusMeters: 520,
+            mediaType: "emoji:🎨",
+            visibility: .publicAll,
+            createdAt: .init().addingTimeInterval(-14400),
+            expiresAt: .init().addingTimeInterval(16 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: currentUser.id,
+            center: .init(latitude: 47.625, longitude: -122.35),
+            radiusMeters: 700,
+            mediaType: "emoji:🎇",
+            visibility: .friendsOnly,
+            createdAt: .init().addingTimeInterval(-18000),
+            expiresAt: .init().addingTimeInterval(20 * 3600)
         )
     ]
 

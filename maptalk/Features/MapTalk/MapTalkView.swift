@@ -15,10 +15,11 @@ struct MapTalkView: View {
         let updateSelection: (RealPost, Bool) -> Void = { real, shouldPresent in
             selectedRealId = real.id
             viewModel.focus(on: real)
-            if shouldPresent || activeExperience != nil {
+            let wasActive = activeExperience != nil
+            if shouldPresent || wasActive {
                 activeExperience = .real(items: realItems, currentId: real.id)
             }
-            if shouldPresent {
+            if shouldPresent && wasActive == false {
                 experienceDetent = .fraction(0.25)
             }
         }
@@ -53,17 +54,17 @@ struct MapTalkView: View {
                     )
                 )
                 .frame(maxWidth: .infinity)
+                .padding(.horizontal, 16)
 
                 if sortedReals.isEmpty == false {
                     RealStoriesRow(
                         reals: sortedReals,
                         selectedId: selectedRealId,
-                        onSelect: presentReal,
+                        onSelect: updateSelection,
                         userProvider: viewModel.user(for:)
                     )
                 }
             }
-            .padding(.horizontal, 16)
             .padding(.top, 16)
 
             VStack {
@@ -109,6 +110,7 @@ struct MapTalkView: View {
             }
             .presentationDetents([.fraction(0.25), .large], selection: $experienceDetent)
             .presentationBackground(.thinMaterial)
+            .applyBackgroundInteractionIfAvailable()
         }
         .onAppear {
             cameraPosition = .region(viewModel.region)
@@ -156,6 +158,8 @@ private enum ActiveExperience: Identifiable {
     case real(items: [RealItem], currentId: UUID)
     case poi(RatedPOI)
 
+    private static let realSheetID = UUID()
+
     struct RealItem: Identifiable {
         let real: RealPost
         let user: User?
@@ -165,10 +169,21 @@ private enum ActiveExperience: Identifiable {
 
     var id: UUID {
         switch self {
-        case let .real(_, currentId):
-            return currentId
+        case .real:
+            return Self.realSheetID
         case let .poi(rated):
             return rated.poi.id
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func applyBackgroundInteractionIfAvailable() -> some View {
+        if #available(iOS 17.0, *) {
+            presentationBackgroundInteraction(.enabled)
+        } else {
+            self
         }
     }
 }

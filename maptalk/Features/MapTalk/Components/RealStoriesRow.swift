@@ -3,113 +3,79 @@ import SwiftUI
 struct RealStoriesRow: View {
     let reals: [RealPost]
     let selectedId: UUID?
-    let onSelect: (RealPost) -> Void
+    let onSelect: (RealPost, Bool) -> Void
     let userProvider: (UUID) -> User?
 
-    @GestureState private var dragOffset: CGFloat = 0
-
-    private let itemWidth: CGFloat = 72
     private let spacing: CGFloat = 16
 
     var body: some View {
-        GeometryReader { geometry in
-            let availableWidth = geometry.size.width
-            let items = carouselItems()
-            let selectedIndex = currentSelectedIndex
-            let springAnimation: Animation = .interactiveSpring(response: 0.32, dampingFraction: 0.82)
-            let baseOffset = carouselOffset(containerWidth: availableWidth, selectedIndex: selectedIndex)
-
-            HStack(spacing: spacing) {
-                ForEach(items) { item in
-                    reelButton(for: item, isSelected: item.index == selectedIndex, springAnimation: springAnimation)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: spacing) {
+                    ForEach(reals, id: \.id) { real in
+                        reelButton(for: real, isSelected: selectedId == real.id)
+                            .id(real.id)
+                    }
                 }
             }
-            .frame(width: availableWidth, alignment: .leading)
-            .offset(x: baseOffset + dragOffset)
-            .animation(.interactiveSpring(response: 0.42, dampingFraction: 0.82), value: selectedId)
-            .gesture(
-                DragGesture(minimumDistance: 8)
-                    .updating($dragOffset) { value, state, _ in
-                        guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                        state = value.translation.width
-                    }
-                    .onEnded { value in
-                        handleDragEnd(value.translation.width, currentIndex: selectedIndex)
-                    }
-            )
+            .onAppear {
+                centerOnSelected(using: proxy, animated: false)
+            }
+            .onChange(of: selectedId) { _ in
+                centerOnSelected(using: proxy, animated: true)
+            }
         }
         .frame(height: 108)
     }
 
-    private func carouselItems() -> [CarouselItem] {
-        reals.enumerated().map { index, real in
-            CarouselItem(index: index, real: real, user: userProvider(real.userId))
-        }
-    }
-
-    private func reelButton(for item: CarouselItem, isSelected: Bool, springAnimation: Animation) -> some View {
+    private func reelButton(for real: RealPost, isSelected: Bool) -> some View {
+        let user = userProvider(real.userId)
         return Button {
-            select(index: item.index)
+            onSelect(real, true)
         } label: {
             VStack(spacing: 6) {
                 RealStoryBadge(
-                    user: item.user,
+                    user: user,
                     isSelected: isSelected
                 )
-                Text(item.user?.handle ?? "you")
+                Text(user?.handle ?? "you")
                     .font(.caption2.bold())
                     .foregroundStyle(.white)
                     .lineLimit(1)
             }
-            .frame(width: itemWidth)
+            .frame(width: 72)
             .scaleEffect(isSelected ? 1.08 : 1.0)
             .opacity(isSelected ? 1 : 0.82)
-            .animation(springAnimation, value: isSelected)
+            .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: isSelected)
         }
         .buttonStyle(.plain)
     }
 
-    private func carouselOffset(containerWidth: CGFloat, selectedIndex: Int) -> CGFloat {
-        guard reals.isEmpty == false else { return 0 }
-        let base = containerWidth / 2 - itemWidth / 2
-        let step = itemWidth + spacing
-        return base - CGFloat(selectedIndex) * step
-    }
-
-    private func handleDragEnd(_ translation: CGFloat, currentIndex: Int) {
-        let threshold = itemWidth * 0.35
-        var newIndex = currentIndex
-
-        if translation <= -threshold {
-            newIndex = min(currentIndex + 1, reals.count - 1)
-        } else if translation >= threshold {
-            newIndex = max(currentIndex - 1, 0)
+    private func centerOnSelected(using proxy: ScrollViewProxy, animated: Bool) {
+        guard let id = selectedId else { return }
+        let anchor = anchorPoint(for: id)
+        let action = {
+            proxy.scrollTo(id, anchor: anchor)
         }
-
-        select(index: newIndex)
-    }
-
-    private func select(index: Int) {
-        guard reals.indices.contains(index) else { return }
-        onSelect(reals[index])
-    }
-
-    private var currentSelectedIndex: Int {
-        guard
-            let selectedId,
-            let index = reals.firstIndex(where: { $0.id == selectedId })
-        else {
-            return 0
+        if animated {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                action()
+            }
+        } else {
+            action()
         }
-        return index
     }
 
-    private struct CarouselItem: Identifiable {
-        let index: Int
-        let real: RealPost
-        let user: User?
-
-        var id: UUID { real.id }
+    private func anchorPoint(for id: UUID) -> UnitPoint {
+        guard let index = reals.firstIndex(where: { $0.id == id }) else {
+            return .center
+        }
+        if index == 0 {
+            return .leading
+        } else if index == reals.count - 1 {
+            return .trailing
+        }
+        return .center
     }
 }
 
