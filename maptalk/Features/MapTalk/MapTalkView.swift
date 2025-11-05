@@ -219,59 +219,32 @@ struct MapTalkView: View {
         case .initial, .other:
             return .direct
 
-        case .user:
-            let baseSpan = max(current.dominantSpanMeters, target.dominantSpanMeters)
-            if travelDistance > 240_000 {
-                let zoomDistance = clamp(travelDistance * 1.9, lower: 1_000_000, upper: 2_800_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
-            } else if travelDistance > 110_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.6, baseSpan * 3.4), lower: 240_000, upper: 960_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
-            } else if travelDistance > 40_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.35, baseSpan * 2.4), lower: 70_000, upper: 200_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .subtle)
-            } else if travelDistance > 12_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.2, baseSpan * 1.7), lower: 35_000, upper: 120_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .subtle)
-            } else {
-                return .direct
-            }
+        case .user, .poi, .real:
+            return stagedPlan(
+                for: travelDistance,
+                baseSpan: max(current.dominantSpanMeters, target.dominantSpanMeters)
+            )
+        }
+    }
 
-        case .poi:
-            let baseSpan = max(current.dominantSpanMeters, target.dominantSpanMeters)
-            if travelDistance > 260_000 {
-                let zoomDistance = clamp(travelDistance * 2.0, lower: 1_200_000, upper: 3_600_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
-            } else if travelDistance > 140_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.7, baseSpan * 3.6), lower: 320_000, upper: 1_400_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
-            } else if travelDistance > 55_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.45, baseSpan * 2.8), lower: 85_000, upper: 220_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .subtle)
-            } else if travelDistance > 12_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.3, baseSpan * 2.1), lower: 40_000, upper: 120_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .subtle)
-            } else {
-                return .direct
-            }
-
-        case .real:
-            let baseSpan = max(current.dominantSpanMeters, target.dominantSpanMeters)
-            if travelDistance > 280_000 {
-                let zoomDistance = clamp(travelDistance * 2.0, lower: 1_600_000, upper: 4_000_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
-            } else if travelDistance > 120_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.7, baseSpan * 4.2), lower: 320_000, upper: 1_600_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
-            } else if travelDistance > 45_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.45, baseSpan * 3.0), lower: 90_000, upper: 320_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .subtle)
-            } else if travelDistance > 10_000 {
-                let zoomDistance = clamp(max(travelDistance * 1.30, baseSpan * 2.2), lower: 35_000, upper: 110_000)
-                return .staged(zoomDistance: zoomDistance, tempo: .subtle)
-            } else {
-                return .direct
-            }
+    private func stagedPlan(
+        for travelDistance: CLLocationDistance,
+        baseSpan: CLLocationDistance
+    ) -> TransitionPlan {
+        if travelDistance > 280_000 {
+            let zoomDistance = clamp(travelDistance * 8, lower: 1_800_000, upper: 40_000_000)
+            return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
+        } else if travelDistance > 120_000 {
+            let zoomDistance = clamp(max(travelDistance * 1.7, baseSpan * 4.2), lower: 320_000, upper: 1_600_000)
+            return .staged(zoomDistance: zoomDistance, tempo: .cinematic)
+        } else if travelDistance > 55_000 {
+            let zoomDistance = clamp(max(travelDistance * 1.45, baseSpan * 2.8), lower: 85_000, upper: 220_000)
+            return .staged(zoomDistance: zoomDistance, tempo: .subtle)
+        } else if travelDistance > 12_000 {
+            let zoomDistance = clamp(max(travelDistance * 1.30, baseSpan * 2.1), lower: 40_000, upper: 120_000)
+            return .staged(zoomDistance: zoomDistance, tempo: .subtle)
+        } else {
+            return .direct
         }
     }
 
@@ -313,8 +286,8 @@ struct MapTalkView: View {
         let durations = tempo.durations
         let liftFraction = tempo == .cinematic ? 0.38 : 0.26
         let liftCenter = current.center.interpolated(to: target.center, fraction: liftFraction)
-        let liftPitch: CGFloat = tempo == .cinematic ? 6 : 0
-        let cruisePitch: CGFloat = tempo == .cinematic ? 18 : 0
+        let liftPitch: CGFloat = tempo == .cinematic ? 36 : 0
+        let cruisePitch: CGFloat = tempo == .cinematic ? 36 : 0
 
         // Stage 1: 抬升（同时轻移向目标方向）
         withAnimation(smoothAnimation(duration: durations.zoomOut)) {
@@ -360,15 +333,9 @@ struct MapTalkView: View {
     ) {
         DispatchQueue.main.asyncAfter(deadline: .now() + cruiseDuration) {
             guard self.activeTransitionID == id else { return }
-            let hold = prefetchHoldDuration(for: travelDistance, base: durations.prefetchHold)
-            if hold > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
-                    guard self.activeTransitionID == id else { return }
-                    self.completeDive(to: target, with: durations.zoomIn, transitionID: id)
-                }
-            } else {
-                self.completeDive(to: target, with: durations.zoomIn, transitionID: id)
-            }
+            
+            self.completeDive(to: target, with: durations.zoomIn, transitionID: id)
+            
         }
     }
 
@@ -386,10 +353,6 @@ struct MapTalkView: View {
         }
     }
 
-    private func prefetchHoldDuration(for distance: CLLocationDistance, base: Double) -> Double {
-        let extra = min(distance / 2_000_000.0, 0.6) // 0~0.6s
-        return base + extra
-    }
 
     /// 将 Region 收敛到城市级（20km ~ 60km 之间）
     private func cityClamp(_ region: MKCoordinateRegion) -> MKCoordinateRegion {
@@ -422,7 +385,7 @@ private enum TransitionTempo {
         case .subtle:
             return (0.2, 0.36, 0.08, 0.28)
         case .cinematic:
-            return (0.6, 1.3, 0.55, 0.48)
+            return (1.5, 1.5, 0.02, 0.2)
         }
     }
 }

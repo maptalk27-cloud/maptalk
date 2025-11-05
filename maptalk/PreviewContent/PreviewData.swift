@@ -23,6 +23,11 @@ enum PreviewData {
             id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE4") ?? UUID(),
             handle: "skyline.runner",
             avatarURL: URL(string: "https://images.unsplash.com/photo-1504593811423-6dd665756598?auto=format&fit=crop&w=200&q=60")
+        ),
+        .init(
+            id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE5") ?? UUID(),
+            handle: "bund.wanderer",
+            avatarURL: URL(string: "https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=200&q=60")
         )
     ]
 
@@ -239,6 +244,16 @@ enum PreviewData {
             visibility: .friendsOnly,
             createdAt: .init().addingTimeInterval(-18000),
             expiresAt: .init().addingTimeInterval(20 * 3600)
+        ),
+        .init(
+            id: .init(),
+            userId: sampleFriends[3].id,
+            center: .init(latitude: 31.2304, longitude: 121.4737),
+            radiusMeters: 900,
+            mediaType: "emoji:🧨",
+            visibility: .publicAll,
+            createdAt: .init().addingTimeInterval(-2400),
+            expiresAt: .init().addingTimeInterval(18 * 3600)
         )
     ]
 
