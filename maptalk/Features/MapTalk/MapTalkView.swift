@@ -14,168 +14,205 @@ struct MapTalkView: View {
     @State private var pendingRegionCause: RegionChangeCause = .initial
     @State private var activeTransitionID: UUID?
     @State private var reelAlignTrigger: Int = 0
+    @State private var controlsBottomPadding: CGFloat = 0
 
     var body: some View {
-        let sortedReals = viewModel.reals.sorted { $0.createdAt < $1.createdAt }
-        let realItems = sortedReals.map { ActiveExperience.RealItem(real: $0, user: viewModel.user(for: $0.userId)) }
+        GeometryReader { geometry in
+            let sortedReals = viewModel.reals.sorted { $0.createdAt < $1.createdAt }
+            let realItems = sortedReals.map { ActiveExperience.RealItem(real: $0, user: viewModel.user(for: $0.userId)) }
+            let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
+            let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
 
-        let updateSelection: (RealPost, Bool) -> Void = { real, shouldPresent in
-            let previousSelection = selectedRealId
-            selectedRealId = real.id
-            if previousSelection == real.id {
-                pendingRegionCause = .other
-            } else if previousSelection == nil && pendingRegionCause == .initial {
-                pendingRegionCause = .initial
-            } else {
-                pendingRegionCause = .real
-            }
-            let wasActive = activeExperience != nil
-            if shouldPresent || wasActive {
-                activeExperience = .real(items: realItems, currentId: real.id)
-            }
-            if shouldPresent && wasActive == false {
-                experienceDetent = .fraction(0.25)
-            }
-        }
-        let presentReal: (RealPost) -> Void = { real in updateSelection(real, true) }
-
-        ZStack(alignment: .top) {
-            Map(position: $cameraPosition, interactionModes: .all) {
-                MapOverlays(
-                    ratedPOIs: viewModel.ratedPOIs,
-                    reals: viewModel.reals,
-                    userCoordinate: viewModel.userCoordinate,
-                    onSelectPOI: { rated in
-                        let targetRegion = viewModel.region(for: rated)
-                        if let region = currentRegion,
-                           region.center.distance(to: targetRegion.center) < 1_000 {
-                            pendingRegionCause = .other
-                        } else {
-                            pendingRegionCause = .poi
-                        }
-                        activeExperience = .poi(rated)
-                        experienceDetent = .fraction(0.25)
-                    },
-                    onSelectReal: { real in
-                        presentReal(real)
-                    }
-                )
-            }
-            .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 14) {
-                SegmentedControl(
-                    options: ["World", "Friends"],
-                    selection: Binding(
-                        get: { viewModel.mode.rawValue },
-                        set: { viewModel.mode = .init(index: $0) }
-                    )
-                )
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 16)
-
-                if sortedReals.isEmpty == false {
-                    RealStoriesRow(
-                        reals: sortedReals,
-                        selectedId: selectedRealId,
-                        onSelect: { real, shouldPresent in
-                            pendingRegionCause = .real
-                            updateSelection(real, shouldPresent)
-                            viewModel.focus(on: real)
-                        },
-                        userProvider: viewModel.user(for:),
-                        alignTrigger: reelAlignTrigger
-                    )
+            let updateSelection: (RealPost, Bool) -> Void = { real, shouldPresent in
+                let previousSelection = selectedRealId
+                selectedRealId = real.id
+                if previousSelection == real.id {
+                    pendingRegionCause = .other
+                } else if previousSelection == nil && pendingRegionCause == .initial {
+                    pendingRegionCause = .initial
+                } else {
+                    pendingRegionCause = .real
+                }
+                let wasActive = activeExperience != nil
+                if shouldPresent || wasActive {
+                    activeExperience = .real(items: realItems, currentId: real.id)
+                }
+                if shouldPresent && wasActive == false {
+                    experienceDetent = .fraction(0.25)
                 }
             }
-            .padding(.top, 16)
+            let presentReal: (RealPost) -> Void = { real in updateSelection(real, true) }
 
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    MapTalkControls(
-                        onTapLocate: {
+            ZStack(alignment: .top) {
+                Map(position: $cameraPosition, interactionModes: .all) {
+                    MapOverlays(
+                        ratedPOIs: viewModel.ratedPOIs,
+                        reals: viewModel.reals,
+                        userCoordinate: viewModel.userCoordinate,
+                        onSelectPOI: { rated in
+                            let targetRegion = viewModel.region(for: rated)
                             if let region = currentRegion,
-                               let coordinate = viewModel.userCoordinate,
-                               region.center.distance(to: coordinate) < 500 {
+                               region.center.distance(to: targetRegion.center) < 1_000 {
                                 pendingRegionCause = .other
                             } else {
-                                pendingRegionCause = .user
+                                pendingRegionCause = .poi
                             }
-                            selectedRealId = nil
-                            activeExperience = nil
-                            viewModel.centerOnUser()
+                            activeExperience = .poi(rated)
+                            experienceDetent = .fraction(0.25)
                         },
-                        onTapRating: {},
-                        onTapReal: {}
-                    )
-                }
-                .padding(.trailing, 20)
-                .padding(.bottom, 24)
-            }
-        }
-        .sheet(item: $activeExperience, onDismiss: {
-            experienceDetent = .fraction(0.25)
-            selectedRealId = nil
-        }) { experience in
-            let isExpanded = experienceDetent == .large
-            Group {
-                switch experience {
-                case let .real(context):
-                    let pagerItems = context.items.map { item in
-                        ExperienceDetailView.ReelPager.Item(real: item.real, user: item.user)
-                    }
-                    let pager = ExperienceDetailView.ReelPager(
-                        items: pagerItems,
-                        initialId: context.currentId
-                    )
-                    let selectionBinding = Binding<UUID>(
-                        get: { selectedRealId ?? context.currentId },
-                        set: { newValue in
-                            if let real = context.items.first(where: { $0.id == newValue })?.real {
-                                pendingRegionCause = .real
-                                updateSelection(real, false)
-                                viewModel.focus(on: real)
-                                reelAlignTrigger += 1
-                            }
+                        onSelectReal: { real in
+                            presentReal(real)
                         }
                     )
-                    ExperienceDetailView(reelPager: pager, selection: selectionBinding, isExpanded: isExpanded)
-                case let .poi(rated):
-                    ExperienceDetailView(ratedPOI: rated, isExpanded: isExpanded)
+                }
+                .ignoresSafeArea()
+
+                VStack(alignment: .leading, spacing: 14) {
+                    SegmentedControl(
+                        options: ["World", "Friends"],
+                        selection: Binding(
+                            get: { viewModel.mode.rawValue },
+                            set: { viewModel.mode = .init(index: $0) }
+                        )
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+
+                    if sortedReals.isEmpty == false {
+                        RealStoriesRow(
+                            reals: sortedReals,
+                            selectedId: selectedRealId,
+                            onSelect: { real, shouldPresent in
+                                pendingRegionCause = .real
+                                updateSelection(real, shouldPresent)
+                                viewModel.focus(on: real)
+                            },
+                            userProvider: viewModel.user(for:),
+                            alignTrigger: reelAlignTrigger
+                        )
+                    }
+                }
+                .padding(.top, 16)
+
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        MapTalkControls(
+                            onTapLocate: {
+                                if let region = currentRegion,
+                                   let coordinate = viewModel.userCoordinate,
+                                   region.center.distance(to: coordinate) < 500 {
+                                    pendingRegionCause = .other
+                                } else {
+                                    pendingRegionCause = .user
+                                }
+                                selectedRealId = nil
+                                activeExperience = nil
+                                viewModel.centerOnUser()
+                            },
+                            onTapRating: {},
+                            onTapReal: {}
+                        )
+                    }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, controlsBottomPadding)
                 }
             }
-            .presentationDetents([.fraction(0.25), .large], selection: $experienceDetent)
-            .presentationBackground(.thinMaterial)
-            .applyBackgroundInteractionIfAvailable()
-        }
-        .onAppear {
-            WorldBasemapPrefetcher.shared.prefetchGlobalBasemapIfNeeded()
-            let initialRegion = viewModel.region
-            cameraPosition = .region(initialRegion)
-            currentRegion = initialRegion
-            pendingRegionCause = .initial
-            viewModel.onAppear()
-            if selectedRealId == nil, let first = sortedReals.first {
-                updateSelection(first, false)
-            }
-        }
-        .onReceive(viewModel.$region.dropFirst()) { newRegion in
-            handleRegionChange(to: newRegion)
-        }
-        .onChange(of: sortedReals.map(\.id)) { _ in
-            if sortedReals.isEmpty {
+            .sheet(item: $activeExperience, onDismiss: {
+                experienceDetent = .fraction(0.25)
                 selectedRealId = nil
-                activeExperience = nil
-                return
+            }) { experience in
+                let isExpanded = experienceDetent == .large
+                Group {
+                    switch experience {
+                    case let .real(context):
+                        let pagerItems = context.items.map { item in
+                            ExperienceDetailView.ReelPager.Item(real: item.real, user: item.user)
+                        }
+                        let pager = ExperienceDetailView.ReelPager(
+                            items: pagerItems,
+                            initialId: context.currentId
+                        )
+                        let selectionBinding = Binding<UUID>(
+                            get: { selectedRealId ?? context.currentId },
+                            set: { newValue in
+                                if let real = context.items.first(where: { $0.id == newValue })?.real {
+                                    pendingRegionCause = .real
+                                    updateSelection(real, false)
+                                    viewModel.focus(on: real)
+                                    reelAlignTrigger += 1
+                                }
+                            }
+                        )
+                        ExperienceDetailView(reelPager: pager, selection: selectionBinding, isExpanded: isExpanded)
+                    case let .poi(rated):
+                        ExperienceDetailView(ratedPOI: rated, isExpanded: isExpanded)
+                    }
+                }
+                .presentationDetents([.fraction(0.25), .large], selection: $experienceDetent)
+                .presentationBackground(.thinMaterial)
+                .applyBackgroundInteractionIfAvailable()
             }
-            if let currentId = selectedRealId,
-               sortedReals.contains(where: { $0.id == currentId }) == false {
-                selectedRealId = nil
+            .onAppear {
+                WorldBasemapPrefetcher.shared.prefetchGlobalBasemapIfNeeded()
+                let initialRegion = viewModel.region
+                cameraPosition = .region(initialRegion)
+                currentRegion = initialRegion
+                pendingRegionCause = .initial
+                viewModel.onAppear()
+                controlsBottomPadding = baseControlsPadding
+                if selectedRealId == nil, let first = sortedReals.first {
+                    updateSelection(first, false)
+                }
             }
-            if selectedRealId == nil, let first = sortedReals.first {
-                updateSelection(first, false)
+            .onReceive(viewModel.$region.dropFirst()) { newRegion in
+                handleRegionChange(to: newRegion)
+            }
+            .onChange(of: sortedReals.map(\.id)) { _ in
+                if sortedReals.isEmpty {
+                    selectedRealId = nil
+                    activeExperience = nil
+                    return
+                }
+                if let currentId = selectedRealId,
+                   sortedReals.contains(where: { $0.id == currentId }) == false {
+                    selectedRealId = nil
+                }
+                if selectedRealId == nil, let first = sortedReals.first {
+                    updateSelection(first, false)
+                }
+            }
+            .onChange(of: activeExperience != nil) { isActive in
+                let target = isActive ? previewControlsPadding : baseControlsPadding
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                    controlsBottomPadding = target
+                }
+            }
+            .onChange(of: experienceDetent) { detent in
+                if detent == .fraction(0.25), activeExperience != nil {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                        controlsBottomPadding = previewControlsPadding
+                    }
+                } else if activeExperience == nil {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
+                        controlsBottomPadding = baseControlsPadding
+                    }
+                }
+            }
+            .onChange(of: geometry.size) { _ in
+                let recalculatedBase = ControlsLayout.basePadding(for: geometry)
+                let recalculatedPreview = ControlsLayout.previewPadding(for: geometry)
+                let isElevated = controlsBottomPadding > recalculatedBase + 1
+                controlsBottomPadding = isElevated ? recalculatedPreview : recalculatedBase
+            }
+            .onChange(of: baseControlsPadding) { newValue in
+                guard activeExperience == nil else { return }
+                controlsBottomPadding = newValue
+            }
+            .onChange(of: previewControlsPadding) { newValue in
+                guard activeExperience != nil else { return }
+                controlsBottomPadding = newValue
             }
         }
     }
@@ -541,5 +578,20 @@ private extension View {
         } else {
             self
         }
+    }
+}
+
+private enum ControlsLayout {
+    static let baseInset: CGFloat = 0.2
+    static let baseSafeAreaMultiplier: CGFloat = 0.2
+    static let previewGap: CGFloat = 1
+    static let previewFraction: CGFloat = 0.2
+
+    static func basePadding(for geometry: GeometryProxy) -> CGFloat {
+        geometry.safeAreaInsets.bottom * baseSafeAreaMultiplier + baseInset
+    }
+
+    static func previewPadding(for geometry: GeometryProxy) -> CGFloat {
+        basePadding(for: geometry) + geometry.size.height * previewFraction + previewGap
     }
 }
