@@ -8,11 +8,25 @@ struct RealPost: Identifiable, Hashable {
         case anonymous
     }
 
+    enum Media: Hashable {
+        case none
+        case photo(URL)
+        case video(url: URL, poster: URL?)
+        case emoji(String)
+    }
+
+    struct Metrics: Hashable {
+        var likeCount: Int
+        var commentCount: Int
+    }
+
     let id: UUID
     let userId: UUID
     var center: CLLocationCoordinate2D
     var radiusMeters: CLLocationDistance
-    var mediaType: String
+    var message: String?
+    var media: Media
+    var metrics: Metrics
     var visibility: Visibility
     var createdAt: Date
     var expiresAt: Date

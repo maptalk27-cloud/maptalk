@@ -134,7 +134,8 @@ private extension ExperienceDetailView {
                             .multilineTextAlignment(.center)
                     }
 
-                    if let highlight = data.highlight {
+                    let previewHighlight = data.highlight ?? data.media.previewText
+                    if let highlight = previewHighlight {
                         Text(highlight)
                             .font(.caption.bold())
                             .foregroundStyle(.white)
@@ -187,8 +188,9 @@ private extension ExperienceDetailView {
             let accent = accentColor(for: real.visibility)
             let gradient = gradient(for: real.visibility)
             let badges = makeRealBadges(for: real)
-            let highlight = real.mediaType.emojiPayload.map { "\($0) Live moment happening here." }
-            let secondary = "Visibility • \(real.visibility.displayName)"
+            let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let highlight = highlightText(for: real, message: message)
+            let secondary = secondaryText(for: real)
             let media = media(for: real)
             let mapRegion = MKCoordinateRegion(
                 center: real.center,
@@ -240,13 +242,62 @@ private extension ExperienceDetailView {
     }
 
     func media(for real: RealPost) -> ExperienceMedia {
-        if let emoji = real.mediaType.emojiPayload {
+        switch real.media {
+        case let .emoji(emoji):
             return .emoji(emoji)
-        }
-        if let url = URL(string: real.mediaType), real.mediaType.isEmpty == false {
+        case let .photo(url):
             return .image(url)
+        case let .video(url, poster):
+            return .video(url: url, poster: poster)
+        case .none:
+            if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+               message.isEmpty == false {
+                return .text(message)
+            }
+            return .symbol("sparkles")
         }
-        return .symbol("sparkles")
+    }
+
+    func highlightText(for real: RealPost, message: String?) -> String? {
+        if let message, message.isEmpty == false {
+            if case .none = real.media {
+                return nil
+            }
+            return message
+        }
+        if case let .emoji(emoji) = real.media {
+            return "\(emoji) Live moment happening here."
+        }
+        return nil
+    }
+
+    func secondaryText(for real: RealPost) -> String {
+        let base = "Visibility • \(real.visibility.displayName)"
+        let descriptor: String?
+        if let mediaDescriptor = mediaDescriptor(for: real.media) {
+            descriptor = mediaDescriptor
+        } else if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  message.isEmpty == false {
+            descriptor = "Shared a note"
+        } else {
+            descriptor = nil
+        }
+
+        guard let descriptor else { return base }
+        return "\(base) · \(descriptor)"
+    }
+
+    func mediaDescriptor(for media: RealPost.Media) -> String? {
+        switch media {
+        case .none:
+            return nil
+        case .photo:
+            return "Shared a photo"
+        case .video:
+            return "Shared a video"
+        case let .emoji(emoji):
+            return "\(emoji) moment"
+        }
     }
 
     func media(for ratedPOI: RatedPOI) -> ExperienceMedia {
@@ -258,7 +309,16 @@ private extension ExperienceDetailView {
 
     func makeRealBadges(for real: RealPost) -> [String] {
         let expiry = real.expiresAt.formatted(.relative(presentation: .named))
-        return [real.visibility.displayName, "Expires \(expiry)"]
+        var badges = [real.visibility.displayName, "Expires \(expiry)"]
+
+        if real.metrics.likeCount > 0 {
+            badges.append("❤️ \(formatCount(real.metrics.likeCount))")
+        }
+        if real.metrics.commentCount > 0 {
+            badges.append("💬 \(formatCount(real.metrics.commentCount))")
+        }
+
+        return badges
     }
 
     func accentColor(for visibility: RealPost.Visibility) -> Color {
@@ -282,6 +342,24 @@ private extension ExperienceDetailView {
             return [Color.black, Theme.neonWarning.opacity(0.28)]
         }
     }
+}
+
+private func formatCount(_ value: Int) -> String {
+    guard value >= 1000 else { return "\(value)" }
+    let doubleValue = Double(value)
+    if value >= 1_000_000 {
+        return trimmedCount(doubleValue / 1_000_000) + "M"
+    } else {
+        return trimmedCount(doubleValue / 1_000) + "K"
+    }
+}
+
+private func trimmedCount(_ value: Double) -> String {
+    let formatted = String(format: "%.1f", value)
+    if formatted.hasSuffix(".0") {
+        return String(formatted.dropLast(2))
+    }
+    return formatted
 }
 
 // MARK: - Experience panel
@@ -444,31 +522,29 @@ private struct CompactRealCard: View {
     let user: User?
 
     var body: some View {
-        HStack(spacing: 14) {
-            avatar
+        HStack(spacing: 16) {
+            mediaPreview
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text(user?.handle ?? "Unknown user")
-                    .font(.headline)
+            VStack(alignment: .leading, spacing: 10) {
+                header
+
+                Text(previewDescription)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                Text(real.createdAt.formatted(.relative(presentation: .named)))
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.6))
-                Text(summaryText)
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                metricsRow
             }
-
-            Spacer()
         }
-        .padding(.horizontal, 18)
+        .padding(.leading, 12)
+        .padding(.trailing, 18)
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(
                     LinearGradient(
-                        colors: [Theme.neonPrimary.opacity(0.22), Color.black.opacity(0.65)],
+                        colors: [Theme.neonPrimary.opacity(0.2), Color.black.opacity(0.7)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -480,14 +556,190 @@ private struct CompactRealCard: View {
         }
     }
 
-    private var summaryText: String {
-        if let emoji = real.mediaType.emojiPayload {
-            return "\(emoji) happening nearby"
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(user?.handle ?? "Unknown user")
+                .font(.headline)
+                .foregroundStyle(.white)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            Text(real.createdAt.formatted(.relative(presentation: .named)))
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.6))
         }
-        return "Radius \(Int(real.radiusMeters))m · \(real.visibility.displayName)"
     }
 
-    private var avatar: some View {
+    private var previewDescription: String {
+        if let message = trimmedMessage, message.isEmpty == false {
+            if case .none = real.media {
+                let base = "Radius \(Int(real.radiusMeters))m · \(real.visibility.displayName)"
+                return "Shared a note · \(base)"
+            }
+            return message
+        }
+
+        let base = "Radius \(Int(real.radiusMeters))m · \(real.visibility.displayName)"
+        switch real.media {
+        case let .emoji(emoji):
+            return "\(emoji) happening nearby"
+        case .photo:
+            return "Shared a photo · \(base)"
+        case .video:
+            return "Shared a video · \(base)"
+        case .none:
+            return base
+        }
+    }
+
+    private var trimmedMessage: String? {
+        real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var metricsRow: some View {
+        HStack(spacing: 12) {
+            metricsPill(symbol: "heart.fill", text: formatCount(real.metrics.likeCount))
+            metricsPill(symbol: "bubble.right.fill", text: formatCount(real.metrics.commentCount))
+        }
+    }
+
+    private func metricsPill(symbol: String, text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.caption.weight(.semibold))
+            Text(text)
+                .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(.white.opacity(0.85))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.white.opacity(0.12), in: Capsule(style: .continuous))
+    }
+
+    private var mediaPreview: some View {
+        ZStack(alignment: .bottomLeading) {
+            mediaContent
+
+            avatarBadge
+                .offset(x: 8, y: -8)
+        }
+        .frame(width: 108, height: 108)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var mediaContent: some View {
+        switch real.media {
+        case let .photo(url):
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                        .overlay {
+                            LinearGradient(
+                                colors: [.black.opacity(0.05), .black.opacity(0.4)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+                case .empty:
+                    ProgressView()
+                case .failure:
+                    previewFallback(symbol: "photo")
+                @unknown default:
+                    previewFallback(symbol: "photo")
+                }
+            }
+        case let .video(_, poster):
+            ZStack {
+                if let poster {
+                    AsyncImage(url: poster) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                                .overlay { Color.black.opacity(0.25) }
+                        case .empty:
+                            ProgressView()
+                        case .failure:
+                            previewFallback(symbol: "play.rectangle.fill")
+                        @unknown default:
+                            previewFallback(symbol: "play.rectangle.fill")
+                        }
+                    }
+                } else {
+                    previewFallback(symbol: "play.rectangle.fill")
+                }
+
+                Circle()
+                    .fill(Color.white.opacity(0.9))
+                    .frame(width: 38, height: 38)
+                    .overlay {
+                        Image(systemName: "play.fill")
+                            .font(.footnote.weight(.bold))
+                            .foregroundStyle(Theme.neonPrimary)
+                            .offset(x: 2)
+                    }
+                    .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
+            }
+        case let .emoji(emoji):
+            ZStack {
+                LinearGradient(
+                    colors: [Theme.neonPrimary.opacity(0.85), Theme.neonAccent.opacity(0.6)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Text(emoji)
+                    .font(.system(size: 54))
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
+            }
+        case .none:
+            if let text = trimmedMessage, text.isEmpty == false {
+                previewTextCard(text)
+            } else {
+                previewFallback(symbol: "sparkles")
+            }
+        }
+    }
+
+    private func previewFallback(symbol: String) -> some View {
+        LinearGradient(
+            colors: [Theme.neonPrimary.opacity(0.35), Color.black.opacity(0.75)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay {
+            Image(systemName: symbol)
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white.opacity(0.85))
+        }
+    }
+
+    private func previewTextCard(_ text: String) -> some View {
+        LinearGradient(
+            colors: [Theme.neonPrimary.opacity(0.28), Theme.neonAccent.opacity(0.22)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay(alignment: .topLeading) {
+            Text(text)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+                .padding(12)
+        }
+    }
+
+    private var avatarBadge: some View {
         Group {
             if let url = user?.avatarURL {
                 AsyncImage(url: url) { phase in
@@ -502,17 +754,22 @@ private struct CompactRealCard: View {
                 }
             } else {
                 Text(user?.handle.prefix(2).uppercased() ?? "??")
-                    .font(.headline.bold())
+                    .font(.caption.bold())
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.gray)
             }
         }
-        .frame(width: 48, height: 48)
+        .frame(width: 36, height: 36)
         .clipShape(Circle())
         .overlay {
-            Circle().stroke(Color.white.opacity(0.5), lineWidth: 1)
+            Circle().stroke(Color.white.opacity(0.65), lineWidth: 1)
         }
+        .background(
+            Circle()
+                .fill(Color.black.opacity(0.35))
+                .blur(radius: 0.5)
+        )
     }
 }
 
@@ -526,47 +783,15 @@ private struct ExperienceMediaView: View {
         ZStack {
             switch media {
             case let .emoji(emoji):
-                VStack {
-                    Text(emoji)
-                        .font(.system(size: 92))
-                        .shadow(color: accentColor.opacity(0.8), radius: 16)
-                    Text("Live Drop")
-                        .font(.headline)
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(
-                    RadialGradient(
-                        colors: [accentColor.opacity(0.45), .black.opacity(0.8)],
-                        center: .center,
-                        startRadius: 10,
-                        endRadius: 320
-                    )
-                )
+                emojiView(emoji)
             case let .image(url):
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case let .success(image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .overlay {
-                                LinearGradient(
-                                    colors: [.black.opacity(0.05), .black.opacity(0.35)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            }
-                    case .empty:
-                        ProgressView()
-                    case .failure:
-                        placeholder
-                    @unknown default:
-                        placeholder
-                    }
-                }
-            case let .symbol(systemName):
-                placeholder(symbol: systemName)
+                imageView(url)
+            case let .video(_, poster):
+                videoPreview(poster: poster)
+            case let .text(text):
+                textView(text)
+            case let .symbol(symbol):
+                placeholder(symbol: symbol)
             }
         }
     }
@@ -576,13 +801,24 @@ private struct ExperienceMediaView: View {
     }
 
     private func placeholder(symbol: String) -> some View {
-        VStack(spacing: 18) {
+        placeholderBackground {
             Image(systemName: symbol)
                 .font(.system(size: 54, weight: .bold))
                 .foregroundStyle(.white)
+        } subtitle: {
             Text("Content arriving soon")
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.7))
+        }
+    }
+
+    private func placeholderBackground<Title: View, Subtitle: View>(
+        @ViewBuilder title: () -> Title,
+        @ViewBuilder subtitle: () -> Subtitle
+    ) -> some View {
+        VStack(spacing: 18) {
+            title()
+            subtitle()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
@@ -593,12 +829,122 @@ private struct ExperienceMediaView: View {
             )
         )
     }
+
+    private func emojiView(_ emoji: String) -> some View {
+        VStack {
+            Text(emoji)
+                .font(.system(size: 92))
+                .shadow(color: accentColor.opacity(0.8), radius: 16)
+            Text("Live Drop")
+                .font(.headline)
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RadialGradient(
+                colors: [accentColor.opacity(0.45), .black.opacity(0.8)],
+                center: .center,
+                startRadius: 10,
+                endRadius: 320
+            )
+        )
+    }
+
+    private func imageView(_ url: URL) -> some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case let .success(image):
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .overlay {
+                        LinearGradient(
+                            colors: [.black.opacity(0.05), .black.opacity(0.35)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+            case .empty:
+                ProgressView()
+            case .failure:
+                placeholder
+            @unknown default:
+                placeholder
+            }
+        }
+    }
+
+    private func videoPreview(poster: URL?) -> some View {
+        ZStack {
+            if let poster {
+                AsyncImage(url: poster) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                            .overlay {
+                                Color.black.opacity(0.25)
+                            }
+                    case .empty:
+                        ProgressView()
+                    case .failure:
+                        placeholder(symbol: "play.rectangle.fill")
+                    @unknown default:
+                        placeholder(symbol: "play.rectangle.fill")
+                    }
+                }
+            } else {
+                placeholder(symbol: "play.rectangle.fill")
+            }
+
+            Circle()
+                .fill(Color.white.opacity(0.85))
+                .frame(width: 64, height: 64)
+                .overlay {
+                    Image(systemName: "play.fill")
+                        .font(.title.weight(.bold))
+                        .foregroundStyle(accentColor)
+                        .offset(x: 4)
+                }
+                .shadow(color: .black.opacity(0.45), radius: 12, y: 6)
+        }
+    }
+
+    private func textView(_ text: String) -> some View {
+        placeholderBackground {
+            Image(systemName: "text.bubble.fill")
+                .font(.system(size: 36, weight: .bold))
+                .foregroundStyle(.white)
+        } subtitle: {
+            Text(text)
+                .font(.title3.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white)
+                .lineSpacing(4)
+                .padding(.horizontal, 8)
+        }
+        .padding(.horizontal, 12)
+    }
 }
 
 private enum ExperienceMedia {
     case emoji(String)
     case image(URL)
+    case video(url: URL, poster: URL?)
+    case text(String)
     case symbol(String)
+}
+
+private extension ExperienceMedia {
+    var previewText: String? {
+        switch self {
+        case let .text(text):
+            return text
+        case .emoji, .image, .video, .symbol:
+            return nil
+        }
+    }
 }
 
 // MARK: - Button styles
@@ -668,15 +1014,6 @@ private extension Array where Element == Int {
 private extension Array where Element == Rating {
     var average: Double? {
         compactMap(\.score).average
-    }
-}
-
-private extension String {
-    var emojiPayload: String? {
-        guard let range = range(of: "emoji:") else { return nil }
-        let suffix = self[range.upperBound...]
-        let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

@@ -190,7 +190,12 @@ enum PreviewData {
             userId: currentUser.id,
             center: .init(latitude: 47.61, longitude: -122.33),
             radiusMeters: 600,
-            mediaType: "emoji:🎥",
+            message: "Drone light show countdown on Pier 62.",
+            media: .video(
+                url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                poster: URL(string: "https://images.unsplash.com/photo-1534447677768-be436bb09401?auto=format&fit=crop&w=900&q=60")
+            ),
+            metrics: .init(likeCount: 268, commentCount: 34),
             visibility: .friendsOnly,
             createdAt: .init(),
             expiresAt: .init().addingTimeInterval(24 * 3600)
@@ -200,7 +205,9 @@ enum PreviewData {
             userId: sampleFriends[0].id,
             center: .init(latitude: 47.62, longitude: -122.21),
             radiusMeters: 600,
-            mediaType: "emoji:🎶",
+            message: "Projection art lighting up the old station.",
+            media: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!),
+            metrics: .init(likeCount: 412, commentCount: 58),
             visibility: .publicAll,
             createdAt: .init().addingTimeInterval(-5400),
             expiresAt: .init().addingTimeInterval(18 * 3600)
@@ -210,9 +217,11 @@ enum PreviewData {
             userId: sampleFriends[1].id,
             center: .init(latitude: 47.6185, longitude: -122.342),
             radiusMeters: 600,
-            mediaType: "emoji:🕺",
+            message: "Pop-up street dance class just kicked off.",
+            media: .none,
+            metrics: .init(likeCount: 97, commentCount: 11),
             visibility: .anonymous,
-            createdAt: .init().addingTimeInterval(-10800),
+            createdAt: .init().addingTimeInterval(-10_800),
             expiresAt: .init().addingTimeInterval(12 * 3600)
         ),
         .init(
@@ -220,7 +229,9 @@ enum PreviewData {
             userId: sampleFriends[2].id,
             center: .init(latitude: 47.6062, longitude: -122.3321),
             radiusMeters: 450,
-            mediaType: "emoji:🍸",
+            message: "Speakeasy pouring neon cocktails all night.",
+            media: .emoji("🍸"),
+            metrics: .init(likeCount: 183, commentCount: 22),
             visibility: .friendsOnly,
             createdAt: .init().addingTimeInterval(-7200),
             expiresAt: .init().addingTimeInterval(10 * 3600)
@@ -230,9 +241,11 @@ enum PreviewData {
             userId: sampleFriends[0].id,
             center: .init(latitude: 47.5952, longitude: -122.3316),
             radiusMeters: 520,
-            mediaType: "emoji:🎨",
+            message: "Local illustrators projecting live sketching.",
+            media: .photo(URL(string: "https://images.unsplash.com/photo-1526498460520-4c246339dccb?auto=format&fit=crop&w=900&q=60")!),
+            metrics: .init(likeCount: 256, commentCount: 31),
             visibility: .publicAll,
-            createdAt: .init().addingTimeInterval(-14400),
+            createdAt: .init().addingTimeInterval(-14_400),
             expiresAt: .init().addingTimeInterval(16 * 3600)
         ),
         .init(
@@ -240,9 +253,11 @@ enum PreviewData {
             userId: currentUser.id,
             center: .init(latitude: 47.625, longitude: -122.35),
             radiusMeters: 700,
-            mediaType: "emoji:🎇",
+            message: "Stargazing circle sharing telescopes in Gas Works.",
+            media: .none,
+            metrics: .init(likeCount: 142, commentCount: 19),
             visibility: .friendsOnly,
-            createdAt: .init().addingTimeInterval(-18000),
+            createdAt: .init().addingTimeInterval(-18_000),
             expiresAt: .init().addingTimeInterval(20 * 3600)
         ),
         .init(
@@ -250,7 +265,12 @@ enum PreviewData {
             userId: sampleFriends[3].id,
             center: .init(latitude: 31.2304, longitude: 121.4737),
             radiusMeters: 900,
-            mediaType: "emoji:🧨",
+            message: "Lantern rehearsal on the Bund waterfront.",
+            media: .video(
+                url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")!,
+                poster: URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")
+            ),
+            metrics: .init(likeCount: 508, commentCount: 76),
             visibility: .publicAll,
             createdAt: .init().addingTimeInterval(-2400),
             expiresAt: .init().addingTimeInterval(18 * 3600)
@@ -260,7 +280,9 @@ enum PreviewData {
             userId: sampleFriends[0].id,
             center: .init(latitude: 48.8566, longitude: 2.3522),
             radiusMeters: 650,
-            mediaType: "emoji:🥐",
+            message: nil,
+            media: .emoji("🥐"),
+            metrics: .init(likeCount: 89, commentCount: 7),
             visibility: .friendsOnly,
             createdAt: .init().addingTimeInterval(-26_000),
             expiresAt: .init().addingTimeInterval(22 * 3600)
@@ -270,7 +292,9 @@ enum PreviewData {
             userId: sampleFriends[1].id,
             center: .init(latitude: -33.8688, longitude: 151.2093),
             radiusMeters: 820,
-            mediaType: "emoji:🌊",
+            message: "Sunrise surf check with free cold brew.",
+            media: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=900&q=60")!),
+            metrics: .init(likeCount: 344, commentCount: 41),
             visibility: .publicAll,
             createdAt: .init().addingTimeInterval(-32_000),
             expiresAt: .init().addingTimeInterval(15 * 3600)
@@ -280,7 +304,9 @@ enum PreviewData {
             userId: sampleFriends[2].id,
             center: .init(latitude: 35.6895, longitude: 139.6917),
             radiusMeters: 540,
-            mediaType: "emoji:🎌",
+            message: "Night market pop-up swapping vintage game cartridges.",
+            media: .none,
+            metrics: .init(likeCount: 158, commentCount: 27),
             visibility: .friendsOnly,
             createdAt: .init().addingTimeInterval(-14_400),
             expiresAt: .init().addingTimeInterval(28 * 3600)
@@ -290,7 +316,9 @@ enum PreviewData {
             userId: sampleFriends[3].id,
             center: .init(latitude: -23.5505, longitude: -46.6333),
             radiusMeters: 780,
-            mediaType: "emoji:🎭",
+            message: "Open-air theater improv under the viaduct.",
+            media: .photo(URL(string: "https://images.unsplash.com/photo-1491921125492-f0b52f491f57?auto=format&fit=crop&w=900&q=60")!),
+            metrics: .init(likeCount: 261, commentCount: 33),
             visibility: .publicAll,
             createdAt: .init().addingTimeInterval(-21_600),
             expiresAt: .init().addingTimeInterval(26 * 3600)
@@ -300,7 +328,9 @@ enum PreviewData {
             userId: currentUser.id,
             center: .init(latitude: 55.7558, longitude: 37.6173),
             radiusMeters: 620,
-            mediaType: "emoji:❄️",
+            message: nil,
+            media: .emoji("❄️"),
+            metrics: .init(likeCount: 103, commentCount: 12),
             visibility: .friendsOnly,
             createdAt: .init().addingTimeInterval(-18_000),
             expiresAt: .init().addingTimeInterval(30 * 3600)
