@@ -470,11 +470,37 @@ private extension CLLocationCoordinate2D {
 
     func interpolated(to other: CLLocationCoordinate2D, fraction: Double) -> CLLocationCoordinate2D {
         let clampedFraction = max(0, min(1, fraction))
-        let latitudeDelta = other.latitude - latitude
-        let longitudeDelta = other.longitude - longitude
+        guard clampedFraction > 0 else { return self }
+        guard clampedFraction < 1 else { return other }
+
+        let lat1 = latitude.radians
+        let lon1 = longitude.radians
+        let lat2 = other.latitude.radians
+        let lon2 = other.longitude.radians
+
+        let sinLat = sin((lat2 - lat1) / 2)
+        let sinLon = sin((lon2 - lon1) / 2)
+        let a = sinLat * sinLat + cos(lat1) * cos(lat2) * sinLon * sinLon
+        let angularDistance = 2 * atan2(sqrt(a), sqrt(max(0, 1 - a)))
+
+        if angularDistance.isZero {
+            return other
+        }
+
+        let sinDistance = sin(angularDistance)
+        let weightStart = sin((1 - clampedFraction) * angularDistance) / sinDistance
+        let weightEnd = sin(clampedFraction * angularDistance) / sinDistance
+
+        let x = weightStart * cos(lat1) * cos(lon1) + weightEnd * cos(lat2) * cos(lon2)
+        let y = weightStart * cos(lat1) * sin(lon1) + weightEnd * cos(lat2) * sin(lon2)
+        let z = weightStart * sin(lat1) + weightEnd * sin(lat2)
+
+        let interpolatedLatitude = atan2(z, sqrt(x * x + y * y))
+        let interpolatedLongitude = atan2(y, x)
+
         return CLLocationCoordinate2D(
-            latitude: latitude + latitudeDelta * clampedFraction,
-            longitude: longitude + longitudeDelta * clampedFraction
+            latitude: interpolatedLatitude.degrees,
+            longitude: interpolatedLongitude.degrees
         )
     }
 }
@@ -594,4 +620,9 @@ private enum ControlsLayout {
     static func previewPadding(for geometry: GeometryProxy) -> CGFloat {
         basePadding(for: geometry) + geometry.size.height * previewFraction + previewGap
     }
+}
+
+private extension Double {
+    var radians: Double { self * .pi / 180 }
+    var degrees: Double { self * 180 / .pi }
 }
