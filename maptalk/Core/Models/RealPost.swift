@@ -8,11 +8,34 @@ struct RealPost: Identifiable, Hashable {
         case anonymous
     }
 
-    enum Media: Hashable {
-        case none
-        case photo(URL)
-        case video(url: URL, poster: URL?)
-        case emoji(String)
+    struct Attachment: Identifiable, Hashable {
+        enum Kind: Hashable {
+            case photo(URL)
+            case video(url: URL, poster: URL?)
+            case emoji(String)
+        }
+
+        let id: UUID
+        var kind: Kind
+
+        init(id: UUID = UUID(), kind: Kind) {
+            self.id = id
+            self.kind = kind
+        }
+    }
+
+    struct Comment: Identifiable, Hashable {
+        let id: UUID
+        let userId: UUID
+        var text: String
+        var createdAt: Date
+
+        init(id: UUID = UUID(), userId: UUID, text: String, createdAt: Date = .init()) {
+            self.id = id
+            self.userId = userId
+            self.text = text
+            self.createdAt = createdAt
+        }
     }
 
     struct Metrics: Hashable {
@@ -25,11 +48,19 @@ struct RealPost: Identifiable, Hashable {
     var center: CLLocationCoordinate2D
     var radiusMeters: CLLocationDistance
     var message: String?
-    var media: Media
-    var metrics: Metrics
+    var attachments: [Attachment]
+    var likes: [UUID]
+    var comments: [Comment]
     var visibility: Visibility
     var createdAt: Date
     var expiresAt: Date
+
+    var metrics: Metrics {
+        Metrics(
+            likeCount: likes.count,
+            commentCount: comments.count
+        )
+    }
 
     static func == (lhs: RealPost, rhs: RealPost) -> Bool {
         lhs.id == rhs.id

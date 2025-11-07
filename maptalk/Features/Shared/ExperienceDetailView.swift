@@ -30,7 +30,10 @@ struct ExperienceDetailView: View {
         let badges: [String]
         let highlight: String?
         let secondary: String?
-        let media: ExperienceMedia
+        let galleryItems: [MediaDisplayItem]
+        let friendLikes: [FriendEngagement]
+        let friendComments: [FriendEngagement]
+        let friendRatings: [FriendEngagement]
         let accentColor: Color
         let backgroundGradient: [Color]
         let mapRegion: MKCoordinateRegion
@@ -41,17 +44,25 @@ struct ExperienceDetailView: View {
     private let poi: RatedPOI?
     private let reelContext: ReelContext?
     private let isExpanded: Bool
+    private let userProvider: (UUID) -> User?
 
-    init(ratedPOI: RatedPOI, isExpanded: Bool) {
+    init(ratedPOI: RatedPOI, isExpanded: Bool, userProvider: @escaping (UUID) -> User? = { _ in nil }) {
         self.poi = ratedPOI
         self.reelContext = nil
         self.isExpanded = isExpanded
+        self.userProvider = userProvider
     }
 
-    init(reelPager: ReelPager, selection: Binding<UUID>, isExpanded: Bool) {
+    init(
+        reelPager: ReelPager,
+        selection: Binding<UUID>,
+        isExpanded: Bool,
+        userProvider: @escaping (UUID) -> User? = { _ in nil }
+    ) {
         self.poi = nil
         self.reelContext = ReelContext(pager: reelPager, selection: selection)
         self.isExpanded = isExpanded
+        self.userProvider = userProvider
     }
 
     var body: some View {
@@ -68,6 +79,99 @@ struct ExperienceDetailView: View {
         }
         .background(Color.black.ignoresSafeArea())
     }
+}
+
+// MARK: - Media display helpers
+
+private struct MediaDisplayItem: Identifiable, Hashable {
+    enum Content: Hashable {
+        case photo(URL)
+        case video(url: URL, poster: URL?)
+        case emoji(String)
+        case text(String)
+        case symbol(String)
+    }
+
+    let id: UUID
+    let content: Content
+
+    init(id: UUID = UUID(), content: Content) {
+        self.id = id
+        self.content = content
+    }
+}
+
+private struct FriendEngagement: Identifiable {
+    enum Kind {
+        case like
+        case comment
+        case rating
+    }
+
+    let id: UUID
+    let kind: Kind
+    let user: User?
+    let message: String
+    let badge: String?
+    let timestamp: Date?
+}
+
+private extension MediaDisplayItem {
+    var previewText: String? {
+        switch content {
+        case let .text(text):
+            return text
+        default:
+            return nil
+        }
+    }
+}
+
+private func firstEmoji(in attachments: [RealPost.Attachment]) -> String? {
+    attachments.compactMap { attachment -> String? in
+        if case let .emoji(emoji) = attachment.kind {
+            return emoji
+        }
+        return nil
+    }.first
+}
+
+private func mediaCounts(for attachments: [RealPost.Attachment]) -> (photos: Int, videos: Int, emojis: Int) {
+    attachments.reduce(into: (0, 0, 0)) { result, attachment in
+        switch attachment.kind {
+        case .photo:
+            result.0 += 1
+        case .video:
+            result.1 += 1
+        case .emoji:
+            result.2 += 1
+        }
+    }
+}
+
+private func mediaDescriptor(for real: RealPost) -> String? {
+    let counts = mediaCounts(for: real.attachments)
+    var segments: [String] = []
+
+    if counts.photos > 0 {
+        segments.append(counts.photos == 1 ? "1 photo" : "\(counts.photos) photos")
+    }
+    if counts.videos > 0 {
+        segments.append(counts.videos == 1 ? "1 video" : "\(counts.videos) videos")
+    }
+    if counts.emojis > 0 {
+        segments.append(counts.emojis == 1 ? "1 emoji" : "\(counts.emojis) emoji")
+    }
+
+    if segments.isEmpty {
+        if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+           message.isEmpty == false {
+            return "Shared a note"
+        }
+        return nil
+    }
+
+    return "Shared \(segments.joined(separator: " · "))"
 }
 
 // MARK: - Presentation helpers
@@ -134,7 +238,7 @@ private extension ExperienceDetailView {
                             .multilineTextAlignment(.center)
                     }
 
-                    let previewHighlight = data.highlight ?? data.media.previewText
+                    let previewHighlight = data.highlight ?? data.galleryItems.first(where: { $0.previewText != nil })?.previewText
                     if let highlight = previewHighlight {
                         Text(highlight)
                             .font(.caption.bold())
@@ -191,7 +295,29 @@ private extension ExperienceDetailView {
             let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
             let highlight = highlightText(for: real, message: message)
             let secondary = secondaryText(for: real)
-            let media = media(for: real)
+            let gallery = galleryItems(for: real)
+            let friendLikes = real.likes.compactMap { userId -> FriendEngagement? in
+                guard let user = userProvider(userId) else { return nil }
+                return FriendEngagement(
+                    id: userId,
+                    kind: .like,
+                    user: user,
+                    message: "Reacted to this drop.",
+                    badge: nil,
+                    timestamp: nil
+                )
+            }
+            let friendComments = real.comments.compactMap { comment -> FriendEngagement? in
+                guard let user = userProvider(comment.userId) else { return nil }
+                return FriendEngagement(
+                    id: comment.id,
+                    kind: .comment,
+                    user: user,
+                    message: comment.text,
+                    badge: nil,
+                    timestamp: comment.createdAt
+                )
+            }
             let mapRegion = MKCoordinateRegion(
                 center: real.center,
                 latitudinalMeters: max(real.radiusMeters * 8, 600),
@@ -203,7 +329,10 @@ private extension ExperienceDetailView {
                 badges: badges,
                 highlight: highlight,
                 secondary: secondary,
-                media: media,
+                galleryItems: gallery,
+                friendLikes: friendLikes,
+                friendComments: friendComments,
+                friendRatings: [],
                 accentColor: accent,
                 backgroundGradient: gradient,
                 mapRegion: mapRegion,
@@ -221,13 +350,44 @@ private extension ExperienceDetailView {
                     return "Average score \(formatted) · Latest vibes from friends."
                 }
                 ?? "Friends are starting to rate this spot."
+            let gallery = galleryItems(for: rated)
+            let friendRatings = rated.ratings.compactMap { rating -> FriendEngagement? in
+                guard let user = userProvider(rating.userId) else { return nil }
+                var message = "Left a rating"
+                if let text = rating.text, text.isEmpty == false {
+                    message = text
+                } else if let score = rating.score {
+                    message = "Rated \(score)/5"
+                } else if let emoji = rating.emoji {
+                    message = "Reacted with \(emoji)"
+                }
+                let badge: String?
+                if let emoji = rating.emoji {
+                    badge = emoji
+                } else if let score = rating.score {
+                    badge = "\(score)★"
+                } else {
+                    badge = nil
+                }
+                return FriendEngagement(
+                    id: rating.id,
+                    kind: .rating,
+                    user: user,
+                    message: message,
+                    badge: badge,
+                    timestamp: rating.createdAt
+                )
+            }
             return ContentData(
                 title: rated.poi.name,
                 subtitle: rated.poi.category.displayName,
                 badges: ["\(rated.ratings.count) Ratings"],
                 highlight: highlight,
                 secondary: secondary,
-                media: media(for: rated),
+                galleryItems: gallery,
+                friendLikes: [],
+                friendComments: [],
+                friendRatings: friendRatings,
                 accentColor: accent,
                 backgroundGradient: [Color.black, accent.opacity(0.25)],
                 mapRegion: MKCoordinateRegion(
@@ -241,31 +401,35 @@ private extension ExperienceDetailView {
         }
     }
 
-    func media(for real: RealPost) -> ExperienceMedia {
-        switch real.media {
-        case let .emoji(emoji):
-            return .emoji(emoji)
-        case let .photo(url):
-            return .image(url)
-        case let .video(url, poster):
-            return .video(url: url, poster: poster)
-        case .none:
-            if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
-               message.isEmpty == false {
-                return .text(message)
+    func galleryItems(for real: RealPost) -> [MediaDisplayItem] {
+        var items: [MediaDisplayItem] = real.attachments.map { attachment in
+            switch attachment.kind {
+            case let .photo(url):
+                return MediaDisplayItem(id: attachment.id, content: .photo(url))
+            case let .video(url, poster):
+                return MediaDisplayItem(id: attachment.id, content: .video(url: url, poster: poster))
+            case let .emoji(emoji):
+                return MediaDisplayItem(id: attachment.id, content: .emoji(emoji))
             }
-            return .symbol("sparkles")
         }
+
+        if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+           message.isEmpty == false {
+            items.append(MediaDisplayItem(content: .text(message)))
+        }
+
+        if items.isEmpty {
+            return [MediaDisplayItem(content: .symbol("sparkles"))]
+        }
+
+        return items
     }
 
     func highlightText(for real: RealPost, message: String?) -> String? {
         if let message, message.isEmpty == false {
-            if case .none = real.media {
-                return nil
-            }
             return message
         }
-        if case let .emoji(emoji) = real.media {
+        if let emoji = firstEmoji(in: real.attachments) {
             return "\(emoji) Live moment happening here."
         }
         return nil
@@ -273,38 +437,17 @@ private extension ExperienceDetailView {
 
     func secondaryText(for real: RealPost) -> String {
         let base = "Visibility • \(real.visibility.displayName)"
-        let descriptor: String?
-        if let mediaDescriptor = mediaDescriptor(for: real.media) {
-            descriptor = mediaDescriptor
-        } else if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  message.isEmpty == false {
-            descriptor = "Shared a note"
-        } else {
-            descriptor = nil
+        guard let descriptor = mediaDescriptor(for: real) else {
+            return base
         }
-
-        guard let descriptor else { return base }
         return "\(base) · \(descriptor)"
     }
 
-    func mediaDescriptor(for media: RealPost.Media) -> String? {
-        switch media {
-        case .none:
-            return nil
-        case .photo:
-            return "Shared a photo"
-        case .video:
-            return "Shared a video"
-        case let .emoji(emoji):
-            return "\(emoji) moment"
-        }
-    }
-
-    func media(for ratedPOI: RatedPOI) -> ExperienceMedia {
+    func galleryItems(for ratedPOI: RatedPOI) -> [MediaDisplayItem] {
         if let emoji = ratedPOI.ratings.compactMap(\.emoji).first {
-            return .emoji(emoji)
+            return [MediaDisplayItem(content: .emoji(emoji))]
         }
-        return .symbol(ratedPOI.poi.category.symbolName)
+        return [MediaDisplayItem(content: .symbol(ratedPOI.poi.category.symbolName))]
     }
 
     func makeRealBadges(for real: RealPost) -> [String] {
@@ -372,7 +515,7 @@ private struct ExperiencePanel: View {
             VStack(spacing: 28) {
                 header
 
-                ExperienceMediaView(media: data.media, accentColor: data.accentColor)
+                ExperienceMediaGallery(items: data.galleryItems, accentColor: data.accentColor)
                     .frame(height: 240)
                     .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                     .overlay {
@@ -405,6 +548,18 @@ private struct ExperiencePanel: View {
                     }
 
                     coordinatePreview
+
+                    if data.friendLikes.isEmpty == false {
+                        FriendEngagementList(title: "Friend Likes", entries: data.friendLikes)
+                    }
+
+                    if data.friendComments.isEmpty == false {
+                        FriendEngagementList(title: "Friend Comments", entries: data.friendComments)
+                    }
+
+                    if data.friendRatings.isEmpty == false {
+                        FriendEngagementList(title: "Friend Ratings", entries: data.friendRatings)
+                    }
                 }
                 .padding(24)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
@@ -521,6 +676,14 @@ private struct CompactRealCard: View {
     let real: RealPost
     let user: User?
 
+    @State private var previewSelection: UUID
+
+    init(real: RealPost, user: User?) {
+        self.real = real
+        self.user = user
+        _previewSelection = State(initialValue: real.attachments.first?.id ?? UUID())
+    }
+
     var body: some View {
         HStack(spacing: 16) {
             mediaPreview
@@ -531,7 +694,7 @@ private struct CompactRealCard: View {
                 Text(previewDescription)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
+                    .lineLimit(3)
 
                 metricsRow
             }
@@ -554,6 +717,11 @@ private struct CompactRealCard: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.25), lineWidth: 1)
         }
+        .onChange(of: real.attachments.map(\.id)) { ids in
+            if let first = ids.first {
+                previewSelection = first
+            }
+        }
     }
 
     private var header: some View {
@@ -572,25 +740,27 @@ private struct CompactRealCard: View {
     }
 
     private var previewDescription: String {
+        let base = "Radius \(Int(real.radiusMeters))m · \(real.visibility.displayName)"
+
         if let message = trimmedMessage, message.isEmpty == false {
-            if case .none = real.media {
-                let base = "Radius \(Int(real.radiusMeters))m · \(real.visibility.displayName)"
+            if real.attachments.isEmpty {
                 return "Shared a note · \(base)"
             }
             return message
         }
 
-        let base = "Radius \(Int(real.radiusMeters))m · \(real.visibility.displayName)"
-        switch real.media {
-        case let .emoji(emoji):
+        if real.attachments.allSatisfy({ attachment in
+            if case .emoji = attachment.kind { return true }
+            return false
+        }), let emoji = firstEmoji(in: real.attachments) {
             return "\(emoji) happening nearby"
-        case .photo:
-            return "Shared a photo · \(base)"
-        case .video:
-            return "Shared a video · \(base)"
-        case .none:
-            return base
         }
+
+        if let descriptor = mediaDescriptor(for: real) {
+            return "\(descriptor) · \(base)"
+        }
+
+        return base
     }
 
     private var trimmedMessage: String? {
@@ -618,13 +788,33 @@ private struct CompactRealCard: View {
     }
 
     private var mediaPreview: some View {
-        ZStack(alignment: .bottomLeading) {
-            mediaContent
+        ZStack {
+            basePreview
 
-            avatarBadge
-                .offset(x: 8, y: -8)
+            VStack {
+                HStack {
+                    summaryChip
+                    Spacer()
+                }
+
+                Spacer()
+
+                HStack {
+                    avatarBadge
+                    Spacer()
+                    pageCounter
+                }
+            }
+            .padding(8)
         }
         .frame(width: 108, height: 108)
+        .background(
+            LinearGradient(
+                colors: [Theme.neonPrimary.opacity(0.25), Color.black.opacity(0.75)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -633,8 +823,76 @@ private struct CompactRealCard: View {
     }
 
     @ViewBuilder
-    private var mediaContent: some View {
-        switch real.media {
+    private var basePreview: some View {
+        if attachments.isEmpty {
+            if let text = trimmedMessage, text.isEmpty == false {
+                previewTextCard(text)
+            } else {
+                previewFallback(symbol: "sparkles")
+            }
+        } else if attachments.count == 1, let first = attachments.first {
+            attachmentThumbnail(for: first)
+        } else {
+            TabView(selection: $previewSelection) {
+                ForEach(attachments) { attachment in
+                    attachmentThumbnail(for: attachment)
+                        .tag(attachment.id)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        }
+    }
+
+    private var attachments: [RealPost.Attachment] {
+        real.attachments
+    }
+
+    private var currentIndex: Int {
+        attachments.firstIndex(where: { $0.id == previewSelection }) ?? 0
+    }
+
+    @ViewBuilder
+    private var pageCounter: some View {
+        if attachments.count > 1 {
+            Text("\(currentIndex + 1)/\(attachments.count)")
+                .font(.caption2.bold())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(.black.opacity(0.55), in: Capsule(style: .continuous))
+        }
+    }
+
+    @ViewBuilder
+    private var summaryChip: some View {
+        if let summary = attachmentSummary {
+            Text(summary)
+                .font(.caption2.bold())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.black.opacity(0.45), in: Capsule(style: .continuous))
+        }
+    }
+
+    private var attachmentSummary: String? {
+        let counts = mediaCounts(for: real.attachments)
+        var segments: [String] = []
+        if counts.photos > 0 {
+            segments.append("\(counts.photos) \(counts.photos == 1 ? "Photo" : "Photos")")
+        }
+        if counts.videos > 0 {
+            segments.append("\(counts.videos) \(counts.videos == 1 ? "Video" : "Videos")")
+        }
+        if counts.emojis > 0 {
+            segments.append("\(counts.emojis) \(counts.emojis == 1 ? "Emoji" : "Emoji")")
+        }
+        return segments.isEmpty ? nil : segments.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private func attachmentThumbnail(for attachment: RealPost.Attachment) -> some View {
+        switch attachment.kind {
         case let .photo(url):
             AsyncImage(url: url) { phase in
                 switch phase {
@@ -642,13 +900,6 @@ private struct CompactRealCard: View {
                     image
                         .resizable()
                         .scaledToFill()
-                        .overlay {
-                            LinearGradient(
-                                colors: [.black.opacity(0.05), .black.opacity(0.4)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        }
                 case .empty:
                     ProgressView()
                 case .failure:
@@ -656,6 +907,15 @@ private struct CompactRealCard: View {
                 @unknown default:
                     previewFallback(symbol: "photo")
                 }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
+            .overlay {
+                LinearGradient(
+                    colors: [.black.opacity(0.05), .black.opacity(0.3)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
             }
         case let .video(_, poster):
             ZStack {
@@ -666,7 +926,6 @@ private struct CompactRealCard: View {
                             image
                                 .resizable()
                                 .scaledToFill()
-                                .overlay { Color.black.opacity(0.25) }
                         case .empty:
                             ProgressView()
                         case .failure:
@@ -675,37 +934,34 @@ private struct CompactRealCard: View {
                             previewFallback(symbol: "play.rectangle.fill")
                         }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .overlay { Color.black.opacity(0.25) }
                 } else {
                     previewFallback(symbol: "play.rectangle.fill")
                 }
 
                 Circle()
                     .fill(Color.white.opacity(0.9))
-                    .frame(width: 38, height: 38)
+                    .frame(width: 34, height: 34)
                     .overlay {
                         Image(systemName: "play.fill")
-                            .font(.footnote.weight(.bold))
+                            .font(.caption.weight(.bold))
                             .foregroundStyle(Theme.neonPrimary)
-                            .offset(x: 2)
+                            .offset(x: 1.5)
                     }
-                    .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
+                    .shadow(color: .black.opacity(0.35), radius: 6, y: 3)
             }
         case let .emoji(emoji):
-            ZStack {
-                LinearGradient(
-                    colors: [Theme.neonPrimary.opacity(0.85), Theme.neonAccent.opacity(0.6)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
+            LinearGradient(
+                colors: [Theme.neonPrimary.opacity(0.85), Theme.neonAccent.opacity(0.6)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .overlay {
                 Text(emoji)
-                    .font(.system(size: 54))
-                    .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
-            }
-        case .none:
-            if let text = trimmedMessage, text.isEmpty == false {
-                previewTextCard(text)
-            } else {
-                previewFallback(symbol: "sparkles")
+                    .font(.system(size: 48))
+                    .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
             }
         }
     }
@@ -773,21 +1029,331 @@ private struct CompactRealCard: View {
     }
 }
 
+private struct FriendEngagementList: View {
+    let title: String
+    let entries: [FriendEngagement]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.8))
+
+            VStack(spacing: 10) {
+                ForEach(entries) { entry in
+                    FriendEngagementRow(entry: entry)
+                }
+            }
+        }
+    }
+}
+
+private struct FriendEngagementRow: View {
+    let entry: FriendEngagement
+
+    var body: some View {
+        HStack(spacing: 12) {
+            avatar
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    Text(entry.user?.handle ?? "Friend")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    if let timestampText {
+                        Text(timestampText)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.65))
+                    }
+                }
+
+                Text(entry.message)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(2)
+            }
+
+            if let badgeText = entry.badge {
+                Text(badgeText)
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.white.opacity(0.12), in: Capsule(style: .continuous))
+            }
+        }
+        .padding(10)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var avatar: some View {
+        ZStack {
+            if let url = entry.user?.avatarURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFill()
+                    case .empty:
+                        ProgressView()
+                    case .failure:
+                        placeholder
+                    @unknown default:
+                        placeholder
+                    }
+                }
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: 42, height: 42)
+        .clipShape(Circle())
+        .overlay {
+            Circle().stroke(Color.white.opacity(0.25), lineWidth: 1)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            Circle()
+                .fill(Color.black.opacity(0.75))
+                .frame(width: 18, height: 18)
+                .overlay {
+                    Image(systemName: iconName)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(iconColor)
+                }
+                .offset(x: 6, y: 6)
+        }
+    }
+
+    private var placeholder: some View {
+        Text(initials)
+            .font(.caption.bold())
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.gray.opacity(0.3))
+    }
+
+    private var initials: String {
+        guard let handle = entry.user?.handle else { return "??" }
+        return String(handle.prefix(2)).uppercased()
+    }
+
+    private var iconName: String {
+        switch entry.kind {
+        case .like:
+            return "heart.fill"
+        case .comment:
+            return "text.bubble.fill"
+        case .rating:
+            return "star.fill"
+        }
+    }
+
+    private var iconColor: Color {
+        switch entry.kind {
+        case .like:
+            return Theme.neonPrimary
+        case .comment:
+            return .white
+        case .rating:
+            return Theme.neonAccent
+        }
+    }
+
+    private var timestampText: String? {
+        entry.timestamp?.formatted(.relative(presentation: .named))
+    }
+}
+
 // MARK: - Media
 
-private struct ExperienceMediaView: View {
-    let media: ExperienceMedia
+private struct ExperienceMediaGallery: View {
+    let items: [MediaDisplayItem]
     let accentColor: Color
+
+    @State private var selection: UUID
+    @State private var isLightboxPresented = false
+
+    init(items: [MediaDisplayItem], accentColor: Color) {
+        self.items = items
+        self.accentColor = accentColor
+        _selection = State(initialValue: items.first?.id ?? UUID())
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if items.isEmpty {
+                MediaCardView(
+                    item: MediaDisplayItem(content: .symbol("sparkles")),
+                    accentColor: accentColor,
+                    mode: .card
+                )
+            } else {
+                TabView(selection: $selection) {
+                    ForEach(items) { item in
+                        MediaCardView(item: item, accentColor: accentColor, mode: .card)
+                            .tag(item.id)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isLightboxPresented = true
+                }
+                .overlay(pageIndicator, alignment: .bottomTrailing)
+            }
+
+            if let summary = summaryText {
+                Text(summary)
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.45), in: Capsule(style: .continuous))
+                    .padding(12)
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: selection)
+        .fullScreenCover(isPresented: $isLightboxPresented) {
+            MediaLightbox(
+                items: items,
+                selection: $selection,
+                accentColor: accentColor,
+                isPresented: $isLightboxPresented
+            )
+        }
+    }
+
+    private var currentIndex: Int {
+        items.firstIndex(where: { $0.id == selection }) ?? 0
+    }
+
+    @ViewBuilder
+    private var pageIndicator: some View {
+        if items.count > 1 {
+            Text("\(currentIndex + 1)/\(items.count)")
+                .font(.caption.bold())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.black.opacity(0.45), in: Capsule(style: .continuous))
+                .padding(12)
+        }
+    }
+
+    private var summaryText: String? {
+        let counts = mediaCounts(for: items)
+        var segments: [String] = []
+        if counts.photos > 0 {
+            segments.append("\(counts.photos) \(counts.photos == 1 ? "Photo" : "Photos")")
+        }
+        if counts.videos > 0 {
+            segments.append("\(counts.videos) \(counts.videos == 1 ? "Video" : "Videos")")
+        }
+        if counts.emojis > 0 {
+            segments.append("\(counts.emojis) \(counts.emojis == 1 ? "Emoji" : "Emoji")")
+        }
+        return segments.isEmpty ? nil : segments.joined(separator: " · ")
+    }
+}
+
+private struct MediaLightbox: View {
+    let items: [MediaDisplayItem]
+    @Binding var selection: UUID
+    let accentColor: Color
+    @Binding var isPresented: Bool
 
     var body: some View {
         ZStack {
-            switch media {
-            case let .emoji(emoji):
-                emojiView(emoji)
-            case let .image(url):
+            Color.black.ignoresSafeArea()
+
+            TabView(selection: $selection) {
+                ForEach(items) { item in
+                    MediaCardView(item: item, accentColor: accentColor, mode: .lightbox)
+                        .tag(item.id)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 40)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .automatic))
+            .overlay(indexBadge, alignment: .bottom)
+            .animation(.easeInOut(duration: 0.22), value: selection)
+
+            VStack {
+                HStack {
+                    if let summary = summaryText {
+                        Text(summary)
+                            .font(.caption.bold())
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.black.opacity(0.4), in: Capsule(style: .continuous))
+                    }
+                    Spacer()
+                    Button {
+                        isPresented = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 32, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                }
+                .padding(.top, 30)
+                .padding(.horizontal, 24)
+
+                Spacer()
+            }
+        }
+    }
+
+    private var currentIndex: Int {
+        items.firstIndex(where: { $0.id == selection }) ?? 0
+    }
+
+    private var summaryText: String? {
+        let counts = mediaCounts(for: items)
+        var segments: [String] = []
+        if counts.photos > 0 {
+            segments.append("\(counts.photos) \(counts.photos == 1 ? "Photo" : "Photos")")
+        }
+        if counts.videos > 0 {
+            segments.append("\(counts.videos) \(counts.videos == 1 ? "Video" : "Videos")")
+        }
+        if counts.emojis > 0 {
+            segments.append("\(counts.emojis) \(counts.emojis == 1 ? "Emoji" : "Emoji")")
+        }
+        return segments.isEmpty ? nil : segments.joined(separator: " · ")
+    }
+
+    private var indexBadge: some View {
+        Text("\(currentIndex + 1) / \(max(items.count, 1))")
+            .font(.caption.bold())
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.45), in: Capsule(style: .continuous))
+            .padding(.bottom, 40)
+    }
+}
+
+private struct MediaCardView: View {
+    enum Mode {
+        case card
+        case lightbox
+    }
+
+    let item: MediaDisplayItem
+    let accentColor: Color
+    let mode: Mode
+
+    var body: some View {
+        ZStack {
+            switch item.content {
+            case let .photo(url):
                 imageView(url)
             case let .video(_, poster):
-                videoPreview(poster: poster)
+                videoView(poster: poster)
+            case let .emoji(emoji):
+                emojiView(emoji)
             case let .text(text):
                 textView(text)
             case let .symbol(symbol):
@@ -796,14 +1362,111 @@ private struct ExperienceMediaView: View {
         }
     }
 
-    private var placeholder: some View {
-        placeholder(symbol: "sparkles")
+    private func emojiView(_ emoji: String) -> some View {
+        VStack(spacing: 16) {
+            Text(emoji)
+                .font(.system(size: mode == .lightbox ? 120 : 92))
+                .shadow(color: accentColor.opacity(0.85), radius: 18)
+            if mode == .card {
+                Text("Live Drop")
+                    .font(.headline)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RadialGradient(
+                colors: [accentColor.opacity(0.5), .black.opacity(0.85)],
+                center: .center,
+                startRadius: 12,
+                endRadius: mode == .lightbox ? 520 : 320
+            )
+        )
+    }
+
+    private func imageView(_ url: URL) -> some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case let .success(image):
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .overlay {
+                        LinearGradient(
+                            colors: [.black.opacity(0.05), .black.opacity(0.35)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+            case .empty:
+                ProgressView()
+            case .failure:
+                placeholder(symbol: "photo")
+            @unknown default:
+                placeholder(symbol: "photo")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+
+    private func videoView(poster: URL?) -> some View {
+        ZStack {
+            if let poster {
+                AsyncImage(url: poster) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                            .overlay { Color.black.opacity(0.28) }
+                    case .empty:
+                        ProgressView()
+                    case .failure:
+                        placeholder(symbol: "play.rectangle.fill")
+                    @unknown default:
+                        placeholder(symbol: "play.rectangle.fill")
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+            } else {
+                placeholder(symbol: "play.rectangle.fill")
+            }
+
+            Circle()
+                .fill(Color.white.opacity(0.9))
+                .frame(width: mode == .lightbox ? 72 : 58, height: mode == .lightbox ? 72 : 58)
+                .overlay {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: mode == .lightbox ? 28 : 22, weight: .bold))
+                        .foregroundStyle(accentColor)
+                        .offset(x: 3)
+                }
+                .shadow(color: .black.opacity(0.45), radius: mode == .lightbox ? 14 : 10, y: 6)
+        }
+    }
+
+    private func textView(_ text: String) -> some View {
+        placeholderBackground {
+            Image(systemName: "text.bubble.fill")
+                .font(.system(size: mode == .lightbox ? 48 : 36, weight: .bold))
+                .foregroundStyle(.white)
+        } subtitle: {
+            Text(text)
+                .font(mode == .lightbox ? .title2.weight(.semibold) : .title3.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white)
+                .lineSpacing(4)
+                .padding(.horizontal, 16)
+        }
+        .padding(.horizontal, 12)
     }
 
     private func placeholder(symbol: String) -> some View {
         placeholderBackground {
             Image(systemName: symbol)
-                .font(.system(size: 54, weight: .bold))
+                .font(.system(size: mode == .lightbox ? 68 : 54, weight: .bold))
                 .foregroundStyle(.white)
         } subtitle: {
             Text("Content arriving soon")
@@ -829,120 +1492,19 @@ private struct ExperienceMediaView: View {
             )
         )
     }
-
-    private func emojiView(_ emoji: String) -> some View {
-        VStack {
-            Text(emoji)
-                .font(.system(size: 92))
-                .shadow(color: accentColor.opacity(0.8), radius: 16)
-            Text("Live Drop")
-                .font(.headline)
-                .foregroundStyle(.white.opacity(0.7))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            RadialGradient(
-                colors: [accentColor.opacity(0.45), .black.opacity(0.8)],
-                center: .center,
-                startRadius: 10,
-                endRadius: 320
-            )
-        )
-    }
-
-    private func imageView(_ url: URL) -> some View {
-        AsyncImage(url: url) { phase in
-            switch phase {
-            case let .success(image):
-                image
-                    .resizable()
-                    .scaledToFill()
-                    .overlay {
-                        LinearGradient(
-                            colors: [.black.opacity(0.05), .black.opacity(0.35)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    }
-            case .empty:
-                ProgressView()
-            case .failure:
-                placeholder
-            @unknown default:
-                placeholder
-            }
-        }
-    }
-
-    private func videoPreview(poster: URL?) -> some View {
-        ZStack {
-            if let poster {
-                AsyncImage(url: poster) { phase in
-                    switch phase {
-                    case let .success(image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .overlay {
-                                Color.black.opacity(0.25)
-                            }
-                    case .empty:
-                        ProgressView()
-                    case .failure:
-                        placeholder(symbol: "play.rectangle.fill")
-                    @unknown default:
-                        placeholder(symbol: "play.rectangle.fill")
-                    }
-                }
-            } else {
-                placeholder(symbol: "play.rectangle.fill")
-            }
-
-            Circle()
-                .fill(Color.white.opacity(0.85))
-                .frame(width: 64, height: 64)
-                .overlay {
-                    Image(systemName: "play.fill")
-                        .font(.title.weight(.bold))
-                        .foregroundStyle(accentColor)
-                        .offset(x: 4)
-                }
-                .shadow(color: .black.opacity(0.45), radius: 12, y: 6)
-        }
-    }
-
-    private func textView(_ text: String) -> some View {
-        placeholderBackground {
-            Image(systemName: "text.bubble.fill")
-                .font(.system(size: 36, weight: .bold))
-                .foregroundStyle(.white)
-        } subtitle: {
-            Text(text)
-                .font(.title3.weight(.semibold))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.white)
-                .lineSpacing(4)
-                .padding(.horizontal, 8)
-        }
-        .padding(.horizontal, 12)
-    }
 }
 
-private enum ExperienceMedia {
-    case emoji(String)
-    case image(URL)
-    case video(url: URL, poster: URL?)
-    case text(String)
-    case symbol(String)
-}
-
-private extension ExperienceMedia {
-    var previewText: String? {
-        switch self {
-        case let .text(text):
-            return text
-        case .emoji, .image, .video, .symbol:
-            return nil
+private func mediaCounts(for items: [MediaDisplayItem]) -> (photos: Int, videos: Int, emojis: Int) {
+    items.reduce(into: (0, 0, 0)) { result, item in
+        switch item.content {
+        case .photo:
+            result.0 += 1
+        case .video:
+            result.1 += 1
+        case .emoji:
+            result.2 += 1
+        case .text, .symbol:
+            break
         }
     }
 }
@@ -1030,11 +1592,16 @@ struct ExperienceDetailView_Previews: PreviewProvider {
         ExperienceDetailView(
             reelPager: pager,
             selection: .constant(items.first!.id),
-            isExpanded: false
+            isExpanded: false,
+            userProvider: PreviewData.user(for:)
         )
         .preferredColorScheme(.dark)
 
-        ExperienceDetailView(ratedPOI: PreviewData.sampleRatedPOIs[0], isExpanded: true)
+        ExperienceDetailView(
+            ratedPOI: PreviewData.sampleRatedPOIs[0],
+            isExpanded: true,
+            userProvider: PreviewData.user(for:)
+        )
             .preferredColorScheme(.dark)
     }
 }

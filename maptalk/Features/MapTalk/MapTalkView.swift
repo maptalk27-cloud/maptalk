@@ -145,9 +145,18 @@ struct MapTalkView: View {
                                 }
                             }
                         )
-                        ExperienceDetailView(reelPager: pager, selection: selectionBinding, isExpanded: isExpanded)
+                        ExperienceDetailView(
+                            reelPager: pager,
+                            selection: selectionBinding,
+                            isExpanded: isExpanded,
+                            userProvider: viewModel.user(for:)
+                        )
                     case let .poi(rated):
-                        ExperienceDetailView(ratedPOI: rated, isExpanded: isExpanded)
+                        ExperienceDetailView(
+                            ratedPOI: rated,
+                            isExpanded: isExpanded,
+                            userProvider: viewModel.user(for:)
+                        )
                     }
                 }
                 .presentationDetents([.fraction(0.25), .large], selection: $experienceDetent)
