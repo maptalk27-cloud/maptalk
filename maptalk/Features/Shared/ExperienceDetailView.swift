@@ -204,8 +204,7 @@ private extension ExperienceDetailView {
                         .tag(item.id)
                     }
                 }
-                .tabViewStyle(.page(indexDisplayMode: .automatic))
-                .indexViewStyle(.page(backgroundDisplayMode: .interactive))
+                .tabViewStyle(.page(indexDisplayMode: .never))
             } else {
                 ExperiencePanel(data: data)
             }
@@ -214,16 +213,13 @@ private extension ExperienceDetailView {
 
     private func collapsedPreview(using data: ContentData) -> some View {
         VStack(spacing: 16) {
-            Capsule()
-                .fill(.white.opacity(0.25))
-                .frame(width: 44, height: 4)
-
             if let context = reelContext {
                 CompactReelPager(
                     pager: context.pager,
                     selection: context.selection
                 )
-                .frame(height: 110)
+                .frame(height: 230)
+                .padding(.horizontal, -4)
             } else {
                 VStack(spacing: 8) {
                     Text(data.title)
@@ -249,14 +245,9 @@ private extension ExperienceDetailView {
                     }
                 }
             }
-
-            Text("向上拖动以查看更多实时内容")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.65))
-                .padding(.top, 2)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 24)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 20)
         .frame(maxWidth: .infinity)
     }
 
@@ -663,7 +654,7 @@ private struct CompactReelPager: View {
     var body: some View {
         TabView(selection: selection) {
             ForEach(pager.items) { item in
-                CompactRealCard(real: item.real, user: item.user)
+                CompactRealCard(real: item.real, user: item.user, style: .collapsed)
                     .padding(.horizontal, 8)
                     .tag(item.id)
             }
@@ -673,102 +664,181 @@ private struct CompactReelPager: View {
 }
 
 private struct CompactRealCard: View {
+    enum Style {
+        case standard
+        case collapsed
+    }
+
     let real: RealPost
     let user: User?
+    let style: Style
 
-    @State private var previewSelection: UUID
-
-    init(real: RealPost, user: User?) {
+    init(real: RealPost, user: User?, style: Style = .standard) {
         self.real = real
         self.user = user
-        _previewSelection = State(initialValue: real.attachments.first?.id ?? UUID())
+        self.style = style
     }
 
     var body: some View {
-        HStack(spacing: 16) {
-            mediaPreview
+        HStack(alignment: .top, spacing: 12) {
+            avatarView
 
-            VStack(alignment: .leading, spacing: 10) {
-                header
+            VStack(alignment: .leading, spacing: 12) {
+                userNameRow
 
-                Text(previewDescription)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(3)
+                contentText
 
-                metricsRow
+                if hasMedia {
+                    mediaRow
+                }
+
+                footerRow
             }
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 18)
-        .padding(.vertical, 16)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
         .frame(maxWidth: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [Theme.neonPrimary.opacity(0.2), Color.black.opacity(0.7)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.25), lineWidth: 1)
-        }
-        .onChange(of: real.attachments.map(\.id)) { ids in
-            if let first = ids.first {
-                previewSelection = first
-            }
-        }
     }
 
-    private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(user?.handle ?? "Unknown user")
-                .font(.headline)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
-
-            Text(real.createdAt.formatted(.relative(presentation: .named)))
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.6))
-        }
+    private var horizontalPadding: CGFloat {
+        style == .collapsed ? 16 : 24
     }
 
-    private var previewDescription: String {
-        let base = "Radius \(Int(real.radiusMeters))m · \(real.visibility.displayName)"
+    private var verticalPadding: CGFloat {
+        style == .collapsed ? 12 : 22
+    }
 
-        if let message = trimmedMessage, message.isEmpty == false {
-            if real.attachments.isEmpty {
-                return "Shared a note · \(base)"
+    private var avatarSize: CGFloat {
+        style == .collapsed ? 34 : 40
+    }
+
+    private var mediaHeight: CGFloat {
+        style == .collapsed ? 88 : 120
+    }
+
+    private var textLineLimit: Int {
+        style == .collapsed ? 2 : 3
+    }
+
+    private var userNameRow: some View {
+        Text(user?.handle ?? "Unknown user")
+            .font(.headline.weight(.semibold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var avatarView: some View {
+        Group {
+            if let url = user?.avatarURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFill()
+                    case .failure:
+                        Color.gray
+                    default:
+                        ProgressView()
+                    }
+                }
+            } else {
+                Color.gray.opacity(0.4)
+                    .overlay {
+                        Text(user?.handle.prefix(2).uppercased() ?? "??")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                    }
             }
-            return message
         }
+        .frame(width: avatarSize, height: avatarSize)
+        .clipShape(Circle())
+    }
 
-        if real.attachments.allSatisfy({ attachment in
-            if case .emoji = attachment.kind { return true }
-            return false
-        }), let emoji = firstEmoji(in: real.attachments) {
-            return "\(emoji) happening nearby"
-        }
-
-        if let descriptor = mediaDescriptor(for: real) {
-            return "\(descriptor) · \(base)"
-        }
-
-        return base
+    private var contentText: some View {
+        Text(trimmedMessage ?? fallbackDescription)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .lineLimit(textLineLimit)
     }
 
     private var trimmedMessage: String? {
-        real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (text?.isEmpty == false) ? text : nil
     }
 
-    private var metricsRow: some View {
-        HStack(spacing: 12) {
+    private var fallbackDescription: String {
+        if let descriptor = mediaDescriptor(for: real) {
+            return descriptor
+        }
+        return "\(real.visibility.displayName) drop"
+    }
+
+    private var hasMedia: Bool {
+        real.attachments.isEmpty == false
+    }
+
+    private var collageSources: [RealPost.Attachment?] {
+        var preferred = real.attachments.filter { attachment in
+            switch attachment.kind {
+            case .photo:
+                return true
+            case let .video(_, poster):
+                return poster != nil
+            default:
+                return false
+            }
+        }
+        if preferred.count < 3 {
+            preferred.append(contentsOf: real.attachments.filter { attachment in
+                if case .video = attachment.kind { return true }
+                if case .emoji = attachment.kind { return true }
+                return false
+            })
+        }
+        var result: [RealPost.Attachment?] = Array(preferred.prefix(3))
+        while result.count < 3 {
+            result.append(nil)
+        }
+        return result
+    }
+
+    @ViewBuilder
+    private func collageTile(for attachment: RealPost.Attachment?) -> some View {
+        if let attachment {
+            attachmentThumbnail(for: attachment)
+        } else if let text = trimmedMessage {
+            previewTextCard(text)
+        } else {
+            previewFallback(symbol: "sparkles")
+        }
+    }
+
+    private var mediaRow: some View {
+        GeometryReader { proxy in
+            let spacing: CGFloat = 10
+            let totalSpacing = spacing * 2
+            let calculatedWidth = max((proxy.size.width - totalSpacing) / 3, 0)
+            let size = min(calculatedWidth, mediaHeight)
+
+            HStack(spacing: spacing) {
+                ForEach(0..<3) { index in
+                    collageTile(for: collageSources[index])
+                        .frame(width: size, height: size)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(height: mediaHeight)
+    }
+
+    private var footerRow: some View {
+        HStack(spacing: 14) {
+            Text(real.createdAt.formatted(.relative(presentation: .named)))
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+
+            Spacer()
+
             metricsPill(symbol: "heart.fill", text: formatCount(real.metrics.likeCount))
             metricsPill(symbol: "bubble.right.fill", text: formatCount(real.metrics.commentCount))
         }
@@ -787,108 +857,6 @@ private struct CompactRealCard: View {
         .background(.white.opacity(0.12), in: Capsule(style: .continuous))
     }
 
-    private var mediaPreview: some View {
-        ZStack {
-            basePreview
-
-            VStack {
-                HStack {
-                    summaryChip
-                    Spacer()
-                }
-
-                Spacer()
-
-                HStack {
-                    avatarBadge
-                    Spacer()
-                    pageCounter
-                }
-            }
-            .padding(8)
-        }
-        .frame(width: 108, height: 108)
-        .background(
-            LinearGradient(
-                colors: [Theme.neonPrimary.opacity(0.25), Color.black.opacity(0.75)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-        }
-    }
-
-    @ViewBuilder
-    private var basePreview: some View {
-        if attachments.isEmpty {
-            if let text = trimmedMessage, text.isEmpty == false {
-                previewTextCard(text)
-            } else {
-                previewFallback(symbol: "sparkles")
-            }
-        } else if attachments.count == 1, let first = attachments.first {
-            attachmentThumbnail(for: first)
-        } else {
-            TabView(selection: $previewSelection) {
-                ForEach(attachments) { attachment in
-                    attachmentThumbnail(for: attachment)
-                        .tag(attachment.id)
-                }
-            }
-            .tabViewStyle(.page(indexDisplayMode: .never))
-        }
-    }
-
-    private var attachments: [RealPost.Attachment] {
-        real.attachments
-    }
-
-    private var currentIndex: Int {
-        attachments.firstIndex(where: { $0.id == previewSelection }) ?? 0
-    }
-
-    @ViewBuilder
-    private var pageCounter: some View {
-        if attachments.count > 1 {
-            Text("\(currentIndex + 1)/\(attachments.count)")
-                .font(.caption2.bold())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
-                .background(.black.opacity(0.55), in: Capsule(style: .continuous))
-        }
-    }
-
-    @ViewBuilder
-    private var summaryChip: some View {
-        if let summary = attachmentSummary {
-            Text(summary)
-                .font(.caption2.bold())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.black.opacity(0.45), in: Capsule(style: .continuous))
-        }
-    }
-
-    private var attachmentSummary: String? {
-        let counts = mediaCounts(for: real.attachments)
-        var segments: [String] = []
-        if counts.photos > 0 {
-            segments.append("\(counts.photos) \(counts.photos == 1 ? "Photo" : "Photos")")
-        }
-        if counts.videos > 0 {
-            segments.append("\(counts.videos) \(counts.videos == 1 ? "Video" : "Videos")")
-        }
-        if counts.emojis > 0 {
-            segments.append("\(counts.emojis) \(counts.emojis == 1 ? "Emoji" : "Emoji")")
-        }
-        return segments.isEmpty ? nil : segments.joined(separator: " · ")
-    }
 
     @ViewBuilder
     private func attachmentThumbnail(for attachment: RealPost.Attachment) -> some View {
