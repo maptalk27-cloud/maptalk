@@ -218,7 +218,8 @@ private extension ExperienceDetailView {
                     pager: context.pager,
                     selection: context.selection
                 )
-                .frame(height: 230)
+                .padding(.top, 0)
+                .frame(height: 240)
                 .padding(.horizontal, -4)
             } else {
                 VStack(spacing: 8) {
@@ -680,8 +681,10 @@ private struct CompactRealCard: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .top, spacing: 0) {
             avatarView
+                .alignmentGuide(.top) { $0[.top] }
+                .padding(.trailing, 10)
 
             VStack(alignment: .leading, spacing: 12) {
                 userNameRow
@@ -695,6 +698,7 @@ private struct CompactRealCard: View {
                 footerRow
             }
         }
+        .padding(.top, headerTopPadding)
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, verticalPadding)
         .frame(maxWidth: .infinity)
@@ -707,6 +711,8 @@ private struct CompactRealCard: View {
     private var verticalPadding: CGFloat {
         style == .collapsed ? 12 : 22
     }
+
+    private var headerTopPadding: CGFloat { 40 }
 
     private var avatarSize: CGFloat {
         style == .collapsed ? 34 : 40
@@ -777,28 +783,10 @@ private struct CompactRealCard: View {
     }
 
     private var collageSources: [RealPost.Attachment?] {
-        var preferred = real.attachments.filter { attachment in
-            switch attachment.kind {
-            case .photo:
-                return true
-            case let .video(_, poster):
-                return poster != nil
-            default:
-                return false
-            }
+        if hasMedia {
+            return Array(real.attachments.prefix(3)).map { Optional($0) }
         }
-        if preferred.count < 3 {
-            preferred.append(contentsOf: real.attachments.filter { attachment in
-                if case .video = attachment.kind { return true }
-                if case .emoji = attachment.kind { return true }
-                return false
-            })
-        }
-        var result: [RealPost.Attachment?] = Array(preferred.prefix(3))
-        while result.count < 3 {
-            result.append(nil)
-        }
-        return result
+        return []
     }
 
     @ViewBuilder
@@ -820,8 +808,8 @@ private struct CompactRealCard: View {
             let size = min(calculatedWidth, mediaHeight)
 
             HStack(spacing: spacing) {
-                ForEach(0..<3) { index in
-                    collageTile(for: collageSources[index])
+                ForEach(Array(collageSources.enumerated()), id: \.offset) { element in
+                    collageTile(for: element.element)
                         .frame(width: size, height: size)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
