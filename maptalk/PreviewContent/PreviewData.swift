@@ -217,8 +217,27 @@ enum PreviewData {
                     skyline.id
                 ],
                 comments: [
-                    comment(3101, user: night, text: "Save me a vantage point!", minutesAgo: 14, relativeTo: now),
-                    comment(3102, user: bund, text: "Need to see that drone swarm IRL.", minutesAgo: 20, relativeTo: now)
+                    comment(
+                        3101,
+                        user: night,
+                        text: "Save me a vantage point!",
+                        minutesAgo: 14,
+                        relativeTo: now,
+                        replies: [
+                            reply(4101, user: skyline, text: "Posting clips later.", minutesAgo: 10, relativeTo: now),
+                            reply(4102, user: bund, text: "Tag me when you do.", minutesAgo: 9, relativeTo: now)
+                        ]
+                    ),
+                    comment(
+                        3102,
+                        user: bund,
+                        text: "Need to see that drone swarm IRL.",
+                        minutesAgo: 20,
+                        relativeTo: now,
+                        replies: [
+                            reply(4103, user: night, text: "Bring your long lens.", minutesAgo: 18, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .friendsOnly,
                 createdAt: now,
@@ -247,7 +266,17 @@ enum PreviewData {
                     bund.id
                 ],
                 comments: [
-                    comment(3111, user: currentUser, text: "I'll bike over after dinner.", minutesAgo: 28, relativeTo: now)
+                    comment(
+                        3111,
+                        user: currentUser,
+                        text: "I'll bike over after dinner.",
+                        minutesAgo: 28,
+                        relativeTo: now,
+                        replies: [
+                            reply(4104, user: skyline, text: "Bring an extra lock.", minutesAgo: 24, relativeTo: now),
+                            reply(4105, user: night, text: "Grabbing snacks en route.", minutesAgo: 22, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .publicAll,
                 createdAt: now.addingTimeInterval(-5_400),
@@ -436,7 +465,16 @@ enum PreviewData {
                     skyline.id
                 ],
                 comments: [
-                    comment(3201, user: currentUser, text: "Streaming from Seattle.", minutesAgo: 40, relativeTo: now)
+                    comment(
+                        3201,
+                        user: currentUser,
+                        text: "Streaming from Seattle.",
+                        minutesAgo: 40,
+                        relativeTo: now,
+                        replies: [
+                            reply(4106, user: aurora, text: "DM the link please!", minutesAgo: 38, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .publicAll,
                 createdAt: now.addingTimeInterval(-21_600),
@@ -482,9 +520,26 @@ enum PreviewData {
         user: User,
         text: String,
         minutesAgo: Double,
-        relativeTo referenceDate: Date
+        relativeTo referenceDate: Date,
+        replies: [RealPost.Comment.Reply] = []
     ) -> RealPost.Comment {
         RealPost.Comment(
+            id: uuid(seed),
+            userId: user.id,
+            text: text,
+            createdAt: referenceDate.addingTimeInterval(-minutesAgo * 60),
+            replies: replies
+        )
+    }
+
+    private static func reply(
+        _ seed: Int,
+        user: User,
+        text: String,
+        minutesAgo: Double,
+        relativeTo referenceDate: Date
+    ) -> RealPost.Comment.Reply {
+        RealPost.Comment.Reply(
             id: uuid(seed),
             userId: user.id,
             text: text,

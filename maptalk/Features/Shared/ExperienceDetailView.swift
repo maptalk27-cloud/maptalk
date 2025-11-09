@@ -39,6 +39,12 @@ struct ExperienceDetailView: View {
         let mapRegion: MKCoordinateRegion
         let primaryActionTitle: String
         let primaryActionSymbol: String
+        let realDetail: RealDetailDescriptor?
+    }
+
+    struct RealDetailDescriptor {
+        let real: RealPost
+        let user: User?
     }
 
     private let poi: RatedPOI?
@@ -114,6 +120,7 @@ private struct FriendEngagement: Identifiable {
     let message: String
     let badge: String?
     let timestamp: Date?
+    let replies: [FriendEngagement]
 }
 
 private extension MediaDisplayItem {
@@ -220,7 +227,7 @@ private extension ExperienceDetailView {
                 )
                 .padding(.top, 0)
                 .frame(height: 240)
-                .padding(.horizontal, -4)
+                .padding(.horizontal, 0)
             } else {
                 VStack(spacing: 8) {
                     Text(data.title)
@@ -247,8 +254,9 @@ private extension ExperienceDetailView {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 20)
+        .padding(.horizontal, -16)
+        .padding(.top, 12)
+        .padding(.bottom, -8)
         .frame(maxWidth: .infinity)
     }
 
@@ -296,18 +304,32 @@ private extension ExperienceDetailView {
                     user: user,
                     message: "Reacted to this drop.",
                     badge: nil,
-                    timestamp: nil
+                    timestamp: nil,
+                    replies: []
                 )
             }
             let friendComments = real.comments.compactMap { comment -> FriendEngagement? in
                 guard let user = userProvider(comment.userId) else { return nil }
+                let replies = comment.replies.compactMap { reply -> FriendEngagement? in
+                    guard let replyUser = userProvider(reply.userId) else { return nil }
+                    return FriendEngagement(
+                        id: reply.id,
+                        kind: .comment,
+                        user: replyUser,
+                        message: reply.text,
+                        badge: nil,
+                        timestamp: reply.createdAt,
+                        replies: []
+                    )
+                }
                 return FriendEngagement(
                     id: comment.id,
                     kind: .comment,
                     user: user,
                     message: comment.text,
                     badge: nil,
-                    timestamp: comment.createdAt
+                    timestamp: comment.createdAt,
+                    replies: replies
                 )
             }
             let mapRegion = MKCoordinateRegion(
@@ -329,7 +351,8 @@ private extension ExperienceDetailView {
                 backgroundGradient: gradient,
                 mapRegion: mapRegion,
                 primaryActionTitle: "React",
-                primaryActionSymbol: "face.smiling"
+                primaryActionSymbol: "face.smiling",
+                realDetail: RealDetailDescriptor(real: real, user: user)
             )
         case let .poi(rated):
             let accent = rated.poi.category.accentColor
@@ -367,7 +390,8 @@ private extension ExperienceDetailView {
                     user: user,
                     message: message,
                     badge: badge,
-                    timestamp: rating.createdAt
+                    timestamp: rating.createdAt,
+                    replies: []
                 )
             }
             return ContentData(
@@ -388,7 +412,8 @@ private extension ExperienceDetailView {
                     longitudinalMeters: 800
                 ),
                 primaryActionTitle: "Add Rating",
-                primaryActionSymbol: "star.fill"
+                primaryActionSymbol: "star.fill",
+                realDetail: nil
             )
         }
     }
@@ -505,63 +530,12 @@ private struct ExperiencePanel: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 28) {
-                header
-
-                ExperienceMediaGallery(items: data.galleryItems, accentColor: data.accentColor)
-                    .frame(height: 240)
-                    .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 28, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [data.accentColor.opacity(0.8), .white.opacity(0.15)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 2
-                            )
-                            .blendMode(.screen)
-                    }
-
-                VStack(alignment: .leading, spacing: 18) {
-                    badgesSection
-
-                    if let highlight = data.highlight {
-                        Text(highlight)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .lineSpacing(4)
-                    }
-
-                    if let secondary = data.secondary {
-                        Text(secondary)
-                            .font(.footnote)
-                            .foregroundStyle(.white.opacity(0.7))
-                    }
-
-                    coordinatePreview
-
-                    if data.friendLikes.isEmpty == false {
-                        FriendEngagementList(title: "Friend Likes", entries: data.friendLikes)
-                    }
-
-                    if data.friendComments.isEmpty == false {
-                        FriendEngagementList(title: "Friend Comments", entries: data.friendComments)
-                    }
-
-                    if data.friendRatings.isEmpty == false {
-                        FriendEngagementList(title: "Friend Ratings", entries: data.friendRatings)
-                    }
+                if let realDetail = data.realDetail {
+                    realExperienceContent(for: realDetail)
+                } else {
+                    defaultExperienceContent
+                    actionsBar
                 }
-                .padding(24)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 32, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
-                }
-                .modifier(Theme.neonGlow(data.accentColor))
-
-                actionsBar
             }
             .padding(.horizontal, 24)
             .padding(.top, 40)
@@ -586,6 +560,81 @@ private struct ExperiencePanel: View {
         .padding(.horizontal, 12)
     }
 
+    @ViewBuilder
+    private var defaultExperienceContent: some View {
+        header
+
+        ExperienceMediaGallery(items: data.galleryItems, accentColor: data.accentColor)
+            .frame(height: 240)
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [data.accentColor.opacity(0.8), .white.opacity(0.15)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 2
+                    )
+                    .blendMode(.screen)
+            }
+
+        VStack(alignment: .leading, spacing: 18) {
+            badgesSection
+
+            if let highlight = data.highlight {
+                Text(highlight)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineSpacing(4)
+            }
+
+            if let secondary = data.secondary {
+                Text(secondary)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+
+            if data.friendLikes.isEmpty == false {
+                FriendEngagementList(title: "Friend Likes", entries: data.friendLikes)
+            }
+
+            if data.friendComments.isEmpty == false {
+                FriendEngagementList(title: "Friend Comments", entries: data.friendComments)
+            }
+
+            if data.friendRatings.isEmpty == false {
+                FriendEngagementList(title: "Friend Ratings", entries: data.friendRatings)
+            }
+        }
+        .padding(24)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+        }
+        .modifier(Theme.neonGlow(data.accentColor))
+    }
+
+    @ViewBuilder
+    private func realExperienceContent(for detail: ExperienceDetailView.RealDetailDescriptor) -> some View {
+        VStack(alignment: .leading, spacing: 24) {
+            CompactRealCard(real: detail.real, user: detail.user, style: .standard)
+                .padding(.horizontal, 4)
+
+            if data.friendLikes.isEmpty == false {
+                LikesAvatarGrid(entries: data.friendLikes)
+            }
+
+            if data.friendComments.isEmpty == false {
+                CommentThreadList(entries: data.friendComments)
+            }
+
+            actionsBar
+        }
+    }
+
     private var badgesSection: some View {
         HStack(spacing: 10) {
             ForEach(data.badges, id: \.self) { badge in
@@ -603,23 +652,6 @@ private struct ExperiencePanel: View {
                     }
             }
             Spacer(minLength: 0)
-        }
-    }
-
-    private var coordinatePreview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Map Preview")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.75))
-
-            Map(initialPosition: .region(data.mapRegion))
-                .disabled(true)
-                .frame(height: 160)
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                }
         }
     }
 
@@ -1117,6 +1149,158 @@ private struct FriendEngagementRow: View {
 
     private var timestampText: String? {
         entry.timestamp?.formatted(.relative(presentation: .named))
+    }
+}
+
+// MARK: - Real detail sections
+
+private struct LikesAvatarGrid: View {
+    let entries: [FriendEngagement]
+
+    private let columns: [GridItem] = Array(repeating: GridItem(.fixed(44), spacing: 8), count: 5)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Image(systemName: "heart")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
+
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                ForEach(entries) { entry in
+                    AvatarSquare(user: entry.user)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct AvatarSquare: View {
+    let user: User?
+    var size: CGFloat = 44
+
+    var body: some View {
+        ZStack {
+            if let url = user?.avatarURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFill()
+                    case .failure:
+                        placeholder
+                    default:
+                        ProgressView()
+                    }
+                }
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.3), lineWidth: 1)
+        }
+    }
+
+    private var placeholder: some View {
+        Text(initials)
+            .font(.footnote.bold())
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.gray.opacity(0.4))
+    }
+
+    private var initials: String {
+        guard let handle = user?.handle else { return "??" }
+        return String(handle.prefix(2)).uppercased()
+    }
+}
+
+private struct CommentThreadList: View {
+    let entries: [FriendEngagement]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: "text.bubble")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.85))
+
+            VStack(spacing: 14) {
+                ForEach(entries) { entry in
+                    CommentThreadRow(entry: entry)
+                }
+            }
+        }
+    }
+}
+
+private struct CommentThreadRow: View {
+    let entry: FriendEngagement
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            AvatarSquare(user: entry.user)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(entry.user?.handle ?? "Friend")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    if let timestamp = entry.timestamp?.formatted(.relative(presentation: .named)) {
+                        Text(timestamp)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                }
+
+                Text(entry.message)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.95))
+
+                if entry.replies.isEmpty == false {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(entry.replies) { reply in
+                            CommentReplyRow(entry: reply)
+                        }
+                    }
+                    .padding(12)
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
+        }
+        .padding(16)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+private struct CommentReplyRow: View {
+    let entry: FriendEngagement
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            AvatarSquare(user: entry.user, size: 34)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(entry.user?.handle ?? "Friend")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    if let timestamp = entry.timestamp?.formatted(.relative(presentation: .named)) {
+                        Text(timestamp)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                }
+
+                Text(entry.message)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+        }
     }
 }
 

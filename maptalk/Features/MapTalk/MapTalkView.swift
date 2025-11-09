@@ -576,8 +576,11 @@ private struct MapTalkControls: View {
     var body: some View {
         VStack(alignment: .trailing, spacing: 12) {
             LocateButton(action: onTapLocate)
+                .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
             RatingButton(action: onTapRating)
+                .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
             RealButton(action: onTapReal)
+                .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
         }
     }
 }
@@ -621,6 +624,7 @@ private enum ControlsLayout {
     static let baseSafeAreaMultiplier: CGFloat = 0.2
     static let previewGap: CGFloat = 1
     static let previewFraction: CGFloat = 0.2
+    static let controlButtonSize: CGFloat = 54
 
     static func basePadding(for geometry: GeometryProxy) -> CGFloat {
         geometry.safeAreaInsets.bottom * baseSafeAreaMultiplier + baseInset

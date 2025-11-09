@@ -25,16 +25,38 @@ struct RealPost: Identifiable, Hashable {
     }
 
     struct Comment: Identifiable, Hashable {
+        struct Reply: Identifiable, Hashable {
+            let id: UUID
+            let userId: UUID
+            var text: String
+            var createdAt: Date
+
+            init(id: UUID = UUID(), userId: UUID, text: String, createdAt: Date = .init()) {
+                self.id = id
+                self.userId = userId
+                self.text = text
+                self.createdAt = createdAt
+            }
+        }
+
         let id: UUID
         let userId: UUID
         var text: String
         var createdAt: Date
+        var replies: [Reply]
 
-        init(id: UUID = UUID(), userId: UUID, text: String, createdAt: Date = .init()) {
+        init(
+            id: UUID = UUID(),
+            userId: UUID,
+            text: String,
+            createdAt: Date = .init(),
+            replies: [Reply] = []
+        ) {
             self.id = id
             self.userId = userId
             self.text = text
             self.createdAt = createdAt
+            self.replies = replies
         }
     }
 
