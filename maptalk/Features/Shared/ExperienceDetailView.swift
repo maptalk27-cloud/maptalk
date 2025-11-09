@@ -254,7 +254,7 @@ private extension ExperienceDetailView {
                 }
             }
         }
-        .padding(.horizontal, -16)
+        .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
         .padding(.top, 12)
         .padding(.bottom, -8)
         .frame(maxWidth: .infinity)
@@ -522,6 +522,12 @@ private func trimmedCount(_ value: Double) -> String {
     return formatted
 }
 
+private enum ExperienceSheetLayout {
+    static let horizontalInset: CGFloat = 16
+    static let panelHorizontalPadding: CGFloat = 0
+    static let detailContentInset: CGFloat = 16
+}
+
 // MARK: - Experience panel
 
 private struct ExperiencePanel: View {
@@ -535,12 +541,14 @@ private struct ExperiencePanel: View {
                 } else {
                     defaultExperienceContent
                     actionsBar
+                        .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
             .padding(.top, 40)
             .padding(.bottom, 60)
         }
+        .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
     }
 
     private var header: some View {
@@ -625,13 +633,16 @@ private struct ExperiencePanel: View {
 
             if data.friendLikes.isEmpty == false {
                 LikesAvatarGrid(entries: data.friendLikes)
+                    .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
             }
 
             if data.friendComments.isEmpty == false {
                 CommentThreadList(entries: data.friendComments)
+                    .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
             }
 
             actionsBar
+                .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
         }
     }
 
@@ -1158,6 +1169,7 @@ private struct LikesAvatarGrid: View {
     let entries: [FriendEngagement]
 
     private let columns: [GridItem] = Array(repeating: GridItem(.fixed(44), spacing: 8), count: 5)
+    private let leadingInset: CGFloat = 16
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1170,6 +1182,7 @@ private struct LikesAvatarGrid: View {
                     AvatarSquare(user: entry.user)
                 }
             }
+            .padding(.leading, leadingInset)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
