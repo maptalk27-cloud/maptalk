@@ -692,10 +692,14 @@ private struct CompactRealCard: View {
     let user: User?
     let style: Style
 
+    @State private var isLightboxPresented = false
+    @State private var lightboxSelection: UUID
+
     init(real: RealPost, user: User?, style: Style = .standard) {
         self.real = real
         self.user = user
         self.style = style
+        _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
 
     var body: some View {
@@ -720,6 +724,16 @@ private struct CompactRealCard: View {
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, verticalPadding)
         .frame(maxWidth: .infinity)
+        .fullScreenCover(isPresented: $isLightboxPresented) {
+            if lightboxItems.isEmpty == false {
+                MediaLightbox(
+                    items: lightboxItems,
+                    selection: $lightboxSelection,
+                    accentColor: lightboxAccentColor,
+                    isPresented: $isLightboxPresented
+                )
+            }
+        }
     }
 
     private var horizontalPadding: CGFloat {
@@ -744,8 +758,36 @@ private struct CompactRealCard: View {
 
     private var standardTileSize: CGFloat { 88 }
 
+    private var lightboxItems: [MediaDisplayItem] {
+        real.attachments.map { attachment in
+            switch attachment.kind {
+            case let .photo(url):
+                return MediaDisplayItem(id: attachment.id, content: .photo(url))
+            case let .video(url, poster):
+                return MediaDisplayItem(id: attachment.id, content: .video(url: url, poster: poster))
+            case let .emoji(emoji):
+                return MediaDisplayItem(id: attachment.id, content: .emoji(emoji))
+            }
+        }
+    }
+
+    private var lightboxAccentColor: Color {
+        switch real.visibility {
+        case .publicAll:
+            return Theme.neonPrimary
+        case .friendsOnly:
+            return Theme.neonAccent
+        case .anonymous:
+            return Theme.neonWarning
+        }
+    }
+
     private var maxVisibleMediaCount: Int {
         style == .collapsed ? 3 : 9
+    }
+
+    private var overflowCount: Int {
+        max(0, real.attachments.count - maxVisibleMediaCount)
     }
 
     private var textLineLimit: Int {
@@ -844,6 +886,13 @@ private struct CompactRealCard: View {
                     collageTile(for: element.element)
                         .frame(width: size, height: size)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(alignment: .trailing) {
+                            collapsedOverflowOverlay(for: element.offset, tileSize: size)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            handleMediaTap(for: element.element)
+                        }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -859,6 +908,13 @@ private struct CompactRealCard: View {
                 collageTile(for: element.element)
                     .frame(width: standardTileSize, height: standardTileSize)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .overlay(alignment: .trailing) {
+                        standardOverflowOverlay(for: element.offset, tileSize: standardTileSize)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        handleMediaTap(for: element.element)
+                    }
             }
         }
     }
@@ -881,6 +937,51 @@ private struct CompactRealCard: View {
 
     private var metricsTrailingPadding: CGFloat {
         style == .collapsed ? 18 : 26
+    }
+
+    private func handleMediaTap(for attachment: RealPost.Attachment?) {
+        guard let first = lightboxItems.first else { return }
+        if let attachment, let match = lightboxItems.first(where: { $0.id == attachment.id }) {
+            lightboxSelection = match.id
+        } else {
+            lightboxSelection = first.id
+        }
+        isLightboxPresented = true
+    }
+
+    private func collapsedOverflowOverlay(for index: Int, tileSize: CGFloat) -> some View {
+        Group {
+            if style == .collapsed,
+               overflowCount > 0,
+               index == maxVisibleMediaCount - 1 {
+                ZStack {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.55))
+                        .frame(width: tileSize * 0.65)
+                        .offset(x: tileSize * 0.175)
+                    Text("+\(overflowCount)")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+                }
+            }
+        }
+    }
+
+    private func standardOverflowOverlay(for index: Int, tileSize: CGFloat) -> some View {
+        Group {
+            if style == .standard,
+               overflowCount > 0,
+               index == maxVisibleMediaCount - 1 {
+                ZStack {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.45))
+                    Text("+\(overflowCount)")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                }
+            }
+        }
     }
 
     private func metricsPill(symbol: String, text: String) -> some View {
