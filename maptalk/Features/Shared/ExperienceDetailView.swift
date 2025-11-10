@@ -526,6 +526,7 @@ private enum ExperienceSheetLayout {
     static let horizontalInset: CGFloat = 16
     static let panelHorizontalPadding: CGFloat = 0
     static let detailContentInset: CGFloat = 16
+    static let engagementHorizontalInset: CGFloat = 22
 }
 
 // MARK: - Experience panel
@@ -540,8 +541,6 @@ private struct ExperiencePanel: View {
                     realExperienceContent(for: realDetail)
                 } else {
                     defaultExperienceContent
-                    actionsBar
-                        .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
             }
             .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
@@ -573,7 +572,7 @@ private struct ExperiencePanel: View {
         header
 
         ExperienceMediaGallery(items: data.galleryItems, accentColor: data.accentColor)
-            .frame(height: 240)
+            .frame(height: ExperienceMediaGalleryLayout.height(for: data.galleryItems))
             .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
@@ -640,9 +639,6 @@ private struct ExperiencePanel: View {
                 CommentThreadList(entries: data.friendComments)
                     .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
             }
-
-            actionsBar
-                .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
         }
     }
 
@@ -666,27 +662,6 @@ private struct ExperiencePanel: View {
         }
     }
 
-    private var actionsBar: some View {
-        HStack(spacing: 16) {
-            Button {
-                // hook up soon
-            } label: {
-                Label(data.primaryActionTitle, systemImage: data.primaryActionSymbol)
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(NeonButtonStyle(color: data.accentColor))
-
-            Button {
-                // hook up soon
-            } label: {
-                Image(systemName: "paperplane.fill")
-                    .font(.title3.bold())
-                    .frame(width: 54, height: 54)
-            }
-            .buttonStyle(NeonIconButtonStyle(color: data.accentColor))
-        }
-    }
 }
 
 // MARK: - Compact reel pager
@@ -765,6 +740,14 @@ private struct CompactRealCard: View {
         style == .collapsed ? 88 : 120
     }
 
+    private var mediaSpacing: CGFloat { 10 }
+
+    private var standardTileSize: CGFloat { 88 }
+
+    private var maxVisibleMediaCount: Int {
+        style == .collapsed ? 3 : 9
+    }
+
     private var textLineLimit: Int {
         style == .collapsed ? 2 : 3
     }
@@ -826,10 +809,8 @@ private struct CompactRealCard: View {
     }
 
     private var collageSources: [RealPost.Attachment?] {
-        if hasMedia {
-            return Array(real.attachments.prefix(3)).map { Optional($0) }
-        }
-        return []
+        guard hasMedia else { return [] }
+        return Array(real.attachments.prefix(maxVisibleMediaCount)).map { Optional($0) }
     }
 
     @ViewBuilder
@@ -843,14 +824,22 @@ private struct CompactRealCard: View {
         }
     }
 
+    @ViewBuilder
     private var mediaRow: some View {
+        if style == .collapsed {
+            collapsedMediaStrip
+        } else {
+            standardMediaGrid
+        }
+    }
+
+    private var collapsedMediaStrip: some View {
         GeometryReader { proxy in
-            let spacing: CGFloat = 10
-            let totalSpacing = spacing * 2
+            let totalSpacing = mediaSpacing * 2
             let calculatedWidth = max((proxy.size.width - totalSpacing) / 3, 0)
             let size = min(calculatedWidth, mediaHeight)
 
-            HStack(spacing: spacing) {
+            HStack(spacing: mediaSpacing) {
                 ForEach(Array(collageSources.enumerated()), id: \.offset) { element in
                     collageTile(for: element.element)
                         .frame(width: size, height: size)
@@ -862,17 +851,36 @@ private struct CompactRealCard: View {
         .frame(height: mediaHeight)
     }
 
+    private var standardMediaGrid: some View {
+        let columns = Array(repeating: GridItem(.fixed(standardTileSize), spacing: mediaSpacing, alignment: .leading), count: 3)
+
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: mediaSpacing) {
+            ForEach(Array(collageSources.enumerated()), id: \.offset) { element in
+                collageTile(for: element.element)
+                    .frame(width: standardTileSize, height: standardTileSize)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+        }
+    }
+
     private var footerRow: some View {
         HStack(spacing: 14) {
             Text(real.createdAt.formatted(.relative(presentation: .named)))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
 
-            Spacer()
+            Spacer(minLength: 12)
 
-            metricsPill(symbol: "heart.fill", text: formatCount(real.metrics.likeCount))
-            metricsPill(symbol: "bubble.right.fill", text: formatCount(real.metrics.commentCount))
+            HStack(spacing: 10) {
+                metricsPill(symbol: "heart.fill", text: formatCount(real.metrics.likeCount))
+                metricsPill(symbol: "bubble.right.fill", text: formatCount(real.metrics.commentCount))
+            }
         }
+        .padding(.trailing, metricsTrailingPadding)
+    }
+
+    private var metricsTrailingPadding: CGFloat {
+        style == .collapsed ? 18 : 26
     }
 
     private func metricsPill(symbol: String, text: String) -> some View {
@@ -1033,17 +1041,18 @@ private struct FriendEngagementList: View {
     let entries: [FriendEngagement]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.8))
 
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
                 ForEach(entries) { entry in
                     FriendEngagementRow(entry: entry)
                 }
             }
         }
+        .padding(.horizontal, ExperienceSheetLayout.engagementHorizontalInset)
     }
 }
 
@@ -1082,7 +1091,8 @@ private struct FriendEngagementRow: View {
                     .background(.white.opacity(0.12), in: Capsule(style: .continuous))
             }
         }
-        .padding(10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
@@ -1185,6 +1195,7 @@ private struct LikesAvatarGrid: View {
             .padding(.leading, leadingInset)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.horizontal, ExperienceSheetLayout.engagementHorizontalInset)
     }
 }
 
@@ -1246,6 +1257,7 @@ private struct CommentThreadList: View {
                 }
             }
         }
+        .padding(.horizontal, ExperienceSheetLayout.engagementHorizontalInset)
     }
 }
 
@@ -1341,18 +1353,37 @@ private struct ExperienceMediaGallery: View {
                     mode: .card
                 )
             } else {
-                TabView(selection: $selection) {
-                    ForEach(items) { item in
-                        MediaCardView(item: item, accentColor: accentColor, mode: .card)
-                            .tag(item.id)
+                if usesGridLayout {
+                    LazyVGrid(columns: ExperienceMediaGalleryLayout.gridColumns, spacing: ExperienceMediaGalleryLayout.gridSpacing) {
+                        ForEach(items) { item in
+                            MediaCardView(item: item, accentColor: accentColor, mode: .card)
+                                .frame(height: ExperienceMediaGalleryLayout.gridItemHeight)
+                                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                                }
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selection = item.id
+                                    isLightboxPresented = true
+                                }
+                        }
                     }
+                } else {
+                    TabView(selection: $selection) {
+                        ForEach(items) { item in
+                            MediaCardView(item: item, accentColor: accentColor, mode: .card)
+                                .tag(item.id)
+                        }
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        isLightboxPresented = true
+                    }
+                    .overlay(pageIndicator, alignment: .bottomTrailing)
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    isLightboxPresented = true
-                }
-                .overlay(pageIndicator, alignment: .bottomTrailing)
             }
 
             if let summary = summaryText {
@@ -1382,7 +1413,7 @@ private struct ExperienceMediaGallery: View {
 
     @ViewBuilder
     private var pageIndicator: some View {
-        if items.count > 1 {
+        if items.count > 1 && usesGridLayout == false {
             Text("\(currentIndex + 1)/\(items.count)")
                 .font(.caption.bold())
                 .foregroundStyle(.white)
@@ -1406,6 +1437,46 @@ private struct ExperienceMediaGallery: View {
             segments.append("\(counts.emojis) \(counts.emojis == 1 ? "Emoji" : "Emoji")")
         }
         return segments.isEmpty ? nil : segments.joined(separator: " · ")
+    }
+
+    private var usesGridLayout: Bool {
+        ExperienceMediaGalleryLayout.requiresGrid(for: items)
+    }
+}
+
+private enum ExperienceMediaGalleryLayout {
+    static let gridThreshold: Int = 3
+    static let gridSpacing: CGFloat = 12
+    static let gridItemHeight: CGFloat = 120
+    static let carouselHeight: CGFloat = 240
+
+    static func visualItemCount(in items: [MediaDisplayItem]) -> Int {
+        items.filter { item in
+            switch item.content {
+            case .photo, .video:
+                return true
+            default:
+                return false
+            }
+        }.count
+    }
+
+    static func requiresGrid(for items: [MediaDisplayItem]) -> Bool {
+        visualItemCount(in: items) > gridThreshold
+    }
+
+    static func gridHeight(for items: [MediaDisplayItem]) -> CGFloat {
+        let rows = max(1, Int(ceil(Double(visualItemCount(in: items)) / 3.0)))
+        let spacing = CGFloat(max(0, rows - 1)) * gridSpacing
+        return CGFloat(rows) * gridItemHeight + spacing
+    }
+
+    static func height(for items: [MediaDisplayItem]) -> CGFloat {
+        requiresGrid(for: items) ? gridHeight(for: items) : carouselHeight
+    }
+
+    static var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: gridSpacing), count: 3)
     }
 }
 
