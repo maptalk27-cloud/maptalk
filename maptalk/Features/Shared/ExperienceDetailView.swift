@@ -1279,7 +1279,14 @@ private struct FriendEngagementRow: View {
 private struct LikesAvatarGrid: View {
     let entries: [FriendEngagement]
 
-    private let columns: [GridItem] = Array(repeating: GridItem(.fixed(44), spacing: 8), count: 5)
+    private let columns: [GridItem] = {
+        let availableWidth = UIScreen.main.bounds.width - (ExperienceSheetLayout.engagementHorizontalInset * 2) - 16
+        let count = 6
+        let spacing: CGFloat = 8
+        let totalSpacing = spacing * CGFloat(count - 1)
+        let tileWidth = max((availableWidth - totalSpacing) / CGFloat(count), 34)
+        return Array(repeating: GridItem(.fixed(tileWidth), spacing: spacing), count: count)
+    }()
     private let leadingInset: CGFloat = 16
 
     var body: some View {

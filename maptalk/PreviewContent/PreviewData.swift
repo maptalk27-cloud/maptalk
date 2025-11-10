@@ -8,7 +8,7 @@ enum PreviewData {
         avatarURL: URL(string: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=60")
     )
 
-    static let sampleFriends: [User] = [
+    private static let primaryFriends: [User] = [
         .init(
             id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE2") ?? UUID(),
             handle: "aurora.wave",
@@ -28,8 +28,32 @@ enum PreviewData {
             id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE5") ?? UUID(),
             handle: "bund.wanderer",
             avatarURL: URL(string: "https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=200&q=60")
+        ),
+        .init(
+            id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE6") ?? UUID(),
+            handle: "silent.lumen",
+            avatarURL: URL(string: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=60")
+        ),
+        .init(
+            id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE7") ?? UUID(),
+            handle: "lurker.wave",
+            avatarURL: URL(string: "https://images.unsplash.com/photo-1525134479668-1bee5c7c6845?auto=format&fit=crop&w=200&q=60")
+        ),
+        .init(
+            id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE8") ?? UUID(),
+            handle: "quiet.comet",
+            avatarURL: URL(string: "https://images.unsplash.com/photo-1544723795-3fb6469f5b39?auto=format&fit=crop&w=200&q=60")
+        ),
+        .init(
+            id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE9") ?? UUID(),
+            handle: "shadow.collector",
+            avatarURL: URL(string: "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=200&q=60")
         )
     ]
+
+    private static let generatedFriends: [User] = (0..<120).map { generatedFriend(index: $0) }
+
+    static let sampleFriends: [User] = primaryFriends + generatedFriends
 
     static let sampleRatedPOIs: [RatedPOI] = {
         let waterfront = POI(
@@ -192,6 +216,8 @@ enum PreviewData {
         let night = sampleFriends[1]
         let skyline = sampleFriends[2]
         let bund = sampleFriends[3]
+        let hundredFriends = Array(sampleFriends.prefix(100))
+        let megaLikeList = hundredFriends.map(\.id)
 
         return [
             .init(
@@ -209,13 +235,10 @@ enum PreviewData {
                         )
                     ),
                     .init(id: uuid(1102), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")!)),
-                    .init(id: uuid(1103), kind: .photo(URL(string: "https://images.unsplash.com/photo-1478720568477-152d9b164e26?auto=format&fit=crop&w=900&q=60")!))
+                    .init(id: uuid(1103), kind: .photo(URL(string: "https://images.unsplash.com/photo-1478720568477-152d9b164e26?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1104), kind: .photo(URL(string: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=900&q=60")!))
                 ],
-                likes: [
-                    aurora.id,
-                    night.id,
-                    skyline.id
-                ],
+                likes: megaLikeList,
                 comments: [
                     comment(
                         3101,
@@ -236,6 +259,16 @@ enum PreviewData {
                         relativeTo: now,
                         replies: [
                             reply(4103, user: night, text: "Bring your long lens.", minutesAgo: 18, relativeTo: now)
+                        ]
+                    ),
+                    comment(
+                        3103,
+                        user: aurora,
+                        text: "City soundtrack is unreal tonight.",
+                        minutesAgo: 8,
+                        relativeTo: now,
+                        replies: [
+                            reply(4107, user: currentUser, text: "Capturing audio for later.", minutesAgo: 6, relativeTo: now)
                         ]
                     )
                 ],
@@ -263,7 +296,9 @@ enum PreviewData {
                 likes: [
                     currentUser.id,
                     skyline.id,
-                    bund.id
+                    bund.id,
+                    night.id,
+                    aurora.id
                 ],
                 comments: [
                     comment(
@@ -275,6 +310,17 @@ enum PreviewData {
                         replies: [
                             reply(4104, user: skyline, text: "Bring an extra lock.", minutesAgo: 24, relativeTo: now),
                             reply(4105, user: night, text: "Grabbing snacks en route.", minutesAgo: 22, relativeTo: now)
+                        ]
+                    ),
+                    comment(
+                        3112,
+                        user: night,
+                        text: "Setting up a tripod near the mural.",
+                        minutesAgo: 18,
+                        relativeTo: now,
+                        replies: [
+                            reply(4108, user: aurora, text: "Meet me by the north wall.", minutesAgo: 17, relativeTo: now),
+                            reply(4109, user: bund, text: "Bringing spare batteries.", minutesAgo: 15, relativeTo: now)
                         ]
                     )
                 ],
@@ -288,13 +334,30 @@ enum PreviewData {
                 center: .init(latitude: 47.6185, longitude: -122.342),
                 radiusMeters: 600,
                 message: "Pop-up street dance class just kicked off.",
-                attachments: [],
+                attachments: [
+                    .init(id: uuid(1251), kind: .photo(URL(string: "https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1252), kind: .photo(URL(string: "https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1253), kind: .photo(URL(string: "https://images.unsplash.com/photo-1437957146754-f6377debe171?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1254), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469478712682-4b91d3e08c21?auto=format&fit=crop&w=900&q=60")!))
+                ],
                 likes: [
                     aurora.id,
-                    bund.id
+                    bund.id,
+                    skyline.id,
+                    currentUser.id
                 ],
                 comments: [
-                    comment(3121, user: skyline, text: "Dropping by after work.", minutesAgo: 48, relativeTo: now)
+                    comment(3121, user: skyline, text: "Dropping by after work.", minutesAgo: 48, relativeTo: now),
+                    comment(
+                        3122,
+                        user: aurora,
+                        text: "Playlist is pure fire 🔥",
+                        minutesAgo: 42,
+                        relativeTo: now,
+                        replies: [
+                            reply(4110, user: night, text: "Sharing it after class.", minutesAgo: 40, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .anonymous,
                 createdAt: now.addingTimeInterval(-10_800),
@@ -307,14 +370,29 @@ enum PreviewData {
                 radiusMeters: 450,
                 message: "Speakeasy pouring neon cocktails all night.",
                 attachments: [
-                    .init(id: uuid(1301), kind: .emoji("🍸"))
+                    .init(id: uuid(1301), kind: .emoji("🍸")),
+                    .init(id: uuid(1302), kind: .photo(URL(string: "https://images.unsplash.com/photo-1456406644174-8ddd4cd52a06?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1303), kind: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1304), kind: .photo(URL(string: "https://images.unsplash.com/photo-1470337458703-46ad1756a187?auto=format&fit=crop&w=900&q=60")!))
                 ],
                 likes: [
                     currentUser.id,
-                    aurora.id
+                    aurora.id,
+                    night.id,
+                    bund.id
                 ],
                 comments: [
-                    comment(3131, user: night, text: "Need the secret knock?", minutesAgo: 30, relativeTo: now)
+                    comment(3131, user: night, text: "Need the secret knock?", minutesAgo: 30, relativeTo: now),
+                    comment(
+                        3132,
+                        user: aurora,
+                        text: "Saving room on the rooftop couch.",
+                        minutesAgo: 26,
+                        relativeTo: now,
+                        replies: [
+                            reply(4111, user: skyline, text: "I'll bring neon stir sticks.", minutesAgo: 25, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-7_200),
@@ -333,10 +411,18 @@ enum PreviewData {
                 likes: [
                     skyline.id,
                     currentUser.id,
-                    night.id
+                    night.id,
+                    bund.id
                 ],
                 comments: [
-                    comment(3141, user: bund, text: "Streaming this to the crew.", minutesAgo: 75, relativeTo: now)
+                    comment(3141, user: bund, text: "Streaming this to the crew.", minutesAgo: 75, relativeTo: now),
+                    comment(
+                        3142,
+                        user: night,
+                        text: "Need those brushes for tomorrow's jam.",
+                        minutesAgo: 68,
+                        relativeTo: now
+                    )
                 ],
                 visibility: .publicAll,
                 createdAt: now.addingTimeInterval(-14_400),
@@ -348,13 +434,28 @@ enum PreviewData {
                 center: .init(latitude: 47.625, longitude: -122.35),
                 radiusMeters: 700,
                 message: "Stargazing circle sharing telescopes in Gas Works.",
-                attachments: [],
+                attachments: [
+                    .init(id: uuid(1451), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1452), kind: .photo(URL(string: "https://images.unsplash.com/photo-1446776653964-20c1d3a81b06?auto=format&fit=crop&w=900&q=60")!))
+                ],
                 likes: [
                     aurora.id,
-                    bund.id
+                    bund.id,
+                    skyline.id,
+                    night.id
                 ],
                 comments: [
-                    comment(3151, user: skyline, text: "On my way north.", minutesAgo: 92, relativeTo: now)
+                    comment(3151, user: skyline, text: "On my way north.", minutesAgo: 92, relativeTo: now),
+                    comment(
+                        3152,
+                        user: bund,
+                        text: "Packing extra blankets for everyone.",
+                        minutesAgo: 85,
+                        relativeTo: now,
+                        replies: [
+                            reply(4112, user: currentUser, text: "Appreciate you!", minutesAgo: 83, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-18_000),
@@ -374,15 +475,28 @@ enum PreviewData {
                             poster: URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")
                         )
                     ),
-                    .init(id: uuid(1502), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1100&q=60")!))
+                    .init(id: uuid(1502), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1503), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!))
                 ],
                 likes: [
                     aurora.id,
                     currentUser.id,
-                    night.id
+                    night.id,
+                    skyline.id,
+                    bund.id
                 ],
                 comments: [
-                    comment(3161, user: skyline, text: "Send more lantern pics!", minutesAgo: 22, relativeTo: now)
+                    comment(3161, user: skyline, text: "Send more lantern pics!", minutesAgo: 22, relativeTo: now),
+                    comment(
+                        3162,
+                        user: aurora,
+                        text: "Color palette is dreamy.",
+                        minutesAgo: 18,
+                        relativeTo: now,
+                        replies: [
+                            reply(4113, user: bund, text: "Will drop RAWs later.", minutesAgo: 16, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .publicAll,
                 createdAt: now.addingTimeInterval(-2_400),
@@ -395,14 +509,25 @@ enum PreviewData {
                 radiusMeters: 650,
                 message: nil,
                 attachments: [
-                    .init(id: uuid(1601), kind: .emoji("🥐"))
+                    .init(id: uuid(1601), kind: .emoji("🥐")),
+                    .init(id: uuid(1602), kind: .photo(URL(string: "https://images.unsplash.com/photo-1499636136210-6f4ee915583e?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1603), kind: .photo(URL(string: "https://images.unsplash.com/photo-1482049016688-2d3e1b311543?auto=format&fit=crop&w=900&q=60")!))
                 ],
                 likes: [
                     night.id,
-                    bund.id
+                    bund.id,
+                    currentUser.id,
+                    skyline.id
                 ],
                 comments: [
-                    comment(3171, user: currentUser, text: "Mail me a croissant.", minutesAgo: 60, relativeTo: now)
+                    comment(3171, user: currentUser, text: "Mail me a croissant.", minutesAgo: 60, relativeTo: now),
+                    comment(
+                        3172,
+                        user: night,
+                        text: "Bringing jam jars tomorrow.",
+                        minutesAgo: 55,
+                        relativeTo: now
+                    )
                 ],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-26_000),
@@ -421,10 +546,22 @@ enum PreviewData {
                 ],
                 likes: [
                     aurora.id,
-                    skyline.id
+                    skyline.id,
+                    currentUser.id,
+                    night.id
                 ],
                 comments: [
-                    comment(3181, user: bund, text: "Need that cold brew recipe.", minutesAgo: 68, relativeTo: now)
+                    comment(3181, user: bund, text: "Need that cold brew recipe.", minutesAgo: 68, relativeTo: now),
+                    comment(
+                        3182,
+                        user: currentUser,
+                        text: "Sending beans from Seattle.",
+                        minutesAgo: 64,
+                        relativeTo: now,
+                        replies: [
+                            reply(4114, user: night, text: "Bless!", minutesAgo: 62, relativeTo: now)
+                        ]
+                    )
                 ],
                 visibility: .publicAll,
                 createdAt: now.addingTimeInterval(-32_000),
@@ -436,14 +573,28 @@ enum PreviewData {
                 center: .init(latitude: 35.6895, longitude: 139.6917),
                 radiusMeters: 540,
                 message: "Night market pop-up swapping vintage game cartridges.",
-                attachments: [],
+                attachments: [
+                    .init(id: uuid(1751), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1752), kind: .photo(URL(string: "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1753), kind: .photo(URL(string: "https://images.unsplash.com/photo-1511910849309-0e77219468ce?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1754), kind: .photo(URL(string: "https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=900&q=60")!))
+                ],
                 likes: [
                     currentUser.id,
                     aurora.id,
-                    night.id
+                    night.id,
+                    skyline.id,
+                    bund.id
                 ],
                 comments: [
-                    comment(3191, user: bund, text: "Save a cartridge for me!", minutesAgo: 50, relativeTo: now)
+                    comment(3191, user: bund, text: "Save a cartridge for me!", minutesAgo: 50, relativeTo: now),
+                    comment(
+                        3192,
+                        user: night,
+                        text: "Bringing cables for the retro consoles.",
+                        minutesAgo: 46,
+                        relativeTo: now
+                    )
                 ],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-14_400),
@@ -462,7 +613,9 @@ enum PreviewData {
                 ],
                 likes: [
                     aurora.id,
-                    skyline.id
+                    skyline.id,
+                    currentUser.id,
+                    night.id
                 ],
                 comments: [
                     comment(
@@ -474,6 +627,13 @@ enum PreviewData {
                         replies: [
                             reply(4106, user: aurora, text: "DM the link please!", minutesAgo: 38, relativeTo: now)
                         ]
+                    ),
+                    comment(
+                        3202,
+                        user: skyline,
+                        text: "Crowd looks huge already.",
+                        minutesAgo: 35,
+                        relativeTo: now
                     )
                 ],
                 visibility: .publicAll,
@@ -487,14 +647,25 @@ enum PreviewData {
                 radiusMeters: 620,
                 message: nil,
                 attachments: [
-                    .init(id: uuid(1901), kind: .emoji("❄️"))
+                    .init(id: uuid(1901), kind: .emoji("❄️")),
+                    .init(id: uuid(1902), kind: .photo(URL(string: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1903), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!))
                 ],
                 likes: [
                     bund.id,
-                    night.id
+                    night.id,
+                    currentUser.id,
+                    aurora.id
                 ],
                 comments: [
-                    comment(3211, user: aurora, text: "Sending cocoa asap.", minutesAgo: 16, relativeTo: now)
+                    comment(3211, user: aurora, text: "Sending cocoa asap.", minutesAgo: 16, relativeTo: now),
+                    comment(
+                        3212,
+                        user: skyline,
+                        text: "Need that snow playlist.",
+                        minutesAgo: 12,
+                        relativeTo: now
+                    )
                 ],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-18_000),
@@ -508,6 +679,13 @@ enum PreviewData {
             return currentUser
         }
         return sampleFriends.first { $0.id == id }
+    }
+
+    private static func generatedFriend(index: Int) -> User {
+        let seed = 8000 + index
+        let handle = String(format: "pulse%03d.wave", index + 1)
+        let avatarURL = URL(string: "https://picsum.photos/seed/pulse\(index + 1)/200")
+        return User(id: uuid(seed), handle: handle, avatarURL: avatarURL)
     }
 
     private static func uuid(_ seed: Int) -> UUID {
