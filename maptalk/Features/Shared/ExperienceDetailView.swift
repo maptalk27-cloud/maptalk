@@ -45,6 +45,15 @@ struct ExperienceDetailView: View {
     struct RealDetailDescriptor {
         let real: RealPost
         let user: User?
+        let displayName: String?
+        let avatarCategory: POICategory?
+
+        init(real: RealPost, user: User?, displayName: String? = nil, avatarCategory: POICategory? = nil) {
+            self.real = real
+            self.user = user
+            self.displayName = displayName
+            self.avatarCategory = avatarCategory
+        }
     }
 
     private let poi: RatedPOI?
@@ -228,6 +237,14 @@ private extension ExperienceDetailView {
                 .padding(.top, 0)
                 .frame(height: 240)
                 .padding(.horizontal, 0)
+            } else if let detail = data.realDetail {
+                CompactRealCard(
+                    real: detail.real,
+                    user: detail.user,
+                    style: .collapsed,
+                    displayNameOverride: detail.displayName,
+                    avatarCategory: detail.avatarCategory
+                )
             } else {
                 VStack(spacing: 8) {
                     Text(data.title)
@@ -357,7 +374,7 @@ private extension ExperienceDetailView {
         case let .poi(rated):
             let accent = rated.poi.category.accentColor
             let averageScore = rated.ratings.compactMap(\.score).average
-            let highlight = rated.ratings.first(where: { $0.text?.isEmpty == false })?.text
+            let highlight = poiHighlightText(for: rated)
             let secondary: String?
             secondary = averageScore
                 .map { avg in
@@ -366,34 +383,9 @@ private extension ExperienceDetailView {
                 }
                 ?? "Friends are starting to rate this spot."
             let gallery = galleryItems(for: rated)
-            let friendRatings = rated.ratings.compactMap { rating -> FriendEngagement? in
-                guard let user = userProvider(rating.userId) else { return nil }
-                var message = "Left a rating"
-                if let text = rating.text, text.isEmpty == false {
-                    message = text
-                } else if let score = rating.score {
-                    message = "Rated \(score)/5"
-                } else if let emoji = rating.emoji {
-                    message = "Reacted with \(emoji)"
-                }
-                let badge: String?
-                if let emoji = rating.emoji {
-                    badge = emoji
-                } else if let score = rating.score {
-                    badge = "\(score)★"
-                } else {
-                    badge = nil
-                }
-                return FriendEngagement(
-                    id: rating.id,
-                    kind: .rating,
-                    user: user,
-                    message: message,
-                    badge: badge,
-                    timestamp: rating.createdAt,
-                    replies: []
-                )
-            }
+            let friendLikes = poiFriendLikes(for: rated)
+            let friendComments = poiFriendComments(for: rated)
+            let poiDescriptor = poiRealDetailDescriptor(for: rated, highlight: highlight)
             return ContentData(
                 title: rated.poi.name,
                 subtitle: rated.poi.category.displayName,
@@ -401,9 +393,9 @@ private extension ExperienceDetailView {
                 highlight: highlight,
                 secondary: secondary,
                 galleryItems: gallery,
-                friendLikes: [],
-                friendComments: [],
-                friendRatings: friendRatings,
+                friendLikes: friendLikes,
+                friendComments: friendComments,
+                friendRatings: [],
                 accentColor: accent,
                 backgroundGradient: [Color.black, accent.opacity(0.25)],
                 mapRegion: MKCoordinateRegion(
@@ -413,7 +405,7 @@ private extension ExperienceDetailView {
                 ),
                 primaryActionTitle: "Add Rating",
                 primaryActionSymbol: "star.fill",
-                realDetail: nil
+                realDetail: poiDescriptor
             )
         }
     }
@@ -465,6 +457,130 @@ private extension ExperienceDetailView {
             return [MediaDisplayItem(content: .emoji(emoji))]
         }
         return [MediaDisplayItem(content: .symbol(ratedPOI.poi.category.symbolName))]
+    }
+
+    func poiHighlightText(for ratedPOI: RatedPOI) -> String? {
+        ratedPOI.ratings.first { rating in
+            guard let text = rating.text?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+            return text.isEmpty == false
+        }?.text
+    }
+
+    func poiFriendLikes(for ratedPOI: RatedPOI) -> [FriendEngagement] {
+        ratedPOI.ratings.compactMap { rating in
+            guard let user = userProvider(rating.userId) else { return nil }
+            return FriendEngagement(
+                id: rating.id,
+                kind: .like,
+                user: user,
+                message: poiLikeMessage(for: rating),
+                badge: poiBadge(for: rating),
+                timestamp: rating.createdAt,
+                replies: []
+            )
+        }
+    }
+
+    func poiFriendComments(for ratedPOI: RatedPOI) -> [FriendEngagement] {
+        ratedPOI.ratings.compactMap { rating in
+            guard let user = userProvider(rating.userId) else { return nil }
+            guard let text = rating.text?.trimmingCharacters(in: .whitespacesAndNewlines), text.isEmpty == false else {
+                return nil
+            }
+            return FriendEngagement(
+                id: rating.id,
+                kind: .comment,
+                user: user,
+                message: text,
+                badge: poiBadge(for: rating),
+                timestamp: rating.createdAt,
+                replies: []
+            )
+        }
+    }
+
+    func poiRealDetailDescriptor(for ratedPOI: RatedPOI, highlight: String?) -> RealDetailDescriptor {
+        let trimmedHighlight = highlight?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let resolvedMessage = trimmedHighlight.isEmpty ? "Friends are vibing here right now." : trimmedHighlight
+        let likes = Array(Set(ratedPOI.ratings.map(\.userId)))
+        let comments = poiRealComments(for: ratedPOI)
+        let createdAt = ratedPOI.ratings.map(\.createdAt).max() ?? Date()
+        let attachments = poiAttachments(for: ratedPOI)
+        let pseudoUser = User(id: ratedPOI.poi.id, handle: ratedPOI.poi.name, avatarURL: nil)
+
+        let real = RealPost(
+            id: ratedPOI.poi.id,
+            userId: pseudoUser.id,
+            center: ratedPOI.poi.coordinate,
+            radiusMeters: 650,
+            message: resolvedMessage,
+            attachments: attachments,
+            likes: likes,
+            comments: comments,
+            visibility: .publicAll,
+            createdAt: createdAt,
+            expiresAt: createdAt.addingTimeInterval(48 * 3600)
+        )
+
+        return RealDetailDescriptor(
+            real: real,
+            user: pseudoUser,
+            displayName: ratedPOI.poi.name,
+            avatarCategory: ratedPOI.poi.category
+        )
+    }
+
+    func poiAttachments(for ratedPOI: RatedPOI) -> [RealPost.Attachment] {
+        var seen = Set<String>()
+        var attachments: [RealPost.Attachment] = []
+        for rating in ratedPOI.ratings {
+            guard let emoji = rating.emoji, emoji.isEmpty == false else { continue }
+            if seen.insert(emoji).inserted {
+                attachments.append(.init(kind: .emoji(emoji)))
+            }
+            if attachments.count >= 4 { break }
+        }
+        if attachments.isEmpty {
+            attachments.append(.init(kind: .emoji(ratedPOI.poi.category.defaultEmoji)))
+        }
+        return attachments
+    }
+
+    func poiRealComments(for ratedPOI: RatedPOI) -> [RealPost.Comment] {
+        ratedPOI.ratings.compactMap { rating in
+            guard let text = rating.text?.trimmingCharacters(in: .whitespacesAndNewlines), text.isEmpty == false else {
+                return nil
+            }
+            return RealPost.Comment(
+                id: rating.id,
+                userId: rating.userId,
+                text: text,
+                createdAt: rating.createdAt
+            )
+        }
+    }
+
+    func poiBadge(for rating: Rating) -> String? {
+        if let emoji = rating.emoji, emoji.isEmpty == false {
+            return emoji
+        }
+        if let score = rating.score {
+            return "\(score)★"
+        }
+        return nil
+    }
+
+    func poiLikeMessage(for rating: Rating) -> String {
+        if let score = rating.score {
+            return "Rated \(score)/5"
+        }
+        if let emoji = rating.emoji, emoji.isEmpty == false {
+            return "Reacted with \(emoji)"
+        }
+        if let text = rating.text, text.isEmpty == false {
+            return text
+        }
+        return "Saved this spot"
     }
 
     func makeRealBadges(for real: RealPost) -> [String] {
@@ -627,8 +743,14 @@ private struct ExperiencePanel: View {
     @ViewBuilder
     private func realExperienceContent(for detail: ExperienceDetailView.RealDetailDescriptor) -> some View {
         VStack(alignment: .leading, spacing: 24) {
-            CompactRealCard(real: detail.real, user: detail.user, style: .standard)
-                .padding(.horizontal, 4)
+            CompactRealCard(
+                real: detail.real,
+                user: detail.user,
+                style: .standard,
+                displayNameOverride: detail.displayName,
+                avatarCategory: detail.avatarCategory
+            )
+            .padding(.horizontal, 4)
 
             if data.friendLikes.isEmpty == false {
                 LikesAvatarGrid(entries: data.friendLikes)
@@ -691,14 +813,24 @@ private struct CompactRealCard: View {
     let real: RealPost
     let user: User?
     let style: Style
+    let displayNameOverride: String?
+    let avatarCategory: POICategory?
 
     @State private var isLightboxPresented = false
     @State private var lightboxSelection: UUID
 
-    init(real: RealPost, user: User?, style: Style = .standard) {
+    init(
+        real: RealPost,
+        user: User?,
+        style: Style = .standard,
+        displayNameOverride: String? = nil,
+        avatarCategory: POICategory? = nil
+    ) {
         self.real = real
         self.user = user
         self.style = style
+        self.displayNameOverride = displayNameOverride
+        self.avatarCategory = avatarCategory
         _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
 
@@ -795,7 +927,7 @@ private struct CompactRealCard: View {
     }
 
     private var userNameRow: some View {
-        Text(user?.handle ?? "Unknown user")
+        Text(displayName)
             .font(.headline.weight(.semibold))
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -803,7 +935,9 @@ private struct CompactRealCard: View {
 
     private var avatarView: some View {
         Group {
-            if let url = user?.avatarURL {
+            if let category = avatarCategory {
+                POICategoryAvatar(category: category, size: avatarSize)
+            } else if let url = user?.avatarURL {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
@@ -817,7 +951,7 @@ private struct CompactRealCard: View {
             } else {
                 Color.gray.opacity(0.4)
                     .overlay {
-                        Text(user?.handle.prefix(2).uppercased() ?? "??")
+                        Text(displayInitials)
                             .font(.caption.weight(.bold))
                             .foregroundStyle(.white)
                     }
@@ -825,6 +959,16 @@ private struct CompactRealCard: View {
         }
         .frame(width: avatarSize, height: avatarSize)
         .clipShape(Circle())
+    }
+
+    private var displayName: String {
+        displayNameOverride ?? user?.handle ?? "Unknown user"
+    }
+
+    private var displayInitials: String {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return "??" }
+        return String(trimmed.prefix(2)).uppercased()
     }
 
     private var contentText: some View {
@@ -995,6 +1139,34 @@ private struct CompactRealCard: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(.white.opacity(0.12), in: Capsule(style: .continuous))
+    }
+
+    private struct POICategoryAvatar: View {
+        let category: POICategory
+        let size: CGFloat
+
+        var body: some View {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: category.markerGradientColors,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .shadow(color: category.markerGradientColors.last?.opacity(0.5) ?? .black.opacity(0.5), radius: 6, y: 3)
+
+                Circle()
+                    .stroke(Color.white.opacity(0.35), lineWidth: 1.2)
+
+                Image(systemName: category.symbolName)
+                    .font(.system(size: max(size * 0.38, 14), weight: .bold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+            }
+            .frame(width: size, height: size)
+        }
     }
 
 

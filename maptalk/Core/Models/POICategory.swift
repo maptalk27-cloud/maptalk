@@ -59,4 +59,38 @@ enum POICategory: String, CaseIterable, Codable {
             return .teal
         }
     }
+
+    var markerGradientColors: [Color] {
+        switch self {
+        case .viewpoint:
+            return [Color.cyan, Color.blue]
+        case .restaurant:
+            return [Color.orange, Color.red]
+        case .coffee:
+            return [Color.brown, Color.orange.opacity(0.8)]
+        case .nightlife:
+            return [Color.purple, Color.indigo]
+        case .art:
+            return [Color.pink, Color.purple]
+        case .market:
+            return [Color.yellow, Color.orange.opacity(0.9)]
+        }
+    }
+
+    var defaultEmoji: String {
+        switch self {
+        case .viewpoint:
+            return "📷"
+        case .restaurant:
+            return "🍽️"
+        case .coffee:
+            return "☕️"
+        case .nightlife:
+            return "🎶"
+        case .art:
+            return "🎨"
+        case .market:
+            return "🛍️"
+        }
+    }
 }

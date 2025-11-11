@@ -179,30 +179,13 @@ private struct POICategoryMarker: View {
 
     private var markerGradient: LinearGradient {
         LinearGradient(
-            colors: gradientColors,
+            colors: category.markerGradientColors,
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
     }
 
     private var markerGlow: Color {
-        gradientColors.last ?? Theme.neonPrimary
-    }
-
-    private var gradientColors: [Color] {
-        switch category {
-        case .viewpoint:
-            return [Color.cyan, Color.blue]
-        case .restaurant:
-            return [Color.orange, Color.red]
-        case .coffee:
-            return [Color.brown, Color.orange.opacity(0.8)]
-        case .nightlife:
-            return [Color.purple, Color.indigo]
-        case .art:
-            return [Color.pink, Color.purple]
-        case .market:
-            return [Color.yellow, Color.orange.opacity(0.9)]
-        }
+        category.markerGradientColors.last ?? Theme.neonPrimary
     }
 }
