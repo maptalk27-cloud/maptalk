@@ -56,6 +56,8 @@ enum PreviewData {
     static let sampleFriends: [User] = primaryFriends + generatedFriends
 
     static let sampleRatedPOIs: [RatedPOI] = {
+        let referenceDate = Date()
+
         let waterfront = POI(
             id: UUID(uuidString: "BBBBBBBB-1111-2222-3333-444444444444") ?? UUID(),
             name: "Kirkland Waterfront",
@@ -91,111 +93,129 @@ enum PreviewData {
             category: .restaurant
         )
 
+        func mediaPhoto(_ url: String) -> RatedPOI.Media {
+            RatedPOI.Media(kind: .photo(URL(string: url)!))
+        }
+
+        func mediaText(_ text: String) -> RatedPOI.Media {
+            RatedPOI.Media(kind: .text(text))
+        }
+
         return [
             RatedPOI(
                 poi: waterfront,
-                ratings: [
-                    Rating(
-                        id: uuid(1),
-                        userId: sampleFriends[0].id,
-                        poiId: waterfront.id,
-                        score: 5,
-                        emoji: "😎",
-                        text: "Sunset vibes!",
-                        visibility: .publicAll,
-                        createdAt: .init()
-                    ),
-                    Rating(
-                        id: uuid(2),
-                        userId: currentUser.id,
-                        poiId: waterfront.id,
-                        score: nil,
-                        emoji: "📸",
-                        text: "Captured the glow hour here.",
-                        visibility: .friendsOnly,
-                        createdAt: .init().addingTimeInterval(-1800)
-                    )
-                ]
+                highlight: nil,
+                secondary: nil,
+                media: [],
+                checkIns: [
+                    poiCheckIn(6001, user: sampleFriends[0], note: "Sunrise stop after the morning ride", minutesAgo: 18, relativeTo: referenceDate),
+                    poiCheckIn(6002, user: sampleFriends[3], note: "Livestreaming the sunset", minutesAgo: 42, relativeTo: referenceDate),
+                    poiCheckIn(6003, user: currentUser, note: "Filming + editing a vlog", minutesAgo: 64, relativeTo: referenceDate)
+                ],
+                comments: [
+                    poiComment(6101, user: sampleFriends[2], content: .text("Busker playing city pop tonight—super chill vibes"), minutesAgo: 26, relativeTo: referenceDate),
+                    poiComment(6102, user: sampleFriends[5], content: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 58, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 24, solid: 14, meh: 2, questionable: 0),
+                tags: [
+                    RatedPOI.TagStat(tag: .unwind, count: 12),
+                    RatedPOI.TagStat(tag: .explore, count: 8),
+                    RatedPOI.TagStat(tag: .social, count: 6)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 28
             ),
             RatedPOI(
                 poi: cafe,
-                ratings: [
-                    Rating(
-                        id: uuid(3),
-                        userId: sampleFriends[1].id,
-                        poiId: cafe.id,
-                        score: 4,
-                        emoji: "☕️",
-                        text: "Nitro cold brew hits different.",
-                        visibility: .friendsOnly,
-                        createdAt: .init().addingTimeInterval(-3600)
-                    ),
-                    Rating(
-                        id: uuid(4),
-                        userId: sampleFriends[2].id,
-                        poiId: cafe.id,
-                        score: 5,
-                        emoji: "🥐",
-                        text: "Matcha croissant is a must.",
-                        visibility: .publicAll,
-                        createdAt: .init().addingTimeInterval(-4200)
-                    )
-                ]
+                highlight: nil,
+                secondary: nil,
+                media: [],
+                checkIns: [
+                    poiCheckIn(6004, user: sampleFriends[1], note: "Tiramisu + screenplay session", minutesAgo: 22, relativeTo: referenceDate),
+                    poiCheckIn(6005, user: sampleFriends[6], note: "Late-night dirty espresso", minutesAgo: 48, relativeTo: referenceDate)
+                ],
+                comments: [
+                    poiComment(6103, user: sampleFriends[5], content: .text("Wednesday sketch class here—the tutor has killer playlists"), minutesAgo: 35, relativeTo: referenceDate),
+                    poiComment(6104, user: currentUser, content: .video(url: URL(string: "https://example.com/cafe.mp4")!, poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 65, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 11, solid: 9, meh: 2, questionable: 0),
+                tags: [
+                    RatedPOI.TagStat(tag: .dine, count: 6),
+                    RatedPOI.TagStat(tag: .study, count: 5),
+                    RatedPOI.TagStat(tag: .social, count: 4),
+                    RatedPOI.TagStat(tag: .date, count: 3)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 12
             ),
             RatedPOI(
                 poi: nightMarket,
-                ratings: [
-                    Rating(
-                        id: uuid(5),
-                        userId: currentUser.id,
-                        poiId: nightMarket.id,
-                        score: nil,
-                        emoji: "🛍️",
-                        text: "Glow sticks + vinyl pop-up tonight!",
-                        visibility: .anonymous,
-                        createdAt: .init().addingTimeInterval(-10800)
-                    )
-                ]
+                highlight: nil,
+                secondary: nil,
+                media: [],
+                checkIns: [
+                    poiCheckIn(6006, user: currentUser, note: "Queued for the limited vinyl pressing", minutesAgo: 44, relativeTo: referenceDate),
+                    poiCheckIn(6007, user: sampleFriends[7], note: "Stage lighting is insane", minutesAgo: 70, relativeTo: referenceDate),
+                    poiCheckIn(6008, user: sampleFriends[8], note: "Coming back next week", minutesAgo: 82, relativeTo: referenceDate)
+                ],
+                comments: [
+                    poiComment(6105, user: sampleFriends[2], content: .text("Birria truck in zone B has unreal sauce"), minutesAgo: 52, relativeTo: referenceDate),
+                    poiComment(6106, user: sampleFriends[4], content: .photo(URL(string: "https://images.unsplash.com/photo-1521336575822-6da63fb45455?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 78, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 19, solid: 9, meh: 3, questionable: 1),
+                tags: [
+                    RatedPOI.TagStat(tag: .explore, count: 9),
+                    RatedPOI.TagStat(tag: .entertainment, count: 8),
+                    RatedPOI.TagStat(tag: .social, count: 7),
+                    RatedPOI.TagStat(tag: .express, count: 3)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 21
             ),
             RatedPOI(
                 poi: artMuseum,
-                ratings: [
-                    Rating(
-                        id: uuid(6),
-                        userId: sampleFriends[0].id,
-                        poiId: artMuseum.id,
-                        score: 5,
-                        emoji: "🎨",
-                        text: "Immersive light installation just opened.",
-                        visibility: .publicAll,
-                        createdAt: .init().addingTimeInterval(-7200)
-                    )
-                ]
+                highlight: nil,
+                secondary: nil,
+                media: [],
+                checkIns: [
+                    poiCheckIn(6009, user: sampleFriends[1], note: "Lunch-break sketch session", minutesAgo: 32, relativeTo: referenceDate),
+                    poiCheckIn(6010, user: sampleFriends[4], note: "Queued for the immersive exhibit", minutesAgo: 58, relativeTo: referenceDate)
+                ],
+                comments: [
+                    poiComment(6107, user: sampleFriends[0], content: .text("Remember to book the light lab—slots vanish fast"), minutesAgo: 45, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 10, solid: 6, meh: 1, questionable: 0),
+                tags: [
+                    RatedPOI.TagStat(tag: .explore, count: 6),
+                    RatedPOI.TagStat(tag: .express, count: 5),
+                    RatedPOI.TagStat(tag: .study, count: 3)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 9
             ),
             RatedPOI(
                 poi: restaurant,
-                ratings: [
-                    Rating(
-                        id: uuid(7),
-                        userId: sampleFriends[2].id,
-                        poiId: restaurant.id,
-                        score: 4,
-                        emoji: "🍣",
-                        text: "Toro tasting flight worth every credit.",
-                        visibility: .friendsOnly,
-                        createdAt: .init().addingTimeInterval(-2400)
-                    ),
-                    Rating(
-                        id: uuid(8),
-                        userId: currentUser.id,
-                        poiId: restaurant.id,
-                        score: 5,
-                        emoji: "🍷",
-                        text: "Neon omakase night = unforgettable.",
-                        visibility: .publicAll,
-                        createdAt: .init().addingTimeInterval(-3600)
-                    )
-                ]
+                highlight: nil,
+                secondary: nil,
+                media: [],
+                checkIns: [
+                    poiCheckIn(6011, user: sampleFriends[2], note: "Toro flight is legendary", minutesAgo: 28, relativeTo: referenceDate),
+                    poiCheckIn(6012, user: sampleFriends[6], note: "Booked the late seating", minutesAgo: 34, relativeTo: referenceDate),
+                    poiCheckIn(6013, user: currentUser, note: "Bringing parents on Friday", minutesAgo: 56, relativeTo: referenceDate)
+                ],
+                comments: [
+                    poiComment(6108, user: sampleFriends[0], content: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 44, relativeTo: referenceDate),
+                    poiComment(6109, user: sampleFriends[3], content: .text("Chef remembers names + favorites—make time to chat"), minutesAgo: 61, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 21, solid: 7, meh: 1, questionable: 1),
+                tags: [
+                    RatedPOI.TagStat(tag: .dine, count: 14),
+                    RatedPOI.TagStat(tag: .date, count: 8),
+                    RatedPOI.TagStat(tag: .premium, count: 6),
+                    RatedPOI.TagStat(tag: .social, count: 3)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 34
             )
         ]
     }()
@@ -203,12 +223,6 @@ enum PreviewData {
     static var samplePOIs: [POI] {
         sampleRatedPOIs.map(\.poi)
     }
-
-    static var sampleRatings: [Rating] {
-        sampleRatedPOIs.flatMap(\.ratings)
-    }
-
-
 
     static let sampleReals: [RealPost] = {
         let now = Date()
@@ -641,6 +655,49 @@ enum PreviewData {
                 expiresAt: now.addingTimeInterval(26 * 3600)
             ),
             .init(
+                id: uuid(113),
+                userId: aurora.id,
+                center: .init(latitude: 47.6036, longitude: -122.3294),
+                radiusMeters: 480,
+                message: "Neon Alley pop-up tonight: analog synths + incense + zines. Bring earplugs.",
+                attachments: [],
+                likes: [night.id, skyline.id, currentUser.id],
+                comments: [
+                    comment(3213, user: night, text: "Dropping by after rehearsal.", minutesAgo: 22, relativeTo: now)
+                ],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-14_400),
+                expiresAt: now.addingTimeInterval(22 * 3600)
+            ),
+            .init(
+                id: uuid(114),
+                userId: bund.id,
+                center: .init(latitude: 47.6219, longitude: -122.3517),
+                radiusMeters: 520,
+                message: "Skybridge fog rolling in like dry ice. Perfect moment to record footstep Foley.",
+                attachments: [],
+                likes: [aurora.id, skyline.id],
+                comments: [],
+                visibility: .publicAll,
+                createdAt: now.addingTimeInterval(-10_200),
+                expiresAt: now.addingTimeInterval(18 * 3600)
+            ),
+            .init(
+                id: uuid(115),
+                userId: skyline.id,
+                center: .init(latitude: 47.5952, longitude: -122.3316),
+                radiusMeters: 450,
+                message: "Quiet watch at the pier. City hum + ferry horns syncing at 68 BPM.",
+                attachments: [],
+                likes: [currentUser.id, night.id, bund.id, aurora.id],
+                comments: [
+                    comment(3214, user: currentUser, text: "Looping that rhythm now.", minutesAgo: 9, relativeTo: now)
+                ],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-7_800),
+                expiresAt: now.addingTimeInterval(20 * 3600)
+            ),
+            .init(
                 id: uuid(112),
                 userId: currentUser.id,
                 center: .init(latitude: 55.7558, longitude: 37.6173),
@@ -679,6 +736,36 @@ enum PreviewData {
             return currentUser
         }
         return sampleFriends.first { $0.id == id }
+    }
+
+    private static func poiCheckIn(
+        _ seed: Int,
+        user: User,
+        note: String?,
+        minutesAgo: Double,
+        relativeTo referenceDate: Date
+    ) -> RatedPOI.CheckIn {
+        RatedPOI.CheckIn(
+            id: uuid(seed),
+            userId: user.id,
+            note: note,
+            createdAt: referenceDate.addingTimeInterval(-minutesAgo * 60)
+        )
+    }
+
+    private static func poiComment(
+        _ seed: Int,
+        user: User,
+        content: RatedPOI.Comment.Content,
+        minutesAgo: Double,
+        relativeTo referenceDate: Date
+    ) -> RatedPOI.Comment {
+        RatedPOI.Comment(
+            id: uuid(seed),
+            userId: user.id,
+            content: content,
+            createdAt: referenceDate.addingTimeInterval(-minutesAgo * 60)
+        )
     }
 
     private static func generatedFriend(index: Int) -> User {

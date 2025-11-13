@@ -7,7 +7,7 @@ struct ProfileView: View {
         NavigationStack {
             List {
                 Section("Footprints") {
-                    Text("Ratings: \(PreviewData.sampleRatings.count)")
+                    Text("POI Moments: \(PreviewData.sampleRatedPOIs.count)")
                     Text("Reals: \(PreviewData.sampleReals.count)")
                 }
 
@@ -21,4 +21,3 @@ struct ProfileView: View {
         }
     }
 }
-

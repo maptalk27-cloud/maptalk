@@ -76,23 +76,9 @@ final class MapTalkViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .assign(to: &$userCoordinate)
 
-        let poiStream = coordinateStream
+        coordinateStream
             .flatMap { [environment] coordinate in
                 environment.poiRepo.near(coordinate)
-            }
-            .share()
-
-        poiStream
-            .combineLatest(
-                environment.ratingRepo
-                    .recent(in: nil)
-            )
-            .map { pois, ratings -> [RatedPOI] in
-                let grouped = Dictionary(grouping: ratings, by: \.poiId)
-                return pois.compactMap { poi in
-                    guard let ratings = grouped[poi.id], ratings.isEmpty == false else { return nil }
-                    return RatedPOI(poi: poi, ratings: ratings)
-                }
             }
             .receive(on: DispatchQueue.main)
             .assign(to: &$ratedPOIs)

@@ -7,15 +7,12 @@ struct FriendsView: View {
         NavigationStack {
             List {
                 Section("Chats") {
-                    ForEach(PreviewData.sampleRatings, id: \.id) { rating in
+                    ForEach(PreviewData.sampleFriends.prefix(10), id: \.id) { friend in
                         NavigationLink(destination: ChatThreadView()) {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(
-                                    PreviewData.user(for: rating.userId)?.handle
-                                        ?? "Friend \(rating.userId.uuidString.prefix(4))"
-                                )
+                                Text(friend.handle)
                                     .font(.headline)
-                                Text(rating.text ?? "Emoji \(rating.emoji ?? "😎")")
+                                Text("Tap to say hi.")
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }

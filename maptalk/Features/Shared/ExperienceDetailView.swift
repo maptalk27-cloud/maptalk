@@ -25,34 +25,61 @@ struct ExperienceDetailView: View {
     }
 
     fileprivate struct ContentData {
-        let title: String
-        let subtitle: String?
+        let hero: HeroSectionModel?
         let badges: [String]
-        let highlight: String?
-        let secondary: String?
-        let galleryItems: [MediaDisplayItem]
-        let friendLikes: [FriendEngagement]
-        let friendComments: [FriendEngagement]
-        let friendRatings: [FriendEngagement]
+        let story: StorySectionModel?
+        let highlights: HighlightsSectionModel
+        let engagement: EngagementSectionModel
+        let poiInfo: POIInfoModel?
+        let poiStats: POIStatsModel?
         let accentColor: Color
         let backgroundGradient: [Color]
-        let mapRegion: MKCoordinateRegion
-        let primaryActionTitle: String
-        let primaryActionSymbol: String
-        let realDetail: RealDetailDescriptor?
     }
 
-    struct RealDetailDescriptor {
+    fileprivate struct HeroSectionModel {
         let real: RealPost
         let user: User?
-        let displayName: String?
+        let displayNameOverride: String?
         let avatarCategory: POICategory?
+        let suppressContent: Bool
+    }
 
-        init(real: RealPost, user: User?, displayName: String? = nil, avatarCategory: POICategory? = nil) {
-            self.real = real
-            self.user = user
-            self.displayName = displayName
-            self.avatarCategory = avatarCategory
+    fileprivate struct StorySectionModel {
+        let galleryItems: [MediaDisplayItem]
+    }
+
+    fileprivate struct HighlightsSectionModel {
+        let title: String
+        let subtitle: String?
+        let highlight: String?
+        let secondary: String?
+    }
+
+    fileprivate struct POIInfoModel {
+        let name: String
+        let category: POICategory
+    }
+
+    fileprivate struct POIStatsModel {
+        let checkIns: Int
+        let comments: Int
+        let favorites: Int
+        let endorsements: RatedPOI.EndorsementSummary
+    }
+
+    fileprivate struct EngagementSectionModel {
+        let friendLikesIconName: String
+        let friendLikesTitle: String
+        let friendLikes: [FriendEngagement]
+        let friendCommentsTitle: String
+        let friendComments: [FriendEngagement]
+        let friendRatingsTitle: String
+        let friendRatings: [FriendEngagement]
+
+        var hasContent: Bool {
+            friendLikes.isEmpty == false ||
+                friendComments.isEmpty == false ||
+                friendRatings.isEmpty == false
         }
     }
 
@@ -237,38 +264,23 @@ private extension ExperienceDetailView {
                 .padding(.top, 0)
                 .frame(height: 240)
                 .padding(.horizontal, 0)
-            } else if let detail = data.realDetail {
-                CompactRealCard(
-                    real: detail.real,
-                    user: detail.user,
-                    style: .collapsed,
-                    displayNameOverride: detail.displayName,
-                    avatarCategory: detail.avatarCategory
+            } else if let hero = data.hero {
+                HeroSection(model: hero, style: .collapsed)
+            } else if let poiInfo = data.poiInfo {
+                POICollapsedHero(
+                    info: poiInfo,
+                    stats: data.poiStats,
+                    accentColor: data.accentColor
                 )
             } else {
-                VStack(spacing: 8) {
-                    Text(data.title)
-                        .font(.headline.bold())
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
+                VStack(spacing: 12) {
+                    SummarySection(model: data.highlights, accentColor: data.accentColor)
 
-                    if let subtitle = data.subtitle {
-                        Text(subtitle)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.7))
-                            .multilineTextAlignment(.center)
-                    }
-
-                    let previewHighlight = data.highlight ?? data.galleryItems.first(where: { $0.previewText != nil })?.previewText
-                    if let highlight = previewHighlight {
-                        Text(highlight)
-                            .font(.caption.bold())
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(data.accentColor.opacity(0.2), in: Capsule(style: .continuous))
+                    if let stats = data.poiStats {
+                        POICollapsedStats(model: stats, accentColor: data.accentColor)
                     }
                 }
+                .padding(.horizontal, 12)
             }
         }
         .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
@@ -312,7 +324,6 @@ private extension ExperienceDetailView {
             let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
             let highlight = highlightText(for: real, message: message)
             let secondary = secondaryText(for: real)
-            let gallery = galleryItems(for: real)
             let friendLikes = real.likes.compactMap { userId -> FriendEngagement? in
                 guard let user = userProvider(userId) else { return nil }
                 return FriendEngagement(
@@ -349,89 +360,71 @@ private extension ExperienceDetailView {
                     replies: replies
                 )
             }
-            let mapRegion = MKCoordinateRegion(
-                center: real.center,
-                latitudinalMeters: max(real.radiusMeters * 8, 600),
-                longitudinalMeters: max(real.radiusMeters * 8, 600)
+            let hero = HeroSectionModel(
+                real: real,
+                user: user,
+                displayNameOverride: nil,
+                avatarCategory: nil,
+                suppressContent: false
             )
             return ContentData(
-                title: user?.handle ?? "Shared Real",
-                subtitle: "Posted \(real.createdAt.formatted(.relative(presentation: .named)))",
+                hero: hero,
                 badges: badges,
-                highlight: highlight,
-                secondary: secondary,
-                galleryItems: gallery,
-                friendLikes: friendLikes,
-                friendComments: friendComments,
-                friendRatings: [],
+                story: nil,
+                highlights: HighlightsSectionModel(
+                    title: user?.handle ?? "Shared Real",
+                    subtitle: "Posted \(real.createdAt.formatted(.relative(presentation: .named)))",
+                    highlight: highlight,
+                    secondary: secondary
+                ),
+                engagement: EngagementSectionModel(
+                    friendLikesIconName: "heart",
+                    friendLikesTitle: "Friend Likes",
+                    friendLikes: friendLikes,
+                    friendCommentsTitle: "Friend Comments",
+                    friendComments: friendComments,
+                    friendRatingsTitle: "Friend Ratings",
+                    friendRatings: []
+                ),
+                poiInfo: nil,
+                poiStats: nil,
                 accentColor: accent,
-                backgroundGradient: gradient,
-                mapRegion: mapRegion,
-                primaryActionTitle: "React",
-                primaryActionSymbol: "face.smiling",
-                realDetail: RealDetailDescriptor(real: real, user: user)
+                backgroundGradient: gradient
             )
         case let .poi(rated):
             let accent = rated.poi.category.accentColor
-            let averageScore = rated.ratings.compactMap(\.score).average
-            let highlight = poiHighlightText(for: rated)
-            let secondary: String?
-            secondary = averageScore
-                .map { avg in
-                    let formatted = String(format: "%.1f", avg)
-                    return "Average score \(formatted) · Latest vibes from friends."
-                }
-                ?? "Friends are starting to rate this spot."
-            let gallery = galleryItems(for: rated)
-            let friendLikes = poiFriendLikes(for: rated)
-            let friendComments = poiFriendComments(for: rated)
-            let poiDescriptor = poiRealDetailDescriptor(for: rated, highlight: highlight)
+            let friendCheckIns = checkInEngagements(for: rated)
+            let friendComments = poiCommentEngagements(for: rated)
             return ContentData(
-                title: rated.poi.name,
-                subtitle: rated.poi.category.displayName,
-                badges: ["\(rated.ratings.count) Ratings"],
-                highlight: highlight,
-                secondary: secondary,
-                galleryItems: gallery,
-                friendLikes: friendLikes,
-                friendComments: friendComments,
-                friendRatings: [],
-                accentColor: accent,
-                backgroundGradient: [Color.black, accent.opacity(0.25)],
-                mapRegion: MKCoordinateRegion(
-                    center: rated.poi.coordinate,
-                    latitudinalMeters: 800,
-                    longitudinalMeters: 800
+                hero: nil,
+                badges: poiBadgeStrings(for: rated),
+                story: nil,
+                highlights: HighlightsSectionModel(
+                    title: "",
+                    subtitle: nil,
+                    highlight: nil,
+                    secondary: nil
                 ),
-                primaryActionTitle: "Add Rating",
-                primaryActionSymbol: "star.fill",
-                realDetail: poiDescriptor
+                engagement: EngagementSectionModel(
+                    friendLikesIconName: "shoeprints.fill",
+                    friendLikesTitle: "Friend Check-ins",
+                    friendLikes: friendCheckIns,
+                    friendCommentsTitle: "Friend Notes",
+                    friendComments: friendComments,
+                    friendRatingsTitle: "Endorsements",
+                    friendRatings: []
+                ),
+                poiInfo: POIInfoModel(name: rated.poi.name, category: rated.poi.category),
+                poiStats: POIStatsModel(
+                    checkIns: rated.checkIns.count,
+                    comments: rated.comments.count,
+                    favorites: rated.favoritesCount,
+                    endorsements: rated.endorsements
+                ),
+                accentColor: accent,
+                backgroundGradient: [Color.black, accent.opacity(0.25)]
             )
         }
-    }
-
-    func galleryItems(for real: RealPost) -> [MediaDisplayItem] {
-        var items: [MediaDisplayItem] = real.attachments.map { attachment in
-            switch attachment.kind {
-            case let .photo(url):
-                return MediaDisplayItem(id: attachment.id, content: .photo(url))
-            case let .video(url, poster):
-                return MediaDisplayItem(id: attachment.id, content: .video(url: url, poster: poster))
-            case let .emoji(emoji):
-                return MediaDisplayItem(id: attachment.id, content: .emoji(emoji))
-            }
-        }
-
-        if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
-           message.isEmpty == false {
-            items.append(MediaDisplayItem(content: .text(message)))
-        }
-
-        if items.isEmpty {
-            return [MediaDisplayItem(content: .symbol("sparkles"))]
-        }
-
-        return items
     }
 
     func highlightText(for real: RealPost, message: String?) -> String? {
@@ -453,134 +446,84 @@ private extension ExperienceDetailView {
     }
 
     func galleryItems(for ratedPOI: RatedPOI) -> [MediaDisplayItem] {
-        if let emoji = ratedPOI.ratings.compactMap(\.emoji).first {
-            return [MediaDisplayItem(content: .emoji(emoji))]
+        let mapped = ratedPOI.media.map(mediaDisplayItem)
+        if mapped.isEmpty {
+            return [MediaDisplayItem(content: .symbol(ratedPOI.poi.category.symbolName))]
         }
-        return [MediaDisplayItem(content: .symbol(ratedPOI.poi.category.symbolName))]
+        return mapped
     }
 
-    func poiHighlightText(for ratedPOI: RatedPOI) -> String? {
-        ratedPOI.ratings.first { rating in
-            guard let text = rating.text?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
-            return text.isEmpty == false
-        }?.text
+    func mediaDisplayItem(_ media: RatedPOI.Media) -> MediaDisplayItem {
+        switch media.kind {
+        case let .photo(url):
+            return MediaDisplayItem(content: .photo(url))
+        case let .video(url, poster):
+            return MediaDisplayItem(content: .video(url: url, poster: poster))
+        case let .text(text):
+            return MediaDisplayItem(content: .text(text))
+        case let .symbol(name):
+            return MediaDisplayItem(content: .symbol(name))
+        }
     }
 
-    func poiFriendLikes(for ratedPOI: RatedPOI) -> [FriendEngagement] {
-        ratedPOI.ratings.compactMap { rating in
-            guard let user = userProvider(rating.userId) else { return nil }
-            return FriendEngagement(
-                id: rating.id,
+    func endorsementSummaryText(for summary: RatedPOI.EndorsementSummary) -> String {
+        let segments: [String] = [
+            summary.hype > 0 ? "Loved \(summary.hype)" : nil,
+            summary.solid > 0 ? "Solid \(summary.solid)" : nil,
+            summary.meh > 0 ? "Meh \(summary.meh)" : nil,
+            summary.questionable > 0 ? "Questionable \(summary.questionable)" : nil
+        ].compactMap { $0 }
+        return segments.isEmpty ? "Waiting for friends to share more impressions." : segments.joined(separator: " · ")
+    }
+
+    func poiBadgeStrings(for ratedPOI: RatedPOI) -> [String] {
+        let tagBadges = ratedPOI.tags.map { "\($0.tag.emoji) \($0.tag.displayName) · \($0.count)" }
+        if tagBadges.isEmpty {
+            return [
+                "Loved \(ratedPOI.endorsements.hype)",
+                "Solid \(ratedPOI.endorsements.solid)"
+            ]
+        }
+        return tagBadges
+    }
+
+    func checkInEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {
+        ratedPOI.checkIns.map { checkIn in
+            FriendEngagement(
+                id: checkIn.id,
                 kind: .like,
-                user: user,
-                message: poiLikeMessage(for: rating),
-                badge: poiBadge(for: rating),
-                timestamp: rating.createdAt,
+                user: userProvider(checkIn.userId),
+                message: checkIn.note ?? "Checked in",
+                badge: nil,
+                timestamp: checkIn.createdAt,
                 replies: []
             )
         }
     }
 
-    func poiFriendComments(for ratedPOI: RatedPOI) -> [FriendEngagement] {
-        ratedPOI.ratings.compactMap { rating in
-            guard let user = userProvider(rating.userId) else { return nil }
-            guard let text = rating.text?.trimmingCharacters(in: .whitespacesAndNewlines), text.isEmpty == false else {
-                return nil
-            }
-            return FriendEngagement(
-                id: rating.id,
+    func poiCommentEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {
+        ratedPOI.comments.map { comment in
+            FriendEngagement(
+                id: comment.id,
                 kind: .comment,
-                user: user,
-                message: text,
-                badge: poiBadge(for: rating),
-                timestamp: rating.createdAt,
+                user: userProvider(comment.userId),
+                message: commentMessage(for: comment.content),
+                badge: nil,
+                timestamp: comment.createdAt,
                 replies: []
             )
         }
     }
 
-    func poiRealDetailDescriptor(for ratedPOI: RatedPOI, highlight: String?) -> RealDetailDescriptor {
-        let trimmedHighlight = highlight?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let resolvedMessage = trimmedHighlight.isEmpty ? "Friends are vibing here right now." : trimmedHighlight
-        let likes = Array(Set(ratedPOI.ratings.map(\.userId)))
-        let comments = poiRealComments(for: ratedPOI)
-        let createdAt = ratedPOI.ratings.map(\.createdAt).max() ?? Date()
-        let attachments = poiAttachments(for: ratedPOI)
-        let pseudoUser = User(id: ratedPOI.poi.id, handle: ratedPOI.poi.name, avatarURL: nil)
-
-        let real = RealPost(
-            id: ratedPOI.poi.id,
-            userId: pseudoUser.id,
-            center: ratedPOI.poi.coordinate,
-            radiusMeters: 650,
-            message: resolvedMessage,
-            attachments: attachments,
-            likes: likes,
-            comments: comments,
-            visibility: .publicAll,
-            createdAt: createdAt,
-            expiresAt: createdAt.addingTimeInterval(48 * 3600)
-        )
-
-        return RealDetailDescriptor(
-            real: real,
-            user: pseudoUser,
-            displayName: ratedPOI.poi.name,
-            avatarCategory: ratedPOI.poi.category
-        )
-    }
-
-    func poiAttachments(for ratedPOI: RatedPOI) -> [RealPost.Attachment] {
-        var seen = Set<String>()
-        var attachments: [RealPost.Attachment] = []
-        for rating in ratedPOI.ratings {
-            guard let emoji = rating.emoji, emoji.isEmpty == false else { continue }
-            if seen.insert(emoji).inserted {
-                attachments.append(.init(kind: .emoji(emoji)))
-            }
-            if attachments.count >= 4 { break }
-        }
-        if attachments.isEmpty {
-            attachments.append(.init(kind: .emoji(ratedPOI.poi.category.defaultEmoji)))
-        }
-        return attachments
-    }
-
-    func poiRealComments(for ratedPOI: RatedPOI) -> [RealPost.Comment] {
-        ratedPOI.ratings.compactMap { rating in
-            guard let text = rating.text?.trimmingCharacters(in: .whitespacesAndNewlines), text.isEmpty == false else {
-                return nil
-            }
-            return RealPost.Comment(
-                id: rating.id,
-                userId: rating.userId,
-                text: text,
-                createdAt: rating.createdAt
-            )
-        }
-    }
-
-    func poiBadge(for rating: Rating) -> String? {
-        if let emoji = rating.emoji, emoji.isEmpty == false {
-            return emoji
-        }
-        if let score = rating.score {
-            return "\(score)★"
-        }
-        return nil
-    }
-
-    func poiLikeMessage(for rating: Rating) -> String {
-        if let score = rating.score {
-            return "Rated \(score)/5"
-        }
-        if let emoji = rating.emoji, emoji.isEmpty == false {
-            return "Reacted with \(emoji)"
-        }
-        if let text = rating.text, text.isEmpty == false {
+    func commentMessage(for content: RatedPOI.Comment.Content) -> String {
+        switch content {
+        case let .text(text):
             return text
+        case .photo:
+            return "Shared a photo"
+        case .video:
+            return "Shared a video"
         }
-        return "Saved this spot"
     }
 
     func makeRealBadges(for real: RealPost) -> [String] {
@@ -653,8 +596,14 @@ private struct ExperiencePanel: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 28) {
-                if let realDetail = data.realDetail {
-                    realExperienceContent(for: realDetail)
+                if let hero = data.hero {
+                    HeroSection(model: hero, style: .standard)
+                        .padding(.horizontal, 4)
+
+                    if data.engagement.hasContent {
+                        EngagementSection(model: data.engagement)
+                            .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+                    }
                 } else {
                     defaultExperienceContent
                 }
@@ -666,124 +615,333 @@ private struct ExperiencePanel: View {
         .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
     }
 
-    private var header: some View {
+    @ViewBuilder
+    private var defaultExperienceContent: some View {
+        if let poiInfo = data.poiInfo {
+            VStack(spacing: 18) {
+                POIExpandedHero(
+                    info: poiInfo,
+                    stats: data.poiStats,
+                    accentColor: data.accentColor
+                )
+                .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+
+                if data.badges.isEmpty == false {
+                    POITagList(badges: data.badges, accentColor: data.accentColor)
+                        .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+                }
+
+                if data.engagement.hasContent {
+                    EngagementSection(model: data.engagement)
+                        .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+                }
+            }
+        } else {
+            VStack(spacing: 24) {
+                SummarySection(model: data.highlights, accentColor: data.accentColor)
+                    .padding(.horizontal, 12)
+
+                if let story = data.story {
+                    ExperienceMediaGallery(items: story.galleryItems, accentColor: data.accentColor)
+                        .frame(height: ExperienceMediaGalleryLayout.height(for: story.galleryItems))
+                        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [data.accentColor.opacity(0.8), .white.opacity(0.15)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 2
+                                )
+                                .blendMode(.screen)
+                        }
+                }
+
+                if data.engagement.hasContent {
+                    EngagementSection(model: data.engagement)
+                        .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+                }
+            }
+        }
+    }
+
+}
+
+private struct POITagList: View {
+    let badges: [String]
+    let accentColor: Color
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(badges, id: \.self) { badge in
+                    Text(badge)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(accentColor.opacity(0.22))
+                        )
+                        .overlay {
+                            Capsule(style: .continuous)
+                                .stroke(accentColor.opacity(0.55), lineWidth: 1)
+                        }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+}
+
+private struct POICollapsedHero: View {
+    let info: ExperienceDetailView.POIInfoModel
+    let stats: ExperienceDetailView.POIStatsModel?
+    let accentColor: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
+                .alignmentGuide(.top) { $0[.top] }
+                .padding(.trailing, POIHeroLayout.avatarSpacing)
+
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(info.name)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(info.category.displayName)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+
+                if let stats {
+                    POICollapsedStats(model: stats, accentColor: accentColor)
+                }
+            }
+        }
+        .padding(.top, POIHeroLayout.headerTopPadding)
+        .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
+        .padding(.vertical, POIHeroLayout.collapsedVerticalPadding)
+    }
+}
+
+private struct POIExpandedHero: View {
+    let info: ExperienceDetailView.POIInfoModel
+    let stats: ExperienceDetailView.POIStatsModel?
+    let accentColor: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.standardAvatarSize)
+                .alignmentGuide(.top) { $0[.top] }
+                .padding(.trailing, POIHeroLayout.avatarSpacing)
+
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(info.name)
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text(info.category.displayName)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+
+                if let stats {
+                    POICollapsedStats(model: stats, accentColor: accentColor)
+                }
+            }
+        }
+        .padding(.top, POIHeroLayout.headerTopPadding)
+        .padding(.horizontal, POIHeroLayout.standardHorizontalPadding)
+        .padding(.vertical, POIHeroLayout.standardVerticalPadding)
+    }
+}
+
+private struct POICollapsedStats: View {
+    let model: ExperienceDetailView.POIStatsModel
+    let accentColor: Color
+
+    var body: some View {
+        HStack(spacing: 14) {
+            StatGlyph(icon: "shoeprints.fill", value: model.checkIns)
+            StatGlyph(icon: "text.bubble", value: model.comments)
+            StatGlyph(icon: "star.fill", value: model.favorites)
+
+            Spacer()
+
+            EndorsementCompactPill(title: "Loved", value: model.endorsements.hype, color: accentColor)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.white.opacity(0.08))
+        )
+    }
+}
+
+private struct POIAvatar: View {
+    let category: POICategory
+    let accentColor: Color
+    var size: CGFloat = 54
+
+    var body: some View {
+        let gradient = category.markerGradientColors
+        return ZStack {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: gradient,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: size, height: size)
+                .shadow(color: accentColor.opacity(0.4), radius: 12, y: 6)
+
+            Image(systemName: category.symbolName)
+                .font(.system(size: size * 0.42, weight: .bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+        }
+    }
+}
+
+private enum POIHeroLayout {
+    static let headerTopPadding: CGFloat = 40
+    static let collapsedHorizontalPadding: CGFloat = 32
+    static let collapsedVerticalPadding: CGFloat = 12
+    static let standardHorizontalPadding: CGFloat = 24
+    static let standardVerticalPadding: CGFloat = 22
+    static let collapsedAvatarSize: CGFloat = 34
+    static let standardAvatarSize: CGFloat = 40
+    static let avatarSpacing: CGFloat = 10
+}
+
+private struct StatGlyph: View {
+    let icon: String
+    let value: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+            Text("\(value)")
+                .font(.subheadline.bold())
+                .foregroundStyle(.white)
+        }
+    }
+}
+
+private struct EndorsementCompactPill: View {
+    let title: String
+    let value: Int
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color.opacity(0.8))
+                .frame(width: 8, height: 8)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.7))
+            Spacer()
+            Text("\(value)")
+                .font(.caption.bold())
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.08), in: Capsule())
+    }
+}
+
+private struct SummarySection: View {
+    let model: ExperienceDetailView.HighlightsSectionModel
+    let accentColor: Color
+
+    var body: some View {
         VStack(spacing: 10) {
-            Text(data.title)
+            Text(model.title)
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
 
-            if let subtitle = data.subtitle {
+            if let subtitle = model.subtitle {
                 Text(subtitle)
                     .font(.headline)
                     .foregroundStyle(.white.opacity(0.75))
                     .multilineTextAlignment(.center)
             }
-        }
-        .padding(.horizontal, 12)
-    }
 
-    @ViewBuilder
-    private var defaultExperienceContent: some View {
-        header
-
-        ExperienceMediaGallery(items: data.galleryItems, accentColor: data.accentColor)
-            .frame(height: ExperienceMediaGalleryLayout.height(for: data.galleryItems))
-            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [data.accentColor.opacity(0.8), .white.opacity(0.15)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 2
-                    )
-                    .blendMode(.screen)
+            if let highlight = model.highlight {
+                Text(highlight)
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(accentColor.opacity(0.2), in: Capsule(style: .continuous))
             }
+        }
+    }
+}
 
-        VStack(alignment: .leading, spacing: 18) {
-            badgesSection
+private struct HighlightsSection: View {
+    let model: ExperienceDetailView.HighlightsSectionModel
 
-            if let highlight = data.highlight {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let highlight = model.highlight {
                 Text(highlight)
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineSpacing(4)
             }
 
-            if let secondary = data.secondary {
+            if let secondary = model.secondary {
                 Text(secondary)
                     .font(.footnote)
                     .foregroundStyle(.white.opacity(0.7))
             }
-
-            if data.friendLikes.isEmpty == false {
-                FriendEngagementList(title: "Friend Likes", entries: data.friendLikes)
-            }
-
-            if data.friendComments.isEmpty == false {
-                FriendEngagementList(title: "Friend Comments", entries: data.friendComments)
-            }
-
-            if data.friendRatings.isEmpty == false {
-                FriendEngagementList(title: "Friend Ratings", entries: data.friendRatings)
-            }
         }
-        .padding(24)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 32, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
-        }
-        .modifier(Theme.neonGlow(data.accentColor))
     }
+}
 
-    @ViewBuilder
-    private func realExperienceContent(for detail: ExperienceDetailView.RealDetailDescriptor) -> some View {
+private struct EngagementSection: View {
+    let model: ExperienceDetailView.EngagementSectionModel
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            CompactRealCard(
-                real: detail.real,
-                user: detail.user,
-                style: .standard,
-                displayNameOverride: detail.displayName,
-                avatarCategory: detail.avatarCategory
-            )
-            .padding(.horizontal, 4)
-
-            if data.friendLikes.isEmpty == false {
-                LikesAvatarGrid(entries: data.friendLikes)
-                    .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+            if model.friendLikes.isEmpty == false {
+                LikesAvatarGrid(entries: model.friendLikes, iconName: model.friendLikesIconName)
             }
 
-            if data.friendComments.isEmpty == false {
-                CommentThreadList(entries: data.friendComments)
-                    .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+            if model.friendComments.isEmpty == false {
+                CommentThreadList(entries: model.friendComments)
             }
         }
     }
+}
 
-    private var badgesSection: some View {
-        HStack(spacing: 10) {
-            ForEach(data.badges, id: \.self) { badge in
-                Text(badge)
-                    .font(.caption.bold())
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(data.accentColor.opacity(0.22))
-                    )
-                    .overlay {
-                        Capsule(style: .continuous)
-                            .stroke(data.accentColor.opacity(0.55), lineWidth: 1)
-                    }
-            }
-            Spacer(minLength: 0)
-        }
+private struct HeroSection: View {
+    let model: ExperienceDetailView.HeroSectionModel
+    let style: CompactRealCard.Style
+
+    var body: some View {
+        CompactRealCard(
+            real: model.real,
+            user: model.user,
+            style: style,
+            displayNameOverride: model.displayNameOverride,
+            avatarCategory: model.avatarCategory,
+            suppressContent: model.suppressContent
+        )
     }
-
 }
 
 // MARK: - Compact reel pager
@@ -795,9 +953,18 @@ private struct CompactReelPager: View {
     var body: some View {
         TabView(selection: selection) {
             ForEach(pager.items) { item in
-                CompactRealCard(real: item.real, user: item.user, style: .collapsed)
-                    .padding(.horizontal, 8)
-                    .tag(item.id)
+                HeroSection(
+                    model: ExperienceDetailView.HeroSectionModel(
+                        real: item.real,
+                        user: item.user,
+                        displayNameOverride: nil,
+                        avatarCategory: nil,
+                        suppressContent: false
+                    ),
+                    style: .collapsed
+                )
+                .padding(.horizontal, 8)
+                .tag(item.id)
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
@@ -815,6 +982,7 @@ private struct CompactRealCard: View {
     let style: Style
     let displayNameOverride: String?
     let avatarCategory: POICategory?
+    let suppressContent: Bool
 
     @State private var isLightboxPresented = false
     @State private var lightboxSelection: UUID
@@ -824,13 +992,15 @@ private struct CompactRealCard: View {
         user: User?,
         style: Style = .standard,
         displayNameOverride: String? = nil,
-        avatarCategory: POICategory? = nil
+        avatarCategory: POICategory? = nil,
+        suppressContent: Bool = false
     ) {
         self.real = real
         self.user = user
         self.style = style
         self.displayNameOverride = displayNameOverride
         self.avatarCategory = avatarCategory
+        self.suppressContent = suppressContent
         _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
 
@@ -843,10 +1013,12 @@ private struct CompactRealCard: View {
             VStack(alignment: .leading, spacing: 12) {
                 userNameRow
 
-                contentText
+                if suppressContent == false {
+                    contentText
 
-                if hasMedia {
-                    mediaRow
+                    if hasMedia {
+                        mediaRow
+                    }
                 }
 
                 footerRow
@@ -1450,6 +1622,7 @@ private struct FriendEngagementRow: View {
 
 private struct LikesAvatarGrid: View {
     let entries: [FriendEngagement]
+    let iconName: String
 
     private let columns: [GridItem] = {
         let availableWidth = UIScreen.main.bounds.width - (ExperienceSheetLayout.engagementHorizontalInset * 2) - 16
@@ -1463,7 +1636,7 @@ private struct LikesAvatarGrid: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Image(systemName: "heart")
+            Image(systemName: iconName)
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.85))
 
@@ -2074,12 +2247,6 @@ private extension Array where Element == Int {
         guard isEmpty == false else { return nil }
         let total = reduce(0, +)
         return Double(total) / Double(count)
-    }
-}
-
-private extension Array where Element == Rating {
-    var average: Double? {
-        compactMap(\.score).average
     }
 }
 

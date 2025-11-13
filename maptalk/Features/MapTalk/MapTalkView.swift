@@ -47,7 +47,9 @@ struct MapTalkView: View {
                 if isExperiencePresented == false {
                     isExperiencePresented = true
                 }
-                collapseDetent()
+                if shouldPresent {
+                    collapseDetent()
+                }
             }
             let presentReal: (RealPost) -> Void = { real in updateSelection(real, true) }
 
@@ -248,7 +250,7 @@ struct MapTalkView: View {
     }
 
     private func handleRegionChange(to newRegion: MKCoordinateRegion) {
-        // 并线打断：取消在途分段动画，避免排队/撕裂
+        // Interrupt any in-flight segment transition to avoid stacking animations
         if activeTransitionID != nil {
             activeTransitionID = nil
         }
@@ -277,7 +279,7 @@ struct MapTalkView: View {
             return
         }
 
-        // Reduce Motion：直接/轻量过渡
+        // Reduce Motion: fall back to a simplified transition
         if UIAccessibility.isReduceMotionEnabled {
             self.activeTransitionID = nil
             let d = min(0.30 + (travelDistance / 150_000.0), 0.45)
@@ -382,7 +384,7 @@ struct MapTalkView: View {
         let liftPitch: CGFloat = tempo == .cinematic ? 36 : 0
         let cruisePitch: CGFloat = tempo == .cinematic ? 36 : 0
 
-        // Stage 1: 抬升（同时轻移向目标方向）
+        // Stage 1: Lift up while easing toward the target
         withAnimation(smoothAnimation(duration: durations.zoomOut)) {
             self.cameraPosition = .camera(
                 MapCamera(
@@ -394,7 +396,7 @@ struct MapTalkView: View {
             )
         }
 
-        // Stage 2: 巡航（从抬升点向目标慢速滑行）
+        // Stage 2: Cruise from the lift point toward the destination
         DispatchQueue.main.asyncAfter(deadline: .now() + durations.zoomOut) {
             guard self.activeTransitionID == id else { return }
             withAnimation(smoothAnimation(duration: durations.travel)) {
@@ -433,7 +435,7 @@ struct MapTalkView: View {
     }
 
     private func completeDive(to target: MKCoordinateRegion, with duration: Double, transitionID id: UUID) {
-        // Stage 3: 俯冲到“城市级”落地（统一尺度）
+        // Stage 3: Dive back to the city-level landing scale
         let clamped = cityClamp(target)
         withAnimation(smoothAnimation(duration: duration)) {
             self.cameraPosition = .region(clamped)
@@ -446,7 +448,7 @@ struct MapTalkView: View {
         }
     }
 
-    /// 将 Region 收敛到城市级（20km ~ 60km 之间）
+    /// Clamp the region to a consistent city-scale span (20km ~ 60km)
     private func cityClamp(_ region: MKCoordinateRegion) -> MKCoordinateRegion {
         let meters = clamp(region.dominantSpanMeters, lower: 20_000, upper: 60_000)
         return MKCoordinateRegion(center: region.center, latitudinalMeters: meters, longitudinalMeters: meters)
@@ -483,7 +485,7 @@ private enum TransitionTempo {
 }
 
 private func smoothAnimation(duration: Double) -> Animation {
-    // 更接近 Earth Studio 的缓入缓出
+    // Animation curve inspired by Earth Studio (ease-in-out)
     Animation.timingCurve(0.25, 0.1, 0.25, 1.0, duration: duration)
 }
 

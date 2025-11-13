@@ -9,7 +9,6 @@ final class AppEnvironment {
     let location: any LocationService
     let notifications: any NotificationService
     let poiRepo: any POIRepository
-    let ratingRepo: any RatingRepository
     let realRepo: any RealRepository
 
     init(
@@ -17,14 +16,12 @@ final class AppEnvironment {
         location: any LocationService,
         notifications: any NotificationService,
         poiRepo: any POIRepository,
-        ratingRepo: any RatingRepository,
         realRepo: any RealRepository
     ) {
         self.build = build
         self.location = location
         self.notifications = notifications
         self.poiRepo = poiRepo
-        self.ratingRepo = ratingRepo
         self.realRepo = realRepo
     }
 
@@ -37,7 +34,6 @@ final class AppEnvironment {
         let location = LocationServiceImpl()
         let notifications = NotificationServiceImpl()
         let poiRepo = InMemoryPOIRepository()
-        let ratingRepo = InMemoryRatingRepository()
         let realRepo = InMemoryRealRepository()
 
         return AppEnvironment(
@@ -45,7 +41,6 @@ final class AppEnvironment {
             location: location,
             notifications: notifications,
             poiRepo: poiRepo,
-            ratingRepo: ratingRepo,
             realRepo: realRepo
         )
     }

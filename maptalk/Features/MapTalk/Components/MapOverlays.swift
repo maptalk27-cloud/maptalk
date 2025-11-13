@@ -14,7 +14,7 @@ struct MapOverlays: MapContent {
                 Button {
                     onSelectPOI(rated)
                 } label: {
-                    POICategoryMarker(category: rated.poi.category, count: rated.ratingCount)
+                    POICategoryMarker(category: rated.poi.category, count: rated.checkIns.count)
                 }
                 .buttonStyle(.plain)
             }
