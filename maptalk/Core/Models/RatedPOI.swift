@@ -64,6 +64,13 @@ enum VisitTag: String, CaseIterable, Codable, Hashable {
 }
 
 struct RatedPOI: Identifiable, Hashable {
+    enum Endorsement: String, Codable, Hashable {
+        case hype
+        case solid
+        case meh
+        case questionable
+    }
+
     struct Media: Identifiable, Hashable {
         enum Kind: Hashable {
             case photo(URL)
@@ -86,12 +93,20 @@ struct RatedPOI: Identifiable, Hashable {
         let userId: UUID
         var note: String?
         var createdAt: Date
+        var endorsement: Endorsement?
 
-        init(id: UUID = UUID(), userId: UUID, note: String? = nil, createdAt: Date = .init()) {
+        init(
+            id: UUID = UUID(),
+            userId: UUID,
+            note: String? = nil,
+            createdAt: Date = .init(),
+            endorsement: Endorsement? = nil
+        ) {
             self.id = id
             self.userId = userId
             self.note = note
             self.createdAt = createdAt
+            self.endorsement = endorsement
         }
     }
 

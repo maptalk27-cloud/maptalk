@@ -108,15 +108,15 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6001, user: sampleFriends[0], note: "Sunrise stop after the morning ride", minutesAgo: 18, relativeTo: referenceDate),
-                    poiCheckIn(6002, user: sampleFriends[3], note: "Livestreaming the sunset", minutesAgo: 42, relativeTo: referenceDate),
-                    poiCheckIn(6003, user: currentUser, note: "Filming + editing a vlog", minutesAgo: 64, relativeTo: referenceDate)
+                    poiCheckIn(6001, user: sampleFriends[0], note: "Sunrise stop after the morning ride", minutesAgo: 18, relativeTo: referenceDate, endorsement: .hype),
+                    poiCheckIn(6002, user: sampleFriends[3], note: "Livestreaming the sunset", minutesAgo: 42, relativeTo: referenceDate, endorsement: .solid),
+                    poiCheckIn(6003, user: currentUser, note: "Filming + editing a vlog", minutesAgo: 64, relativeTo: referenceDate, endorsement: .hype)
                 ],
                 comments: [
                     poiComment(6101, user: sampleFriends[2], content: .text("Busker playing city pop tonight—super chill vibes"), minutesAgo: 26, relativeTo: referenceDate),
                     poiComment(6102, user: sampleFriends[5], content: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 58, relativeTo: referenceDate)
                 ],
-                endorsements: RatedPOI.EndorsementSummary(hype: 24, solid: 14, meh: 2, questionable: 0),
+                endorsements: RatedPOI.EndorsementSummary(hype: 2, solid: 1, meh: 0, questionable: 0),
                 tags: [
                     RatedPOI.TagStat(tag: .unwind, count: 12),
                     RatedPOI.TagStat(tag: .explore, count: 8),
@@ -131,14 +131,14 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6004, user: sampleFriends[1], note: "Tiramisu + screenplay session", minutesAgo: 22, relativeTo: referenceDate),
-                    poiCheckIn(6005, user: sampleFriends[6], note: "Late-night dirty espresso", minutesAgo: 48, relativeTo: referenceDate)
+                    poiCheckIn(6004, user: sampleFriends[1], note: "Tiramisu + screenplay session", minutesAgo: 22, relativeTo: referenceDate, endorsement: .solid),
+                    poiCheckIn(6005, user: sampleFriends[6], note: "Late-night dirty espresso", minutesAgo: 48, relativeTo: referenceDate, endorsement: .meh)
                 ],
                 comments: [
                     poiComment(6103, user: sampleFriends[5], content: .text("Wednesday sketch class here—the tutor has killer playlists"), minutesAgo: 35, relativeTo: referenceDate),
                     poiComment(6104, user: currentUser, content: .video(url: URL(string: "https://example.com/cafe.mp4")!, poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 65, relativeTo: referenceDate)
                 ],
-                endorsements: RatedPOI.EndorsementSummary(hype: 11, solid: 9, meh: 2, questionable: 0),
+                endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 1, questionable: 0),
                 tags: [
                     RatedPOI.TagStat(tag: .dine, count: 6),
                     RatedPOI.TagStat(tag: .study, count: 5),
@@ -154,15 +154,15 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6006, user: currentUser, note: "Queued for the limited vinyl pressing", minutesAgo: 44, relativeTo: referenceDate),
-                    poiCheckIn(6007, user: sampleFriends[7], note: "Stage lighting is insane", minutesAgo: 70, relativeTo: referenceDate),
-                    poiCheckIn(6008, user: sampleFriends[8], note: "Coming back next week", minutesAgo: 82, relativeTo: referenceDate)
+                    poiCheckIn(6006, user: currentUser, note: "Queued for the limited vinyl pressing", minutesAgo: 44, relativeTo: referenceDate, endorsement: .hype),
+                    poiCheckIn(6007, user: sampleFriends[7], note: "Stage lighting is insane", minutesAgo: 70, relativeTo: referenceDate, endorsement: .questionable),
+                    poiCheckIn(6008, user: sampleFriends[8], note: "Coming back next week", minutesAgo: 82, relativeTo: referenceDate, endorsement: .solid)
                 ],
                 comments: [
                     poiComment(6105, user: sampleFriends[2], content: .text("Birria truck in zone B has unreal sauce"), minutesAgo: 52, relativeTo: referenceDate),
                     poiComment(6106, user: sampleFriends[4], content: .photo(URL(string: "https://images.unsplash.com/photo-1521336575822-6da63fb45455?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 78, relativeTo: referenceDate)
                 ],
-                endorsements: RatedPOI.EndorsementSummary(hype: 19, solid: 9, meh: 3, questionable: 1),
+                endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 1, meh: 0, questionable: 1),
                 tags: [
                     RatedPOI.TagStat(tag: .explore, count: 9),
                     RatedPOI.TagStat(tag: .entertainment, count: 8),
@@ -178,13 +178,13 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6009, user: sampleFriends[1], note: "Lunch-break sketch session", minutesAgo: 32, relativeTo: referenceDate),
-                    poiCheckIn(6010, user: sampleFriends[4], note: "Queued for the immersive exhibit", minutesAgo: 58, relativeTo: referenceDate)
+                    poiCheckIn(6009, user: sampleFriends[1], note: "Lunch-break sketch session", minutesAgo: 32, relativeTo: referenceDate, endorsement: .meh),
+                    poiCheckIn(6010, user: sampleFriends[4], note: "Queued for the immersive exhibit", minutesAgo: 58, relativeTo: referenceDate, endorsement: .solid)
                 ],
                 comments: [
                     poiComment(6107, user: sampleFriends[0], content: .text("Remember to book the light lab—slots vanish fast"), minutesAgo: 45, relativeTo: referenceDate)
                 ],
-                endorsements: RatedPOI.EndorsementSummary(hype: 10, solid: 6, meh: 1, questionable: 0),
+                endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 1, questionable: 0),
                 tags: [
                     RatedPOI.TagStat(tag: .explore, count: 6),
                     RatedPOI.TagStat(tag: .express, count: 5),
@@ -199,15 +199,15 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6011, user: sampleFriends[2], note: "Toro flight is legendary", minutesAgo: 28, relativeTo: referenceDate),
-                    poiCheckIn(6012, user: sampleFriends[6], note: "Booked the late seating", minutesAgo: 34, relativeTo: referenceDate),
-                    poiCheckIn(6013, user: currentUser, note: "Bringing parents on Friday", minutesAgo: 56, relativeTo: referenceDate)
+                    poiCheckIn(6011, user: sampleFriends[2], note: "Toro flight is legendary", minutesAgo: 28, relativeTo: referenceDate, endorsement: .hype),
+                    poiCheckIn(6012, user: sampleFriends[6], note: "Booked the late seating", minutesAgo: 34, relativeTo: referenceDate, endorsement: .solid),
+                    poiCheckIn(6013, user: currentUser, note: "Bringing parents on Friday", minutesAgo: 56, relativeTo: referenceDate, endorsement: .questionable)
                 ],
                 comments: [
                     poiComment(6108, user: sampleFriends[0], content: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 44, relativeTo: referenceDate),
                     poiComment(6109, user: sampleFriends[3], content: .text("Chef remembers names + favorites—make time to chat"), minutesAgo: 61, relativeTo: referenceDate)
                 ],
-                endorsements: RatedPOI.EndorsementSummary(hype: 21, solid: 7, meh: 1, questionable: 1),
+                endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 1, meh: 0, questionable: 1),
                 tags: [
                     RatedPOI.TagStat(tag: .dine, count: 14),
                     RatedPOI.TagStat(tag: .date, count: 8),
@@ -743,13 +743,15 @@ enum PreviewData {
         user: User,
         note: String?,
         minutesAgo: Double,
-        relativeTo referenceDate: Date
+        relativeTo referenceDate: Date,
+        endorsement: RatedPOI.Endorsement? = nil
     ) -> RatedPOI.CheckIn {
         RatedPOI.CheckIn(
             id: uuid(seed),
             userId: user.id,
             note: note,
-            createdAt: referenceDate.addingTimeInterval(-minutesAgo * 60)
+            createdAt: referenceDate.addingTimeInterval(-minutesAgo * 60),
+            endorsement: endorsement
         )
     }
 

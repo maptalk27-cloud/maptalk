@@ -55,9 +55,17 @@ struct ExperienceDetailView: View {
         let secondary: String?
     }
 
+    fileprivate struct EndorsementBadge: Identifiable {
+        let id = UUID()
+        let iconName: String
+        let count: Int
+        let tint: Color
+    }
+
     fileprivate struct POIInfoModel {
         let name: String
         let category: POICategory
+        let endorsementBadges: [EndorsementBadge]
     }
 
     fileprivate struct POIStatsModel {
@@ -157,6 +165,7 @@ private struct FriendEngagement: Identifiable {
     let badge: String?
     let timestamp: Date?
     let replies: [FriendEngagement]
+    let endorsement: RatedPOI.Endorsement?
 }
 
 private extension MediaDisplayItem {
@@ -277,7 +286,7 @@ private extension ExperienceDetailView {
                     SummarySection(model: data.highlights, accentColor: data.accentColor)
 
                     if let stats = data.poiStats {
-                        POICollapsedStats(model: stats, accentColor: data.accentColor)
+                        POIHeroStatsRow(model: stats)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -333,7 +342,8 @@ private extension ExperienceDetailView {
                     message: "Reacted to this drop.",
                     badge: nil,
                     timestamp: nil,
-                    replies: []
+                    replies: [],
+                    endorsement: nil
                 )
             }
             let friendComments = real.comments.compactMap { comment -> FriendEngagement? in
@@ -347,7 +357,8 @@ private extension ExperienceDetailView {
                         message: reply.text,
                         badge: nil,
                         timestamp: reply.createdAt,
-                        replies: []
+                        replies: [],
+                        endorsement: nil
                     )
                 }
                 return FriendEngagement(
@@ -357,7 +368,8 @@ private extension ExperienceDetailView {
                     message: comment.text,
                     badge: nil,
                     timestamp: comment.createdAt,
-                    replies: replies
+                    replies: replies,
+                    endorsement: nil
                 )
             }
             let hero = HeroSectionModel(
@@ -395,9 +407,11 @@ private extension ExperienceDetailView {
             let accent = rated.poi.category.accentColor
             let friendCheckIns = checkInEngagements(for: rated)
             let friendComments = poiCommentEngagements(for: rated)
+            let endorsementBadges = poiEndorsementBadges(for: rated)
+            let tagBadges = poiBadgeStrings(for: rated)
             return ContentData(
                 hero: nil,
-                badges: poiBadgeStrings(for: rated),
+                badges: tagBadges,
                 story: nil,
                 highlights: HighlightsSectionModel(
                     title: "",
@@ -414,7 +428,11 @@ private extension ExperienceDetailView {
                     friendRatingsTitle: "Endorsements",
                     friendRatings: []
                 ),
-                poiInfo: POIInfoModel(name: rated.poi.name, category: rated.poi.category),
+                poiInfo: POIInfoModel(
+                    name: rated.poi.name,
+                    category: rated.poi.category,
+                    endorsementBadges: endorsementBadges
+                ),
                 poiStats: POIStatsModel(
                     checkIns: rated.checkIns.count,
                     comments: rated.comments.count,
@@ -466,37 +484,41 @@ private extension ExperienceDetailView {
         }
     }
 
-    func endorsementSummaryText(for summary: RatedPOI.EndorsementSummary) -> String {
-        let segments: [String] = [
-            summary.hype > 0 ? "Loved \(summary.hype)" : nil,
-            summary.solid > 0 ? "Solid \(summary.solid)" : nil,
-            summary.meh > 0 ? "Meh \(summary.meh)" : nil,
-            summary.questionable > 0 ? "Questionable \(summary.questionable)" : nil
-        ].compactMap { $0 }
-        return segments.isEmpty ? "Waiting for friends to share more impressions." : segments.joined(separator: " · ")
+    func poiBadgeStrings(for ratedPOI: RatedPOI) -> [String] {
+        ratedPOI.tags.map { "\($0.tag.emoji) \($0.tag.displayName) · \($0.count)" }
     }
 
-    func poiBadgeStrings(for ratedPOI: RatedPOI) -> [String] {
-        let tagBadges = ratedPOI.tags.map { "\($0.tag.emoji) \($0.tag.displayName) · \($0.count)" }
-        if tagBadges.isEmpty {
-            return [
-                "Loved \(ratedPOI.endorsements.hype)",
-                "Solid \(ratedPOI.endorsements.solid)"
-            ]
+    func poiEndorsementBadges(for ratedPOI: RatedPOI) -> [EndorsementBadge] {
+        let summary = ratedPOI.endorsements
+        let entries: [(RatedPOI.Endorsement, Int)] = [
+            (.hype, summary.hype),
+            (.solid, summary.solid),
+            (.meh, summary.meh),
+            (.questionable, summary.questionable)
+        ]
+        return entries.compactMap { endorsement, count in
+            guard count > 0 else { return nil }
+            return EndorsementBadge(
+                iconName: endorsementIconName(for: endorsement),
+                count: count,
+                tint: endorsementColor(for: endorsement)
+            )
         }
-        return tagBadges
     }
 
     func checkInEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {
         ratedPOI.checkIns.map { checkIn in
-            FriendEngagement(
+            let endorsement = checkIn.endorsement
+            let kind: FriendEngagement.Kind = endorsement == nil ? .like : .rating
+            return FriendEngagement(
                 id: checkIn.id,
-                kind: .like,
+                kind: kind,
                 user: userProvider(checkIn.userId),
-                message: checkIn.note ?? "Checked in",
+                message: checkIn.note ?? endorsementMessage(for: endorsement),
                 badge: nil,
                 timestamp: checkIn.createdAt,
-                replies: []
+                replies: [],
+                endorsement: checkIn.endorsement
             )
         }
     }
@@ -510,7 +532,8 @@ private extension ExperienceDetailView {
                 message: commentMessage(for: comment.content),
                 badge: nil,
                 timestamp: comment.createdAt,
-                replies: []
+                replies: [],
+                endorsement: nil
             )
         }
     }
@@ -523,6 +546,20 @@ private extension ExperienceDetailView {
             return "Shared a photo"
         case .video:
             return "Shared a video"
+        }
+    }
+
+    func endorsementMessage(for endorsement: RatedPOI.Endorsement?) -> String {
+        guard let endorsement else { return "Checked in" }
+        switch endorsement {
+        case .hype:
+            return "Loved this spot"
+        case .solid:
+            return "Solid vibes"
+        case .meh:
+            return "Said it's meh"
+        case .questionable:
+            return "Questioned this place"
         }
     }
 
@@ -561,6 +598,7 @@ private extension ExperienceDetailView {
             return [Color.black, Theme.neonWarning.opacity(0.28)]
         }
     }
+
 }
 
 private func formatCount(_ value: Int) -> String {
@@ -579,6 +617,32 @@ private func trimmedCount(_ value: Double) -> String {
         return String(formatted.dropLast(2))
     }
     return formatted
+}
+
+private func endorsementIconName(for endorsement: RatedPOI.Endorsement) -> String {
+    switch endorsement {
+    case .hype:
+        return "heart.fill"
+    case .solid:
+        return "hand.thumbsup.fill"
+    case .meh:
+        return "face.smiling.fill"
+    case .questionable:
+        return "questionmark.circle.fill"
+    }
+}
+
+private func endorsementColor(for endorsement: RatedPOI.Endorsement) -> Color {
+    switch endorsement {
+    case .hype:
+        return Theme.neonPrimary
+    case .solid:
+        return Theme.neonAccent
+    case .meh:
+        return Color.yellow.opacity(0.9)
+    case .questionable:
+        return Theme.neonWarning
+    }
 }
 
 private enum ExperienceSheetLayout {
@@ -712,13 +776,18 @@ private struct POICollapsedHero: View {
                     Text(info.name)
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
-                    Text(info.category.displayName)
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.7))
+                    HStack(spacing: 8) {
+                        Text(info.category.displayName)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.7))
+                        ForEach(info.endorsementBadges) { badge in
+                            POIBadgeSummaryPill(badge: badge)
+                        }
+                    }
                 }
 
                 if let stats {
-                    POICollapsedStats(model: stats, accentColor: accentColor)
+                    POIHeroStatsRow(model: stats)
                 }
             }
         }
@@ -735,51 +804,222 @@ private struct POIExpandedHero: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.standardAvatarSize)
+            POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
                 .alignmentGuide(.top) { $0[.top] }
                 .padding(.trailing, POIHeroLayout.avatarSpacing)
 
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(info.name)
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
-                    Text(info.category.displayName)
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.7))
+                    HStack(spacing: 8) {
+                        Text(info.category.displayName)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.7))
+                        ForEach(info.endorsementBadges) { badge in
+                            POIBadgeSummaryPill(badge: badge)
+                        }
+                    }
                 }
 
                 if let stats {
-                    POICollapsedStats(model: stats, accentColor: accentColor)
+                    POIHeroStatsRow(model: stats)
                 }
             }
         }
         .padding(.top, POIHeroLayout.headerTopPadding)
-        .padding(.horizontal, POIHeroLayout.standardHorizontalPadding)
-        .padding(.vertical, POIHeroLayout.standardVerticalPadding)
+        .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
+        .padding(.vertical, POIHeroLayout.collapsedVerticalPadding)
     }
 }
 
-private struct POICollapsedStats: View {
+private struct POIHeroStatsRow: View {
     let model: ExperienceDetailView.POIStatsModel
-    let accentColor: Color
 
     var body: some View {
-        HStack(spacing: 14) {
-            StatGlyph(icon: "shoeprints.fill", value: model.checkIns)
-            StatGlyph(icon: "text.bubble", value: model.comments)
-            StatGlyph(icon: "star.fill", value: model.favorites)
-
-            Spacer()
-
-            EndorsementCompactPill(title: "Loved", value: model.endorsements.hype, color: accentColor)
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            POIStatPill(icon: "shoeprints.fill", value: model.checkIns)
+            POIStatPill(icon: "text.bubble.fill", value: model.comments)
+            POIStatPill(icon: "star.fill", value: model.favorites)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Color.white.opacity(0.08))
-        )
+        .padding(.horizontal, 2)
+        .padding(.top, 4)
+    }
+}
+
+private struct POIStatPill: View {
+    let icon: String
+    let value: Int
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.caption.weight(.semibold))
+            Text(formatCount(value))
+                .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(.white.opacity(0.9))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.white.opacity(0.12), in: Capsule(style: .continuous))
+    }
+}
+
+private struct POIBadgeSummaryPill: View {
+    let badge: ExperienceDetailView.EndorsementBadge
+
+    var body: some View {
+        HStack(spacing: 4) {
+            iconView
+                .font(.caption.weight(.bold))
+            Text(formatCount(badge.count))
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        if badge.iconName == "heart.fill" {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Theme.neonPrimary.opacity(0.65),
+                                Theme.neonAccent.opacity(0.35),
+                                Color.pink.opacity(0.15),
+                                .clear
+                            ],
+                            center: .center,
+                            startRadius: 2,
+                            endRadius: 26
+                        )
+                    )
+                    .frame(width: 24, height: 24)
+                    .blur(radius: 0.8)
+                    .overlay {
+                        Circle()
+                            .stroke(
+                                AngularGradient(
+                                    colors: [Theme.neonPrimary, .white, Theme.neonAccent, Color.pink],
+                                    center: .center
+                                ),
+                                lineWidth: 1.2
+                            )
+                            .blur(radius: 0.6)
+                    }
+
+                Image(systemName: badge.iconName)
+                    .font(.caption.weight(.heavy))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [Theme.neonPrimary, Color.pink, Theme.neonAccent],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .shadow(color: Color.pink.opacity(0.7), radius: 8, y: 1)
+
+                let sparkleOffsets: [CGPoint] = [
+                    CGPoint(x: -9, y: -9),
+                    CGPoint(x: 8, y: -7),
+                    CGPoint(x: 0, y: 10)
+                ]
+                ForEach(Array(sparkleOffsets.enumerated()), id: \.offset) { item in
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 6))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                        .offset(x: item.element.x, y: item.element.y)
+                        .opacity(0.8)
+                }
+            }
+        } else {
+            Image(systemName: badge.iconName)
+                .foregroundStyle(badge.tint)
+        }
+    }
+}
+
+private struct EndorsementBadgeIcon: View {
+    let endorsement: RatedPOI.Endorsement
+    var size: CGFloat = 18
+
+    var body: some View {
+        if endorsement == .hype {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Theme.neonPrimary.opacity(0.7),
+                                Theme.neonAccent.opacity(0.4),
+                                Color.pink.opacity(0.2),
+                                .clear
+                            ],
+                            center: .center,
+                            startRadius: 2,
+                            endRadius: size * 1.2
+                        )
+                    )
+                    .frame(width: size * 1.2, height: size * 1.2)
+                    .blur(radius: 0.6)
+                    .overlay {
+                        Circle()
+                            .stroke(
+                                AngularGradient(
+                                    colors: [
+                                        Theme.neonPrimary,
+                                        .white,
+                                        Theme.neonAccent,
+                                        Color.pink
+                                    ],
+                                    center: .center
+                                ),
+                                lineWidth: 1
+                            )
+                            .blur(radius: 0.4)
+                    }
+
+                Image(systemName: "heart.fill")
+                    .font(.system(size: size * 0.6, weight: .heavy))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [Theme.neonPrimary, Color.pink, Theme.neonAccent],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .shadow(color: Color.pink.opacity(0.7), radius: 4, y: 1)
+
+                let sparkleOffsets: [CGPoint] = [
+                    CGPoint(x: -size * 0.45, y: -size * 0.45),
+                    CGPoint(x: size * 0.45, y: -size * 0.35),
+                    CGPoint(x: 0, y: size * 0.5)
+                ]
+                ForEach(Array(sparkleOffsets.enumerated()), id: \.offset) { item in
+                    Image(systemName: "sparkles")
+                        .font(.system(size: size * 0.25))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                        .offset(x: item.element.x, y: item.element.y)
+                        .opacity(0.85)
+                }
+            }
+            .frame(width: size * 1.6, height: size * 1.6)
+        } else {
+            Circle()
+                .fill(Color.black.opacity(0.85))
+                .frame(width: size, height: size)
+                .overlay {
+                    Image(systemName: endorsementIconName(for: endorsement))
+                        .font(.system(size: size * 0.6, weight: .bold))
+                        .foregroundStyle(endorsementColor(for: endorsement))
+                }
+        }
     }
 }
 
@@ -819,46 +1059,6 @@ private enum POIHeroLayout {
     static let collapsedAvatarSize: CGFloat = 34
     static let standardAvatarSize: CGFloat = 40
     static let avatarSpacing: CGFloat = 10
-}
-
-private struct StatGlyph: View {
-    let icon: String
-    let value: Int
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-            Text("\(value)")
-                .font(.subheadline.bold())
-                .foregroundStyle(.white)
-        }
-    }
-}
-
-private struct EndorsementCompactPill: View {
-    let title: String
-    let value: Int
-    let color: Color
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color.opacity(0.8))
-                .frame(width: 8, height: 8)
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
-            Spacer()
-            Text("\(value)")
-                .font(.caption.bold())
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color.white.opacity(0.08), in: Capsule())
-    }
 }
 
 private struct SummarySection: View {
@@ -1566,14 +1766,7 @@ private struct FriendEngagementRow: View {
             Circle().stroke(Color.white.opacity(0.25), lineWidth: 1)
         }
         .overlay(alignment: .bottomTrailing) {
-            Circle()
-                .fill(Color.black.opacity(0.75))
-                .frame(width: 18, height: 18)
-                .overlay {
-                    Image(systemName: iconName)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(iconColor)
-                }
+            overlayBadge
                 .offset(x: 6, y: 6)
         }
     }
@@ -1589,6 +1782,29 @@ private struct FriendEngagementRow: View {
     private var initials: String {
         guard let handle = entry.user?.handle else { return "??" }
         return String(handle.prefix(2)).uppercased()
+    }
+
+    @ViewBuilder
+    private var overlayBadge: some View {
+        if let endorsement = entry.endorsement {
+            Circle()
+                .fill(Color.black.opacity(0.8))
+                .frame(width: 20, height: 20)
+                .overlay {
+                    Image(systemName: endorsementIconName(for: endorsement))
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(endorsementColor(for: endorsement))
+                }
+        } else {
+            Circle()
+                .fill(Color.black.opacity(0.75))
+                .frame(width: 18, height: 18)
+                .overlay {
+                    Image(systemName: iconName)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(iconColor)
+                }
+        }
     }
 
     private var iconName: String {
@@ -1642,7 +1858,7 @@ private struct LikesAvatarGrid: View {
 
             LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
                 ForEach(entries) { entry in
-                    AvatarSquare(user: entry.user)
+                    AvatarSquare(user: entry.user, endorsement: entry.endorsement)
                 }
             }
             .padding(.leading, leadingInset)
@@ -1655,6 +1871,7 @@ private struct LikesAvatarGrid: View {
 private struct AvatarSquare: View {
     let user: User?
     var size: CGFloat = 44
+    var endorsement: RatedPOI.Endorsement? = nil
 
     var body: some View {
         ZStack {
@@ -1679,6 +1896,9 @@ private struct AvatarSquare: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(Color.white.opacity(0.3), lineWidth: 1)
         }
+        .overlay(alignment: .bottomTrailing) {
+            endorsementBadge
+        }
     }
 
     private var placeholder: some View {
@@ -1692,6 +1912,25 @@ private struct AvatarSquare: View {
     private var initials: String {
         guard let handle = user?.handle else { return "??" }
         return String(handle.prefix(2)).uppercased()
+    }
+
+    @ViewBuilder
+    private var endorsementBadge: some View {
+        if let endorsement {
+            EndorsementBadgeIcon(endorsement: endorsement, size: 20)
+                .offset(x: endorsementOffset.x, y: endorsementOffset.y)
+        }
+    }
+
+    private var endorsementOffset: CGPoint {
+        guard let endorsement else {
+            return CGPoint(x: 5, y: 5)
+        }
+        if endorsement == .hype {
+            let delta = size * 0.12
+            return CGPoint(x: 5 + delta, y: 5 + delta)
+        }
+        return CGPoint(x: 5, y: 5)
     }
 }
 
