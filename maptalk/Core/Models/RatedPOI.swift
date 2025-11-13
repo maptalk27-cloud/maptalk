@@ -94,19 +94,25 @@ struct RatedPOI: Identifiable, Hashable {
         var note: String?
         var createdAt: Date
         var endorsement: Endorsement?
+        var media: [Media]
+        var tag: VisitTag?
 
         init(
             id: UUID = UUID(),
             userId: UUID,
             note: String? = nil,
             createdAt: Date = .init(),
-            endorsement: Endorsement? = nil
+            endorsement: Endorsement? = nil,
+            media: [Media] = [],
+            tag: VisitTag? = nil
         ) {
             self.id = id
             self.userId = userId
             self.note = note
             self.createdAt = createdAt
             self.endorsement = endorsement
+            self.media = media
+            self.tag = tag
         }
     }
 

@@ -108,8 +108,33 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6001, user: sampleFriends[0], note: "Sunrise stop after the morning ride", minutesAgo: 18, relativeTo: referenceDate, endorsement: .hype),
-                    poiCheckIn(6002, user: sampleFriends[3], note: "Livestreaming the sunset", minutesAgo: 42, relativeTo: referenceDate, endorsement: .solid),
+                    poiCheckIn(
+                        6001,
+                        user: sampleFriends[0],
+                        note: "Sunrise stop after the morning ride",
+                        minutesAgo: 18,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [mediaPhoto("https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=600&q=60")],
+                        tag: .explore
+                    ),
+                    poiCheckIn(
+                        6002,
+                        user: sampleFriends[3],
+                        note: "Livestreaming the sunset",
+                        minutesAgo: 42,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            RatedPOI.Media(
+                                kind: .video(
+                                    url: URL(string: "https://example.com/waterfront-live.mp4")!,
+                                    poster: URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=60")!
+                                )
+                            )
+                        ],
+                        tag: .social
+                    ),
                     poiCheckIn(6003, user: currentUser, note: "Filming + editing a vlog", minutesAgo: 64, relativeTo: referenceDate, endorsement: .hype)
                 ],
                 comments: [
@@ -131,7 +156,16 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6004, user: sampleFriends[1], note: "Tiramisu + screenplay session", minutesAgo: 22, relativeTo: referenceDate, endorsement: .solid),
+                    poiCheckIn(
+                        6004,
+                        user: sampleFriends[1],
+                        note: "Tiramisu + screenplay session",
+                        minutesAgo: 22,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [mediaPhoto("https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=60")],
+                        tag: .dine
+                    ),
                     poiCheckIn(6005, user: sampleFriends[6], note: "Late-night dirty espresso", minutesAgo: 48, relativeTo: referenceDate, endorsement: .meh)
                 ],
                 comments: [
@@ -154,7 +188,18 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6006, user: currentUser, note: "Queued for the limited vinyl pressing", minutesAgo: 44, relativeTo: referenceDate, endorsement: .hype),
+                    poiCheckIn(
+                        6006,
+                        user: currentUser,
+                        note: "Queued for the limited vinyl pressing",
+                        minutesAgo: 44,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [
+                            RatedPOI.Media(kind: .text("Live remix dropping soon"))
+                        ],
+                        tag: .entertainment
+                    ),
                     poiCheckIn(6007, user: sampleFriends[7], note: "Stage lighting is insane", minutesAgo: 70, relativeTo: referenceDate, endorsement: .questionable),
                     poiCheckIn(6008, user: sampleFriends[8], note: "Coming back next week", minutesAgo: 82, relativeTo: referenceDate, endorsement: .solid)
                 ],
@@ -744,14 +789,18 @@ enum PreviewData {
         note: String?,
         minutesAgo: Double,
         relativeTo referenceDate: Date,
-        endorsement: RatedPOI.Endorsement? = nil
+        endorsement: RatedPOI.Endorsement? = nil,
+        media: [RatedPOI.Media] = [],
+        tag: VisitTag? = nil
     ) -> RatedPOI.CheckIn {
         RatedPOI.CheckIn(
             id: uuid(seed),
             userId: user.id,
             note: note,
             createdAt: referenceDate.addingTimeInterval(-minutesAgo * 60),
-            endorsement: endorsement
+            endorsement: endorsement,
+            media: media,
+            tag: tag
         )
     }
 
