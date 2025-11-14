@@ -75,6 +75,20 @@ struct ExperienceDetailView: View {
         let endorsements: RatedPOI.EndorsementSummary
     }
 
+    fileprivate struct POIStoryContributor: Identifiable {
+        struct Item: Identifiable {
+            let id: UUID
+            let media: MediaDisplayItem
+            let timestamp: Date
+        }
+
+        let id: UUID
+        let userId: UUID
+        let user: User?
+        let items: [Item]
+        let mostRecent: Date
+    }
+
     fileprivate struct EngagementSectionModel {
         let friendLikesIconName: String
         let friendLikesTitle: String
@@ -83,6 +97,7 @@ struct ExperienceDetailView: View {
         let friendComments: [FriendEngagement]
         let friendRatingsTitle: String
         let friendRatings: [FriendEngagement]
+        let storyContributors: [POIStoryContributor]
 
         var hasContent: Bool {
             friendLikes.isEmpty == false ||
@@ -396,7 +411,8 @@ private extension ExperienceDetailView {
                     friendCommentsTitle: "Friend Comments",
                     friendComments: friendComments,
                     friendRatingsTitle: "Friend Ratings",
-                    friendRatings: []
+                    friendRatings: [],
+                    storyContributors: []
                 ),
                 poiInfo: nil,
                 poiStats: nil,
@@ -409,6 +425,7 @@ private extension ExperienceDetailView {
             let friendComments = poiCommentEngagements(for: rated)
             let endorsementBadges = poiEndorsementBadges(for: rated)
             let tagBadges = poiBadgeStrings(for: rated)
+            let stories = poiStoryContributors(for: rated)
             return ContentData(
                 hero: nil,
                 badges: tagBadges,
@@ -426,7 +443,8 @@ private extension ExperienceDetailView {
                     friendCommentsTitle: "Friend Notes",
                     friendComments: friendComments,
                     friendRatingsTitle: "Endorsements",
-                    friendRatings: []
+                    friendRatings: [],
+                    storyContributors: stories
                 ),
                 poiInfo: POIInfoModel(
                     name: rated.poi.name,
@@ -504,6 +522,42 @@ private extension ExperienceDetailView {
                 tint: endorsementColor(for: endorsement)
             )
         }
+    }
+
+    func poiStoryContributors(for ratedPOI: RatedPOI) -> [POIStoryContributor] {
+        let mediaCheckIns = ratedPOI.checkIns.filter { checkIn in
+            checkIn.media.contains { media in
+                if case .photo = media.kind { return true }
+                return false
+            }
+        }
+        guard mediaCheckIns.isEmpty == false else { return [] }
+
+        let grouped = Dictionary(grouping: mediaCheckIns, by: { $0.userId })
+        let contributors: [POIStoryContributor] = grouped.compactMap { userId, entries in
+            let sortedEntries = entries.sorted { $0.createdAt < $1.createdAt }
+            let items: [POIStoryContributor.Item] = sortedEntries.flatMap { checkIn in
+                checkIn.media.compactMap { media -> POIStoryContributor.Item? in
+                    guard case .photo = media.kind else { return nil }
+                    return POIStoryContributor.Item(
+                        id: UUID(),
+                        media: mediaDisplayItem(media),
+                        timestamp: checkIn.createdAt
+                    )
+                }
+            }
+            guard items.isEmpty == false else { return nil }
+            let mostRecent = sortedEntries.map(\.createdAt).max() ?? Date()
+            return POIStoryContributor(
+                id: userId,
+                userId: userId,
+                user: userProvider(userId),
+                items: items,
+                mostRecent: mostRecent
+            )
+        }
+
+        return contributors.sorted { $0.mostRecent > $1.mostRecent }
     }
 
     func checkInEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {
@@ -665,7 +719,7 @@ private struct ExperiencePanel: View {
                         .padding(.horizontal, 4)
 
                     if data.engagement.hasContent {
-                        EngagementSection(model: data.engagement)
+                        EngagementSection(model: data.engagement, accentColor: data.accentColor)
                             .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                     }
                 } else {
@@ -696,7 +750,7 @@ private struct ExperiencePanel: View {
                 }
 
                 if data.engagement.hasContent {
-                    EngagementSection(model: data.engagement)
+                    EngagementSection(model: data.engagement, accentColor: data.accentColor)
                         .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
             }
@@ -724,7 +778,7 @@ private struct ExperiencePanel: View {
                 }
 
                 if data.engagement.hasContent {
-                    EngagementSection(model: data.engagement)
+                    EngagementSection(model: data.engagement, accentColor: data.accentColor)
                         .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
             }
@@ -1114,11 +1168,17 @@ private struct HighlightsSection: View {
 
 private struct EngagementSection: View {
     let model: ExperienceDetailView.EngagementSectionModel
+    let accentColor: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             if model.friendLikes.isEmpty == false {
-                LikesAvatarGrid(entries: model.friendLikes, iconName: model.friendLikesIconName)
+                LikesAvatarGrid(
+                    entries: model.friendLikes,
+                    iconName: model.friendLikesIconName,
+                    storyContributors: model.storyContributors,
+                    accentColor: accentColor
+                )
             }
 
             if model.friendComments.isEmpty == false {
@@ -1839,6 +1899,10 @@ private struct FriendEngagementRow: View {
 private struct LikesAvatarGrid: View {
     let entries: [FriendEngagement]
     let iconName: String
+    let storyContributors: [ExperienceDetailView.POIStoryContributor]
+    let accentColor: Color
+
+    @State private var viewerState: POIStoryViewerState?
 
     private let columns: [GridItem] = {
         let availableWidth = UIScreen.main.bounds.width - (ExperienceSheetLayout.engagementHorizontalInset * 2) - 16
@@ -1858,13 +1922,328 @@ private struct LikesAvatarGrid: View {
 
             LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
                 ForEach(entries) { entry in
-                    AvatarSquare(user: entry.user, endorsement: entry.endorsement)
+                    let storyIndex = contributorIndex(for: entry.user?.id)
+                    if let index = storyIndex {
+                        Button {
+                            viewerState = POIStoryViewerState(contributorIndex: index)
+                        } label: {
+                            AvatarSquare(
+                                user: entry.user,
+                                endorsement: entry.endorsement,
+                                hasStory: true,
+                                storyAccent: accentColor
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        AvatarSquare(user: entry.user, endorsement: entry.endorsement)
+                    }
                 }
             }
             .padding(.leading, leadingInset)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, ExperienceSheetLayout.engagementHorizontalInset)
+        .fullScreenCover(item: $viewerState) { state in
+            POIStoryViewer(
+                contributors: storyContributors,
+                initialIndex: state.contributorIndex,
+                accentColor: accentColor
+            ) {
+                viewerState = nil
+            }
+            .preferredColorScheme(.dark)
+        }
+    }
+
+    private func contributorIndex(for userId: UUID?) -> Int? {
+        guard let userId else { return nil }
+        return storyIndexMap[userId]
+    }
+
+    private var storyIndexMap: [UUID: Int] {
+        var map: [UUID: Int] = [:]
+        for (index, contributor) in storyContributors.enumerated() {
+            map[contributor.id] = index
+        }
+        return map
+    }
+}
+
+private struct POIStoryViewerState: Identifiable {
+    let contributorIndex: Int
+    var id: Int { contributorIndex }
+}
+
+private struct POIStoryViewer: View {
+    let contributors: [ExperienceDetailView.POIStoryContributor]
+    let initialIndex: Int
+    let accentColor: Color
+    let onClose: () -> Void
+
+    @State private var contributorIndex: Int
+    @State private var itemIndex: Int = 0
+
+    init(
+        contributors: [ExperienceDetailView.POIStoryContributor],
+        initialIndex: Int,
+        accentColor: Color,
+        onClose: @escaping () -> Void
+    ) {
+        self.contributors = contributors
+        self.initialIndex = initialIndex
+        self.accentColor = accentColor
+        self.onClose = onClose
+        _contributorIndex = State(initialValue: min(max(initialIndex, 0), max(contributors.count - 1, 0)))
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if let contributor = currentContributor {
+                storyMedia(for: contributor)
+                    .overlay(alignment: .top) {
+                        storyProgress(for: contributor)
+                            .padding(.top, 28)
+                            .padding(.horizontal, 20)
+                    }
+                    .overlay(alignment: .topLeading) {
+                        header(for: contributor)
+                            .padding(.top, 60)
+                            .padding(.horizontal, 20)
+                    }
+                    .overlay(alignment: .bottom) {
+                        actionBar
+                            .padding(.bottom, 40)
+                            .padding(.horizontal, 24)
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 30)
+                            .onEnded { value in
+                                if value.translation.width < -40 {
+                                    goToNextContributor()
+                                } else if value.translation.width > 40 {
+                                    goToPreviousContributor()
+                                }
+                            }
+                    )
+                    .onChange(of: contributorIndex) { _ in
+                        itemIndex = 0
+                    }
+            } else {
+                Color.black
+                    .ignoresSafeArea()
+                    .onAppear {
+                        onClose()
+                    }
+            }
+        }
+    }
+
+    private var currentContributor: ExperienceDetailView.POIStoryContributor? {
+        guard contributors.indices.contains(contributorIndex) else { return nil }
+        return contributors[contributorIndex]
+    }
+
+    private var currentItem: ExperienceDetailView.POIStoryContributor.Item? {
+        guard let contributor = currentContributor,
+              contributor.items.indices.contains(itemIndex) else { return nil }
+        return contributor.items[itemIndex]
+    }
+
+    @ViewBuilder
+    private func storyMedia(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let item = currentItem {
+                    MediaCardView(item: item.media, accentColor: accentColor, mode: .lightbox)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                } else {
+                    Color.black
+                }
+
+                HStack(spacing: 0) {
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            goToPreviousItem()
+                        }
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            goToNextItem()
+                        }
+                }
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    private func storyProgress(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
+        HStack(spacing: 4) {
+            ForEach(contributor.items.indices, id: \.self) { index in
+                Capsule()
+                    .fill(index <= itemIndex ? Color.white : Color.white.opacity(0.35))
+                    .frame(height: 4)
+            }
+        }
+    }
+
+    private func header(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
+        HStack(spacing: 12) {
+            POIStoryAvatarView(contributor: contributor)
+                .frame(width: 56, height: 56)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(contributor.user?.handle ?? "Friend")
+                    .font(.headline.bold())
+                    .foregroundStyle(.white)
+                if let timestamp = currentItem?.timestamp {
+                    Text(timestamp.formatted(.relative(presentation: .named)))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+
+            Spacer()
+
+            Button {
+                onClose()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 32, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 24) {
+            storyActionButton(icon: "heart", label: "Like")
+            storyActionButton(icon: "bubble.left.and.bubble.right", label: "Message")
+            storyActionButton(icon: "paperplane", label: "Share")
+        }
+    }
+
+    private func storyActionButton(icon: String, label: String) -> some View {
+        Button { } label: {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 22, weight: .semibold))
+                Text(label)
+                    .font(.caption2.bold())
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func goToNextItem() {
+        guard let contributor = currentContributor else { return }
+        if contributor.items.indices.contains(itemIndex + 1) {
+            itemIndex += 1
+        } else {
+            goToNextContributor()
+        }
+    }
+
+    private func goToPreviousItem() {
+        if itemIndex > 0 {
+            itemIndex -= 1
+        } else {
+            goToPreviousContributor()
+        }
+    }
+
+    private func goToNextContributor() {
+        if contributors.indices.contains(contributorIndex + 1) {
+            contributorIndex += 1
+            itemIndex = 0
+        } else {
+            onClose()
+        }
+    }
+
+    private func goToPreviousContributor() {
+        if contributors.indices.contains(contributorIndex - 1) {
+            contributorIndex -= 1
+            if let contributor = currentContributor {
+                itemIndex = max(contributor.items.count - 1, 0)
+            }
+        } else {
+            onClose()
+        }
+    }
+}
+
+private struct POIStoryAvatarView: View {
+    let contributor: ExperienceDetailView.POIStoryContributor
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(
+                    AngularGradient(
+                        gradient: Gradient(colors: [
+                            Theme.neonPrimary,
+                            Theme.neonAccent,
+                            Theme.neonWarning,
+                            Theme.neonPrimary
+                        ]),
+                        center: .center
+                    ),
+                    lineWidth: 3
+                )
+                .shadow(color: Theme.neonPrimary.opacity(0.5), radius: 10, y: 4)
+
+            Circle()
+                .fill(Color.black.opacity(0.55))
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                }
+
+            avatarContent
+                .frame(width: 64, height: 64)
+                .clipShape(Circle())
+        }
+    }
+
+    @ViewBuilder
+    private var avatarContent: some View {
+        if let url = contributor.user?.avatarURL {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case let .success(image):
+                    image.resizable().scaledToFill()
+                case .empty:
+                    ProgressView()
+                default:
+                    placeholder
+                }
+            }
+        } else {
+            placeholder
+        }
+    }
+
+    private var placeholder: some View {
+        Text(initials)
+            .font(.headline.bold())
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.gray.opacity(0.4))
+    }
+
+    private var initials: String {
+        guard let handle = contributor.user?.handle else { return "?" }
+        return String(handle.prefix(2)).uppercased()
     }
 }
 
@@ -1872,46 +2251,57 @@ private struct AvatarSquare: View {
     let user: User?
     var size: CGFloat = 44
     var endorsement: RatedPOI.Endorsement? = nil
+    var hasStory: Bool = false
+    var storyAccent: Color = Theme.neonPrimary
 
     var body: some View {
-        ZStack {
+        avatarContent
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(hasStory ? 0.2 : 0.3), lineWidth: 1)
+            }
+            .overlay {
+                if hasStory {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(
+                            AngularGradient(
+                                gradient: Gradient(colors: [
+                                    storyAccent,
+                                    Theme.neonAccent,
+                                    storyAccent
+                                ]),
+                                center: .center
+                            ),
+                            lineWidth: 3
+                        )
+                        .padding(-4)
+                        .shadow(color: storyAccent.opacity(0.4), radius: 6, y: 3)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                endorsementBadge
+            }
+    }
+
+    private var avatarContent: some View {
+        Group {
             if let url = user?.avatarURL {
                 AsyncImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()
                     case .failure:
-                        placeholder
+                        avatarPlaceholder
                     default:
                         ProgressView()
                     }
                 }
             } else {
-                placeholder
+                avatarPlaceholder
             }
         }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.white.opacity(0.3), lineWidth: 1)
-        }
-        .overlay(alignment: .bottomTrailing) {
-            endorsementBadge
-        }
-    }
-
-    private var placeholder: some View {
-        Text(initials)
-            .font(.footnote.bold())
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.gray.opacity(0.4))
-    }
-
-    private var initials: String {
-        guard let handle = user?.handle else { return "??" }
-        return String(handle.prefix(2)).uppercased()
     }
 
     @ViewBuilder
@@ -1931,6 +2321,19 @@ private struct AvatarSquare: View {
             return CGPoint(x: 5 + delta, y: 5 + delta)
         }
         return CGPoint(x: 5, y: 5)
+    }
+
+    private var avatarPlaceholder: some View {
+        Text(initials)
+            .font(.footnote.bold())
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.gray.opacity(0.4))
+    }
+
+    private var initials: String {
+        guard let handle = user?.handle else { return "??" }
+        return String(handle.prefix(2)).uppercased()
     }
 }
 
