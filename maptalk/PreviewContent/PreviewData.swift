@@ -97,37 +97,21 @@ enum PreviewData {
             RatedPOI.Media(kind: .photo(URL(string: url)!))
         }
 
-        let sampleVideoSources: [String] = [
-            "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-            "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
-            "https://storage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
-            "https://storage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
-        ]
-
-        func sampleVideoURL(_ index: Int) -> URL {
-            let source = sampleVideoSources[index % sampleVideoSources.count]
-            return URL(string: source)!
-        }
-
-        func mediaVideo(index: Int, posterURL: String) -> RatedPOI.Media {
-            RatedPOI.Media(
-                kind: .video(
-                    url: sampleVideoURL(index),
-                    poster: URL(string: posterURL)!
-                )
-            )
-        }
-
-        func mediaText(_ text: String) -> RatedPOI.Media {
-            RatedPOI.Media(kind: .text(text))
-        }
-
         return [
             RatedPOI(
                 poi: waterfront,
                 highlight: nil,
                 secondary: nil,
-                media: [],
+                media: [
+                    RatedPOI.Media(
+                        kind: .video(
+                            url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")!,
+                            poster: URL(string: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=600&q=60")!
+                        )
+                    ),
+                    mediaPhoto("https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=600&q=60"),
+                    mediaPhoto("https://images.unsplash.com/photo-1478720568477-152d9b164e26?auto=format&fit=crop&w=600&q=60")
+                ],
                 checkIns: [
                     poiCheckIn(
                         6001,
@@ -148,7 +132,12 @@ enum PreviewData {
                         relativeTo: referenceDate,
                         endorsement: .solid,
                         media: [
-                            mediaVideo(index: 0, posterURL: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=60"),
+                            RatedPOI.Media(
+                                kind: .video(
+                                    url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")!,
+                                    poster: URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=60")!
+                                )
+                            ),
                             mediaPhoto("https://images.unsplash.com/photo-1493558103817-58b2924bce98?auto=format&fit=crop&w=600&q=60")
                         ],
                         tag: .social
@@ -161,7 +150,12 @@ enum PreviewData {
                         endorsement: .hype,
                         media: [
                             mediaPhoto("https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=600&q=60"),
-                            mediaVideo(index: 1, posterURL: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")
+                            RatedPOI.Media(
+                                kind: .video(
+                                    url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                                    poster: URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")!
+                                )
+                            )
                         ]
                     )
                 ],
@@ -182,7 +176,15 @@ enum PreviewData {
                 poi: cafe,
                 highlight: nil,
                 secondary: nil,
-                media: [],
+                media: [
+                    RatedPOI.Media(
+                        kind: .video(
+                            url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                            poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!
+                        )
+                    ),
+                    mediaPhoto("https://images.unsplash.com/photo-1509042239860-f550ce710b93?auto=format&fit=crop&w=600&q=60")
+                ],
                 checkIns: [
                     poiCheckIn(
                         6004,
@@ -204,14 +206,28 @@ enum PreviewData {
                         endorsement: .meh,
                         media: [
                             mediaPhoto("https://images.unsplash.com/photo-1481391032119-d89fee407e44?auto=format&fit=crop&w=600&q=60"),
-                            mediaVideo(index: 2, posterURL: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")
+                            RatedPOI.Media(
+                                kind: .video(
+                                    url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4")!,
+                                    poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!
+                                )
+                            )
                         ],
                         tag: .study
                     )
                 ],
                 comments: [
                     poiComment(6103, user: sampleFriends[5], content: .text("Wednesday sketch class here—the tutor has killer playlists"), minutesAgo: 35, relativeTo: referenceDate),
-                    poiComment(6104, user: currentUser, content: .video(url: sampleVideoURL(3), poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 65, relativeTo: referenceDate)
+                    poiComment(
+                        6104,
+                        user: currentUser,
+                        content: .video(
+                            url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4")!,
+                            poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!
+                        ),
+                        minutesAgo: 65,
+                        relativeTo: referenceDate
+                    )
                 ],
                 endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 1, questionable: 0),
                 tags: [
@@ -227,7 +243,16 @@ enum PreviewData {
                 poi: nightMarket,
                 highlight: nil,
                 secondary: nil,
-                media: [],
+                media: [
+                    RatedPOI.Media(
+                        kind: .video(
+                            url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4")!,
+                            poster: URL(string: "https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=600&q=60")!
+                        )
+                    ),
+                    mediaPhoto("https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=600&q=60"),
+                    mediaPhoto("https://images.unsplash.com/photo-1506157786151-b8491531f063?auto=format&fit=crop&w=600&q=60")
+                ],
                 checkIns: [
                     poiCheckIn(
                         6006,
@@ -236,7 +261,7 @@ enum PreviewData {
                         relativeTo: referenceDate,
                         endorsement: .hype,
                         media: [
-                            RatedPOI.Media(kind: .text("Live remix dropping soon")),
+                            mediaPhoto("https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&w=600&q=60"),
                             mediaPhoto("https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=600&q=60"),
                             mediaPhoto("https://images.unsplash.com/photo-1506157786151-b8491531f063?auto=format&fit=crop&w=600&q=60")
                         ],
@@ -262,7 +287,12 @@ enum PreviewData {
                         endorsement: .solid,
                         media: [
                             mediaPhoto("https://images.unsplash.com/photo-1497032205916-ac775f0649ae?auto=format&fit=crop&w=600&q=60"),
-                            mediaVideo(index: 4, posterURL: "https://images.unsplash.com/photo-1475724017904-b712052c192a?auto=format&fit=crop&w=600&q=60")
+                            RatedPOI.Media(
+                                kind: .video(
+                                    url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")!,
+                                    poster: URL(string: "https://images.unsplash.com/photo-1475724017904-b712052c192a?auto=format&fit=crop&w=600&q=60")!
+                                )
+                            )
                         ],
                         tag: .social
                     )
@@ -285,7 +315,15 @@ enum PreviewData {
                 poi: artMuseum,
                 highlight: nil,
                 secondary: nil,
-                media: [],
+                media: [
+                    RatedPOI.Media(
+                        kind: .video(
+                            url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4")!,
+                            poster: URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=600&q=60")!
+                        )
+                    ),
+                    mediaPhoto("https://images.unsplash.com/photo-1508921912186-1d1a45ebb3c1?auto=format&fit=crop&w=600&q=60")
+                ],
                 checkIns: [
                     poiCheckIn(
                         6009,
@@ -307,7 +345,12 @@ enum PreviewData {
                         endorsement: .solid,
                         media: [
                             mediaPhoto("https://images.unsplash.com/photo-1508921912186-1d1a45ebb3c1?auto=format&fit=crop&w=600&q=60"),
-                            mediaVideo(index: 5, posterURL: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")
+                            RatedPOI.Media(
+                                kind: .video(
+                                    url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                                    poster: URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")!
+                                )
+                            )
                         ],
                         tag: .express
                     )
@@ -328,7 +371,15 @@ enum PreviewData {
                 poi: restaurant,
                 highlight: nil,
                 secondary: nil,
-                media: [],
+                media: [
+                    RatedPOI.Media(
+                        kind: .video(
+                            url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4")!,
+                            poster: URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")!
+                        )
+                    ),
+                    mediaPhoto("https://images.unsplash.com/photo-1478145046317-39f10e56b5e9?auto=format&fit=crop&w=600&q=60")
+                ],
                 checkIns: [
                     poiCheckIn(
                         6011,
@@ -360,7 +411,12 @@ enum PreviewData {
                         relativeTo: referenceDate,
                         endorsement: .questionable,
                         media: [
-                            mediaVideo(index: 6, posterURL: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")
+                            RatedPOI.Media(
+                                kind: .video(
+                                    url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4")!,
+                                    poster: URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")!
+                                )
+                            )
                         ],
                         tag: .social
                     )

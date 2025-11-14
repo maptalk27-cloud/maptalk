@@ -154,8 +154,6 @@ private struct MediaDisplayItem: Identifiable, Hashable {
         case photo(URL)
         case video(url: URL, poster: URL?)
         case emoji(String)
-        case text(String)
-        case symbol(String)
     }
 
     let id: UUID
@@ -182,17 +180,6 @@ private struct FriendEngagement: Identifiable {
     let timestamp: Date?
     let replies: [FriendEngagement]
     let endorsement: RatedPOI.Endorsement?
-}
-
-private extension MediaDisplayItem {
-    var previewText: String? {
-        switch content {
-        case let .text(text):
-            return text
-        default:
-            return nil
-        }
-    }
 }
 
 private func firstEmoji(in attachments: [RealPost.Attachment]) -> String? {
@@ -427,10 +414,11 @@ private extension ExperienceDetailView {
             let endorsementBadges = poiEndorsementBadges(for: rated)
             let tagBadges = poiBadgeStrings(for: rated)
             let stories = poiStoryContributors(for: rated)
+            let gallery = galleryItems(for: rated)
             return ContentData(
                 hero: nil,
                 badges: tagBadges,
-                story: nil,
+                story: gallery.isEmpty ? nil : StorySectionModel(galleryItems: gallery),
                 highlights: HighlightsSectionModel(
                     title: "",
                     subtitle: nil,
@@ -483,11 +471,7 @@ private extension ExperienceDetailView {
     }
 
     func galleryItems(for ratedPOI: RatedPOI) -> [MediaDisplayItem] {
-        let mapped = ratedPOI.media.map(mediaDisplayItem)
-        if mapped.isEmpty {
-            return [MediaDisplayItem(content: .symbol(ratedPOI.poi.category.symbolName))]
-        }
-        return mapped
+        ratedPOI.media.map(mediaDisplayItem)
     }
 
     func mediaDisplayItem(_ media: RatedPOI.Media) -> MediaDisplayItem {
@@ -496,10 +480,6 @@ private extension ExperienceDetailView {
             return MediaDisplayItem(content: .photo(url))
         case let .video(url, poster):
             return MediaDisplayItem(content: .video(url: url, poster: poster))
-        case let .text(text):
-            return MediaDisplayItem(content: .text(text))
-        case let .symbol(name):
-            return MediaDisplayItem(content: .symbol(name))
         }
     }
 
@@ -526,11 +506,15 @@ private extension ExperienceDetailView {
     }
 
     func poiStoryContributors(for ratedPOI: RatedPOI) -> [POIStoryContributor] {
-        let mediaCheckIns = ratedPOI.checkIns.filter { checkIn in
-            checkIn.media.contains { media in
-                if case .photo = media.kind { return true }
-                return false
+        let isStoryEligibleMedia: (RatedPOI.Media) -> Bool = { media in
+            switch media.kind {
+            case .photo, .video:
+                return true
             }
+        }
+
+        let mediaCheckIns = ratedPOI.checkIns.filter { checkIn in
+            checkIn.media.contains(where: isStoryEligibleMedia)
         }
         guard mediaCheckIns.isEmpty == false else { return [] }
 
@@ -539,7 +523,7 @@ private extension ExperienceDetailView {
             let sortedEntries = entries.sorted { $0.createdAt < $1.createdAt }
             let items: [POIStoryContributor.Item] = sortedEntries.flatMap { checkIn in
                 checkIn.media.compactMap { media -> POIStoryContributor.Item? in
-                    guard case .photo = media.kind else { return nil }
+                    guard isStoryEligibleMedia(media) else { return nil }
                     return POIStoryContributor.Item(
                         id: UUID(),
                         media: mediaDisplayItem(media),
@@ -2443,11 +2427,7 @@ private struct ExperienceMediaGallery: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             if items.isEmpty {
-                MediaCardView(
-                    item: MediaDisplayItem(content: .symbol("sparkles")),
-                    accentColor: accentColor,
-                    mode: .card
-                )
+                EmptyGalleryPlaceholder(accentColor: accentColor)
             } else {
                 if usesGridLayout {
                     LazyVGrid(columns: ExperienceMediaGalleryLayout.gridColumns, spacing: ExperienceMediaGalleryLayout.gridSpacing) {
@@ -2551,7 +2531,7 @@ private enum ExperienceMediaGalleryLayout {
             switch item.content {
             case .photo, .video:
                 return true
-            default:
+            case .emoji:
                 return false
             }
         }.count
@@ -2674,10 +2654,6 @@ private struct MediaCardView: View {
                 videoView(url: url, poster: poster)
             case let .emoji(emoji):
                 emojiView(emoji)
-            case let .text(text):
-                textView(text)
-            case let .symbol(symbol):
-                placeholder(symbol: symbol)
             }
         }
     }
@@ -2732,22 +2708,6 @@ private struct MediaCardView: View {
 
     private func videoView(url: URL, poster: URL?) -> some View {
         AutoPlayVideoView(url: url, poster: poster, accentColor: accentColor, mode: mode)
-    }
-
-    private func textView(_ text: String) -> some View {
-        placeholderBackground {
-            Image(systemName: "text.bubble.fill")
-                .font(.system(size: mode == .lightbox ? 48 : 36, weight: .bold))
-                .foregroundStyle(.white)
-        } subtitle: {
-            Text(text)
-                .font(mode == .lightbox ? .title2.weight(.semibold) : .title3.weight(.semibold))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.white)
-                .lineSpacing(4)
-                .padding(.horizontal, 16)
-        }
-        .padding(.horizontal, 12)
     }
 
     private func placeholder(symbol: String) -> some View {
@@ -2931,6 +2891,37 @@ private struct LoopingVideoPlayerView: UIViewRepresentable {
     }
 }
 
+private struct EmptyGalleryPlaceholder: View {
+    let accentColor: Color
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text("No media yet")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+            Text("Add a photo or video to bring this spot to life.")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.75))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: ExperienceMediaGalleryLayout.carouselHeight)
+        .padding(.horizontal, 16)
+        .background(
+            LinearGradient(
+                colors: [accentColor.opacity(0.4), .black.opacity(0.85)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        }
+    }
+}
+
 private func mediaCounts(for items: [MediaDisplayItem]) -> (photos: Int, videos: Int, emojis: Int) {
     items.reduce(into: (0, 0, 0)) { result, item in
         switch item.content {
@@ -2940,8 +2931,6 @@ private func mediaCounts(for items: [MediaDisplayItem]) -> (photos: Int, videos:
             result.1 += 1
         case .emoji:
             result.2 += 1
-        case .text, .symbol:
-            break
         }
     }
 }

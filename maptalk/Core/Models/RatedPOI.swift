@@ -75,8 +75,6 @@ struct RatedPOI: Identifiable, Hashable {
         enum Kind: Hashable {
             case photo(URL)
             case video(url: URL, poster: URL?)
-            case text(String)
-            case symbol(String)
         }
 
         let id: UUID
