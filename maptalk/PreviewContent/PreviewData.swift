@@ -97,6 +97,27 @@ enum PreviewData {
             RatedPOI.Media(kind: .photo(URL(string: url)!))
         }
 
+        let sampleVideoSources: [String] = [
+            "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+            "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
+            "https://storage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
+            "https://storage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
+        ]
+
+        func sampleVideoURL(_ index: Int) -> URL {
+            let source = sampleVideoSources[index % sampleVideoSources.count]
+            return URL(string: source)!
+        }
+
+        func mediaVideo(index: Int, posterURL: String) -> RatedPOI.Media {
+            RatedPOI.Media(
+                kind: .video(
+                    url: sampleVideoURL(index),
+                    poster: URL(string: posterURL)!
+                )
+            )
+        }
+
         func mediaText(_ text: String) -> RatedPOI.Media {
             RatedPOI.Media(kind: .text(text))
         }
@@ -111,31 +132,38 @@ enum PreviewData {
                     poiCheckIn(
                         6001,
                         user: sampleFriends[0],
-                        note: "Sunrise stop after the morning ride",
                         minutesAgo: 18,
                         relativeTo: referenceDate,
                         endorsement: .hype,
-                        media: [mediaPhoto("https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=600&q=60")],
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=600&q=60"),
+                            mediaPhoto("https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=60")
+                        ],
                         tag: .explore
                     ),
                     poiCheckIn(
                         6002,
                         user: sampleFriends[3],
-                        note: "Livestreaming the sunset",
                         minutesAgo: 42,
                         relativeTo: referenceDate,
                         endorsement: .solid,
                         media: [
-                            RatedPOI.Media(
-                                kind: .video(
-                                    url: URL(string: "https://example.com/waterfront-live.mp4")!,
-                                    poster: URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=60")!
-                                )
-                            )
+                            mediaVideo(index: 0, posterURL: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=600&q=60"),
+                            mediaPhoto("https://images.unsplash.com/photo-1493558103817-58b2924bce98?auto=format&fit=crop&w=600&q=60")
                         ],
                         tag: .social
                     ),
-                    poiCheckIn(6003, user: currentUser, note: "Filming + editing a vlog", minutesAgo: 64, relativeTo: referenceDate, endorsement: .hype)
+                    poiCheckIn(
+                        6003,
+                        user: currentUser,
+                        minutesAgo: 64,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=600&q=60"),
+                            mediaVideo(index: 1, posterURL: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")
+                        ]
+                    )
                 ],
                 comments: [
                     poiComment(6101, user: sampleFriends[2], content: .text("Busker playing city pop tonight—super chill vibes"), minutesAgo: 26, relativeTo: referenceDate),
@@ -159,18 +187,31 @@ enum PreviewData {
                     poiCheckIn(
                         6004,
                         user: sampleFriends[1],
-                        note: "Tiramisu + screenplay session",
                         minutesAgo: 22,
                         relativeTo: referenceDate,
                         endorsement: .solid,
-                        media: [mediaPhoto("https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=60")],
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?auto=format&fit=crop&w=600&q=60"),
+                            mediaPhoto("https://images.unsplash.com/photo-1470337458703-46ad1756a187?auto=format&fit=crop&w=600&q=60")
+                        ],
                         tag: .dine
                     ),
-                    poiCheckIn(6005, user: sampleFriends[6], note: "Late-night dirty espresso", minutesAgo: 48, relativeTo: referenceDate, endorsement: .meh)
+                    poiCheckIn(
+                        6005,
+                        user: sampleFriends[6],
+                        minutesAgo: 48,
+                        relativeTo: referenceDate,
+                        endorsement: .meh,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1481391032119-d89fee407e44?auto=format&fit=crop&w=600&q=60"),
+                            mediaVideo(index: 2, posterURL: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .study
+                    )
                 ],
                 comments: [
                     poiComment(6103, user: sampleFriends[5], content: .text("Wednesday sketch class here—the tutor has killer playlists"), minutesAgo: 35, relativeTo: referenceDate),
-                    poiComment(6104, user: currentUser, content: .video(url: URL(string: "https://example.com/cafe.mp4")!, poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 65, relativeTo: referenceDate)
+                    poiComment(6104, user: currentUser, content: .video(url: sampleVideoURL(3), poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 65, relativeTo: referenceDate)
                 ],
                 endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 1, questionable: 0),
                 tags: [
@@ -191,17 +232,40 @@ enum PreviewData {
                     poiCheckIn(
                         6006,
                         user: currentUser,
-                        note: "Queued for the limited vinyl pressing",
                         minutesAgo: 44,
                         relativeTo: referenceDate,
                         endorsement: .hype,
                         media: [
-                            RatedPOI.Media(kind: .text("Live remix dropping soon"))
+                            RatedPOI.Media(kind: .text("Live remix dropping soon")),
+                            mediaPhoto("https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=600&q=60"),
+                            mediaPhoto("https://images.unsplash.com/photo-1506157786151-b8491531f063?auto=format&fit=crop&w=600&q=60")
                         ],
                         tag: .entertainment
                     ),
-                    poiCheckIn(6007, user: sampleFriends[7], note: "Stage lighting is insane", minutesAgo: 70, relativeTo: referenceDate, endorsement: .questionable),
-                    poiCheckIn(6008, user: sampleFriends[8], note: "Coming back next week", minutesAgo: 82, relativeTo: referenceDate, endorsement: .solid)
+                    poiCheckIn(
+                        6007,
+                        user: sampleFriends[7],
+                        minutesAgo: 70,
+                        relativeTo: referenceDate,
+                        endorsement: .questionable,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=600&q=60"),
+                            mediaPhoto("https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .explore
+                    ),
+                    poiCheckIn(
+                        6008,
+                        user: sampleFriends[8],
+                        minutesAgo: 82,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1497032205916-ac775f0649ae?auto=format&fit=crop&w=600&q=60"),
+                            mediaVideo(index: 4, posterURL: "https://images.unsplash.com/photo-1475724017904-b712052c192a?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .social
+                    )
                 ],
                 comments: [
                     poiComment(6105, user: sampleFriends[2], content: .text("Birria truck in zone B has unreal sauce"), minutesAgo: 52, relativeTo: referenceDate),
@@ -223,8 +287,30 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6009, user: sampleFriends[1], note: "Lunch-break sketch session", minutesAgo: 32, relativeTo: referenceDate, endorsement: .meh),
-                    poiCheckIn(6010, user: sampleFriends[4], note: "Queued for the immersive exhibit", minutesAgo: 58, relativeTo: referenceDate, endorsement: .solid)
+                    poiCheckIn(
+                        6009,
+                        user: sampleFriends[1],
+                        minutesAgo: 32,
+                        relativeTo: referenceDate,
+                        endorsement: .meh,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?auto=format&fit=crop&w=600&q=60"),
+                            mediaPhoto("https://images.unsplash.com/photo-1529429617124-aee401f3c21f?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .study
+                    ),
+                    poiCheckIn(
+                        6010,
+                        user: sampleFriends[4],
+                        minutesAgo: 58,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1508921912186-1d1a45ebb3c1?auto=format&fit=crop&w=600&q=60"),
+                            mediaVideo(index: 5, posterURL: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .express
+                    )
                 ],
                 comments: [
                     poiComment(6107, user: sampleFriends[0], content: .text("Remember to book the light lab—slots vanish fast"), minutesAgo: 45, relativeTo: referenceDate)
@@ -244,9 +330,40 @@ enum PreviewData {
                 secondary: nil,
                 media: [],
                 checkIns: [
-                    poiCheckIn(6011, user: sampleFriends[2], note: "Toro flight is legendary", minutesAgo: 28, relativeTo: referenceDate, endorsement: .hype),
-                    poiCheckIn(6012, user: sampleFriends[6], note: "Booked the late seating", minutesAgo: 34, relativeTo: referenceDate, endorsement: .solid),
-                    poiCheckIn(6013, user: currentUser, note: "Bringing parents on Friday", minutesAgo: 56, relativeTo: referenceDate, endorsement: .questionable)
+                    poiCheckIn(
+                        6011,
+                        user: sampleFriends[2],
+                        minutesAgo: 28,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1478145046317-39f10e56b5e9?auto=format&fit=crop&w=600&q=60"),
+                            mediaPhoto("https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .premium
+                    ),
+                    poiCheckIn(
+                        6012,
+                        user: sampleFriends[6],
+                        minutesAgo: 34,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1514511542842-2a3fb167607d?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .date
+                    ),
+                    poiCheckIn(
+                        6013,
+                        user: currentUser,
+                        minutesAgo: 56,
+                        relativeTo: referenceDate,
+                        endorsement: .questionable,
+                        media: [
+                            mediaVideo(index: 6, posterURL: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .social
+                    )
                 ],
                 comments: [
                     poiComment(6108, user: sampleFriends[0], content: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 44, relativeTo: referenceDate),
@@ -786,7 +903,6 @@ enum PreviewData {
     private static func poiCheckIn(
         _ seed: Int,
         user: User,
-        note: String?,
         minutesAgo: Double,
         relativeTo referenceDate: Date,
         endorsement: RatedPOI.Endorsement? = nil,
@@ -796,7 +912,6 @@ enum PreviewData {
         RatedPOI.CheckIn(
             id: uuid(seed),
             userId: user.id,
-            note: note,
             createdAt: referenceDate.addingTimeInterval(-minutesAgo * 60),
             endorsement: endorsement,
             media: media,

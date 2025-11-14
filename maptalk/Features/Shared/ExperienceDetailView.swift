@@ -1,3 +1,4 @@
+import AVKit
 import MapKit
 import SwiftUI
 
@@ -568,7 +569,7 @@ private extension ExperienceDetailView {
                 id: checkIn.id,
                 kind: kind,
                 user: userProvider(checkIn.userId),
-                message: checkIn.note ?? endorsementMessage(for: endorsement),
+                message: endorsementMessage(for: endorsement),
                 badge: nil,
                 timestamp: checkIn.createdAt,
                 replies: [],
@@ -2669,8 +2670,8 @@ private struct MediaCardView: View {
             switch item.content {
             case let .photo(url):
                 imageView(url)
-            case let .video(_, poster):
-                videoView(poster: poster)
+            case let .video(url, poster):
+                videoView(url: url, poster: poster)
             case let .emoji(emoji):
                 emojiView(emoji)
             case let .text(text):
@@ -2729,41 +2730,8 @@ private struct MediaCardView: View {
         .clipped()
     }
 
-    private func videoView(poster: URL?) -> some View {
-        ZStack {
-            if let poster {
-                AsyncImage(url: poster) { phase in
-                    switch phase {
-                    case let .success(image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .overlay { Color.black.opacity(0.28) }
-                    case .empty:
-                        ProgressView()
-                    case .failure:
-                        placeholder(symbol: "play.rectangle.fill")
-                    @unknown default:
-                        placeholder(symbol: "play.rectangle.fill")
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-            } else {
-                placeholder(symbol: "play.rectangle.fill")
-            }
-
-            Circle()
-                .fill(Color.white.opacity(0.9))
-                .frame(width: mode == .lightbox ? 72 : 58, height: mode == .lightbox ? 72 : 58)
-                .overlay {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: mode == .lightbox ? 28 : 22, weight: .bold))
-                        .foregroundStyle(accentColor)
-                        .offset(x: 3)
-                }
-                .shadow(color: .black.opacity(0.45), radius: mode == .lightbox ? 14 : 10, y: 6)
-        }
+    private func videoView(url: URL, poster: URL?) -> some View {
+        AutoPlayVideoView(url: url, poster: poster, accentColor: accentColor, mode: mode)
     }
 
     private func textView(_ text: String) -> some View {
@@ -2810,6 +2778,156 @@ private struct MediaCardView: View {
                 endPoint: .bottomTrailing
             )
         )
+    }
+}
+
+private struct AutoPlayVideoView: View {
+    let url: URL
+    let poster: URL?
+    let accentColor: Color
+    let mode: MediaCardView.Mode
+
+    @State private var isVideoVisible = false
+
+    var body: some View {
+        ZStack {
+            posterLayer
+
+            LoopingVideoPlayerView(url: url, isMuted: true, shouldPlay: isVideoVisible)
+                .opacity(isVideoVisible ? 1 : 0)
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        isVideoVisible = true
+                    }
+                }
+                .onDisappear {
+                    isVideoVisible = false
+                }
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(mode == .lightbox ? 0.25 : 0.35)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var posterLayer: some View {
+        if let poster {
+            AsyncImage(url: poster) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                        .overlay { Color.black.opacity(0.15) }
+                case .empty:
+                    ProgressView()
+                case .failure:
+                    placeholderPoster
+                @unknown default:
+                    placeholderPoster
+                }
+            }
+        } else {
+            placeholderPoster
+        }
+    }
+
+    private var placeholderPoster: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "play.rectangle.fill")
+                .font(.system(size: mode == .lightbox ? 52 : 38, weight: .bold))
+                .foregroundStyle(accentColor)
+            Text("Loading video")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.7))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            LinearGradient(
+                colors: [accentColor.opacity(0.35), .black.opacity(0.82)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+    }
+}
+
+private struct LoopingVideoPlayerView: UIViewRepresentable {
+    let url: URL
+    let isMuted: Bool
+    let shouldPlay: Bool
+
+    func makeUIView(context: Context) -> PlayerContainerView {
+        let view = PlayerContainerView()
+        view.configure(with: url, muted: isMuted)
+        view.setPlaying(shouldPlay)
+        return view
+    }
+
+    func updateUIView(_ uiView: PlayerContainerView, context: Context) {
+        uiView.configure(with: url, muted: isMuted)
+        uiView.setPlaying(shouldPlay)
+    }
+
+    static func dismantleUIView(_ uiView: PlayerContainerView, coordinator: ()) {
+        uiView.cleanup()
+    }
+
+    final class PlayerContainerView: UIView {
+        private var player: AVQueuePlayer?
+        private var looper: AVPlayerLooper?
+        private var currentURL: URL?
+
+        override static var layerClass: AnyClass {
+            AVPlayerLayer.self
+        }
+
+        private var playerLayer: AVPlayerLayer {
+            guard let layer = layer as? AVPlayerLayer else {
+                fatalError("Expected AVPlayerLayer.")
+            }
+            return layer
+        }
+
+        func configure(with url: URL, muted: Bool) {
+            guard currentURL != url else {
+                player?.isMuted = muted
+                return
+            }
+            cleanup()
+            currentURL = url
+
+            let item = AVPlayerItem(url: url)
+            let queuePlayer = AVQueuePlayer()
+            queuePlayer.isMuted = muted
+            let looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
+
+            playerLayer.player = queuePlayer
+            playerLayer.videoGravity = .resizeAspectFill
+
+            self.player = queuePlayer
+            self.looper = looper
+        }
+
+        func setPlaying(_ shouldPlay: Bool) {
+            guard let player else { return }
+            if shouldPlay {
+                player.play()
+            } else {
+                player.pause()
+            }
+        }
+
+        func cleanup() {
+            player?.pause()
+            playerLayer.player = nil
+            player = nil
+            looper = nil
+            currentURL = nil
+        }
     }
 }
 

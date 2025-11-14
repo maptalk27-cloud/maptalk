@@ -91,7 +91,6 @@ struct RatedPOI: Identifiable, Hashable {
     struct CheckIn: Identifiable, Hashable {
         let id: UUID
         let userId: UUID
-        var note: String?
         var createdAt: Date
         var endorsement: Endorsement?
         var media: [Media]
@@ -100,7 +99,6 @@ struct RatedPOI: Identifiable, Hashable {
         init(
             id: UUID = UUID(),
             userId: UUID,
-            note: String? = nil,
             createdAt: Date = .init(),
             endorsement: Endorsement? = nil,
             media: [Media] = [],
@@ -108,7 +106,6 @@ struct RatedPOI: Identifiable, Hashable {
         ) {
             self.id = id
             self.userId = userId
-            self.note = note
             self.createdAt = createdAt
             self.endorsement = endorsement
             self.media = media
