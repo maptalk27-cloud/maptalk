@@ -1968,6 +1968,9 @@ private struct POIStoryViewer: View {
 
     @State private var contributorIndex: Int
     @State private var itemIndex: Int = 0
+    @State private var contributorTransitionDirection: ContributorTransitionDirection = .none
+    @State private var dragOffset: CGFloat = 0
+    @State private var dragCompletion: DragCompletion?
 
     init(
         contributors: [ExperienceDetailView.POIStoryContributor],
@@ -1983,45 +1986,24 @@ private struct POIStoryViewer: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { geometry in
+            let contributor = currentContributor
+            ZStack {
+                Color.black.ignoresSafeArea(.all)
 
-            if let contributor = currentContributor {
-                storyMedia(for: contributor)
-                    .overlay(alignment: .top) {
-                        storyProgress(for: contributor)
-                            .padding(.top, 28)
-                            .padding(.horizontal, 20)
-                    }
-                    .overlay(alignment: .topLeading) {
-                        header(for: contributor)
-                            .padding(.top, 60)
-                            .padding(.horizontal, 20)
-                    }
-                    .overlay(alignment: .bottom) {
-                        actionBar
-                            .padding(.bottom, 40)
-                            .padding(.horizontal, 24)
-                    }
-                    .gesture(
-                        DragGesture(minimumDistance: 30)
-                            .onEnded { value in
-                                if value.translation.width < -40 {
-                                    goToNextContributor()
-                                } else if value.translation.width > 40 {
-                                    goToPreviousContributor()
-                                }
-                            }
-                    )
-                    .onChange(of: contributorIndex) { _ in
-                        itemIndex = 0
-                    }
-            } else {
-                Color.black
-                    .ignoresSafeArea()
-                    .onAppear {
-                        onClose()
-                    }
+                if let contributor {
+            storyStage(width: geometry.size.width, contributor: contributor)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .id(contributor.id)
+                .transition(contributorTransition)
+                .gesture(contributorDragGesture(containerWidth: geometry.size.width))
+                } else {
+                    Color.black
+                        .ignoresSafeArea(.all)
+                        .onAppear {
+                            onClose()
+                        }
+                }
             }
         }
     }
@@ -2032,23 +2014,82 @@ private struct POIStoryViewer: View {
     }
 
     private var currentItem: ExperienceDetailView.POIStoryContributor.Item? {
-        guard let contributor = currentContributor,
-              contributor.items.indices.contains(itemIndex) else { return nil }
-        return contributor.items[itemIndex]
+        guard let contributor = currentContributor else { return nil }
+        let clampedIndex = min(itemIndex, max(contributor.items.count - 1, 0))
+        guard contributor.items.indices.contains(clampedIndex) else { return nil }
+        return contributor.items[clampedIndex]
+    }
+
+    private var contributorTransition: AnyTransition {
+        contributorTransitionDirection.transition
+    }
+
+    private var contributorTransitionAnimation: Animation {
+        .spring(response: 0.55, dampingFraction: 0.85, blendDuration: 0.18)
+    }
+
+    private func storyStage(width: CGFloat, contributor: ExperienceDetailView.POIStoryContributor) -> some View {
+        let offset = dragOffsetForDisplay(width: width)
+        let progress = dragProgress(width: width)
+        let direction = activeDragDirection
+
+        let activeCard = storyMedia(for: contributor)
+            .overlay(alignment: .top) {
+                storyProgress(for: contributor)
+                    .padding(.top, 28)
+                    .padding(.horizontal, 20)
+            }
+            .overlay(alignment: .topLeading) {
+                header(for: contributor)
+                    .padding(.top, 60)
+                    .padding(.horizontal, 20)
+            }
+        .overlay(alignment: .bottom) {
+            actionBar
+                .padding(.horizontal, 24)
+            }
+            .scaleEffect(direction == .none ? 1 : (1 - 0.05 * progress))
+            .rotation3DEffect(
+                .degrees(
+                    direction == .forward
+                        ? Double(-18 * progress)
+                        : direction == .backward
+                            ? Double(18 * progress)
+                            : 0
+                ),
+                axis: (x: 0, y: 1, z: 0),
+                perspective: 0.85
+            )
+            .offset(x: offset)
+            .opacity(direction == .none ? 1 : (1 - 0.4 * Double(progress)))
+
+        return ZStack {
+            activeCard
+
+            if let preview = previewContributor {
+                previewStoryMedia(for: preview, direction: direction)
+                    .offset(x: previewOffset(width: width))
+                    .rotation3DEffect(
+                        .degrees(
+                            direction == .forward
+                                ? Double(12 * (1 - progress))
+                                : direction == .backward
+                                    ? Double(-12 * (1 - progress))
+                                    : 0
+                        ),
+                        axis: (x: 0, y: 1, z: 0),
+                        perspective: 0.9
+                    )
+                    .opacity(Double(progress))
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     @ViewBuilder
     private func storyMedia(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
-        GeometryReader { proxy in
-            ZStack {
-                if let item = currentItem {
-                    MediaCardView(item: item.media, accentColor: accentColor, mode: .lightbox)
-                        .frame(width: proxy.size.width, height: proxy.size.height)
-                        .clipped()
-                } else {
-                    Color.black
-                }
-
+        mediaContent(for: contributor, itemIndex: activeItemIndex(for: contributor, direction: .none))
+            .overlay {
                 HStack(spacing: 0) {
                     Color.black.opacity(0.001)
                         .contentShape(Rectangle())
@@ -2061,16 +2102,40 @@ private struct POIStoryViewer: View {
                             goToNextItem()
                         }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .ignoresSafeArea()
+    }
+
+    private func previewStoryMedia(
+        for contributor: ExperienceDetailView.POIStoryContributor,
+        direction: ContributorTransitionDirection
+    ) -> some View {
+        mediaContent(for: contributor, itemIndex: activeItemIndex(for: contributor, direction: direction))
+    }
+
+    private func mediaContent(
+        for contributor: ExperienceDetailView.POIStoryContributor,
+        itemIndex: Int
+    ) -> some View {
+        GeometryReader { proxy in
+            ZStack {
+                if let item = contributorItem(contributor, at: itemIndex) {
+                    MediaCardView(item: item.media, accentColor: accentColor, mode: .lightbox)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                } else {
+                    Color.black
+                }
+            }
         }
     }
 
     private func storyProgress(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
-        HStack(spacing: 4) {
+        let activeIndex = min(itemIndex, max(contributor.items.count - 1, 0))
+        return HStack(spacing: 4) {
             ForEach(contributor.items.indices, id: \.self) { index in
                 Capsule()
-                    .fill(index <= itemIndex ? Color.white : Color.white.opacity(0.35))
+                    .fill(index <= activeIndex ? Color.white : Color.white.opacity(0.35))
                     .frame(height: 4)
             }
         }
@@ -2146,24 +2211,252 @@ private struct POIStoryViewer: View {
         }
     }
 
-    private func goToNextContributor() {
-        if contributors.indices.contains(contributorIndex + 1) {
-            contributorIndex += 1
-            itemIndex = 0
-        } else {
+    private func goToNextContributor(animated: Bool = true) {
+        guard let targetIndex = targetIndex(for: .forward) else {
             onClose()
+            return
+        }
+        changeContributor(to: targetIndex, direction: .forward, animated: animated)
+    }
+
+    private func goToPreviousContributor(animated: Bool = true) {
+        guard let targetIndex = targetIndex(for: .backward) else {
+            onClose()
+            return
+        }
+        changeContributor(to: targetIndex, direction: .backward, animated: animated)
+    }
+
+    private func changeContributor(
+        to newIndex: Int,
+        direction: ContributorTransitionDirection,
+        animated: Bool
+    ) {
+        guard contributors.indices.contains(newIndex) else { return }
+        let newItemIndex: Int
+        switch direction {
+        case .forward, .none:
+            newItemIndex = 0
+        case .backward:
+            newItemIndex = max(contributors[newIndex].items.count - 1, 0)
+        }
+
+        let updateState = {
+            contributorIndex = newIndex
+            itemIndex = newItemIndex
+        }
+
+        if animated {
+            contributorTransitionDirection = direction
+            withAnimation(contributorTransitionAnimation) {
+                updateState()
+            }
+        } else {
+            contributorTransitionDirection = .none
+            updateState()
         }
     }
 
-    private func goToPreviousContributor() {
-        if contributors.indices.contains(contributorIndex - 1) {
-            contributorIndex -= 1
-            if let contributor = currentContributor {
-                itemIndex = max(contributor.items.count - 1, 0)
+    private func contributorDragGesture(containerWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                guard dragCompletion == nil else { return }
+                dragOffset = clampedDragOffset(value.translation.width, limit: containerWidth)
             }
+            .onEnded { value in
+                guard dragCompletion == nil else { return }
+                finishDrag(
+                    translation: clampedDragOffset(value.translation.width, limit: containerWidth),
+                    predicted: clampedDragOffset(value.predictedEndTranslation.width, limit: containerWidth),
+                    width: containerWidth
+                )
+            }
+    }
+
+    private func finishDrag(translation: CGFloat, predicted: CGFloat, width: CGFloat) {
+        let direction: ContributorTransitionDirection
+        if translation < -2 {
+            direction = .forward
+        } else if translation > 2 {
+            direction = .backward
         } else {
-            onClose()
+            direction = .none
         }
+
+        guard direction != .none else {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.85, blendDuration: 0.15)) {
+                dragOffset = 0
+            }
+            return
+        }
+
+        guard targetIndex(for: direction) != nil else {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.85, blendDuration: 0.15)) {
+                dragOffset = 0
+            }
+            return
+        }
+
+        let threshold = max(60, width * 0.25)
+        let shouldAdvance = abs(translation) > threshold || abs(predicted - translation) > threshold
+        if shouldAdvance {
+            commitDrag(direction: direction, containerWidth: width)
+        } else {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.85, blendDuration: 0.15)) {
+                dragOffset = 0
+            }
+        }
+    }
+
+    private func commitDrag(direction: ContributorTransitionDirection, containerWidth: CGFloat) {
+        guard let targetIndex = targetIndex(for: direction) else {
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.85, blendDuration: 0.15)) {
+                dragOffset = 0
+            }
+            return
+        }
+        dragCompletion = DragCompletion(direction: direction, targetIndex: targetIndex)
+        let targetOffset = direction == .forward ? -containerWidth : containerWidth
+        withAnimation(.easeInOut(duration: 0.22)) {
+            dragOffset = targetOffset
+        }
+        let delay = DispatchTime.now() + .milliseconds(240)
+        DispatchQueue.main.asyncAfter(deadline: delay) { [direction] in
+            guard dragCompletion?.targetIndex == targetIndex else { return }
+            changeContributor(to: targetIndex, direction: direction, animated: false)
+            dragOffset = 0
+            dragCompletion = nil
+        }
+    }
+
+    private func clampedDragOffset(_ translation: CGFloat, limit: CGFloat) -> CGFloat {
+        let maximum = max(1, limit)
+        return min(max(translation, -maximum), maximum)
+    }
+
+    private func dragOffsetForDisplay(width: CGFloat) -> CGFloat {
+        clampedDragOffset(dragOffset, limit: width)
+    }
+
+    private func dragProgress(width: CGFloat) -> CGFloat {
+        guard width > 0 else { return 0 }
+        return min(abs(dragOffsetForDisplay(width: width)) / width, 1)
+    }
+
+    private func previewOffset(width: CGFloat) -> CGFloat {
+        guard activeDragDirection != .none else { return 0 }
+        let base = activeDragDirection == .forward ? width : -width
+        return base + dragOffsetForDisplay(width: width)
+    }
+
+    private var previewContributor: ExperienceDetailView.POIStoryContributor? {
+        guard let targetIndex = targetIndex(for: activeDragDirection) else { return nil }
+        return contributors[targetIndex]
+    }
+
+    private func targetIndex(for direction: ContributorTransitionDirection) -> Int? {
+        switch direction {
+        case .forward:
+            let next = contributorIndex + 1
+            return contributors.indices.contains(next) ? next : nil
+        case .backward:
+            let previous = contributorIndex - 1
+            return contributors.indices.contains(previous) ? previous : nil
+        case .none:
+            return nil
+        }
+    }
+
+    private var activeDragDirection: ContributorTransitionDirection {
+        if let completion = dragCompletion {
+            return completion.direction
+        }
+        if dragOffset < -2 {
+            return .forward
+        } else if dragOffset > 2 {
+            return .backward
+        } else {
+            return .none
+        }
+    }
+
+    private func contributorItem(
+        _ contributor: ExperienceDetailView.POIStoryContributor,
+        at index: Int
+    ) -> ExperienceDetailView.POIStoryContributor.Item? {
+        guard contributor.items.indices.contains(index) else { return nil }
+        return contributor.items[index]
+    }
+
+    private func activeItemIndex(
+        for contributor: ExperienceDetailView.POIStoryContributor,
+        direction: ContributorTransitionDirection
+    ) -> Int {
+        switch direction {
+        case .forward:
+            return 0
+        case .backward:
+            return max(contributor.items.count - 1, 0)
+        case .none:
+            return min(itemIndex, max(contributor.items.count - 1, 0))
+        }
+    }
+}
+
+private struct DragCompletion {
+    let direction: ContributorTransitionDirection
+    let targetIndex: Int
+}
+
+private enum ContributorTransitionDirection {
+    case none
+    case forward
+    case backward
+
+    var transition: AnyTransition {
+        switch self {
+        case .none:
+            return .identity
+        case .forward:
+            return .asymmetric(
+                insertion: .modifier(
+                    active: StoryPerspectiveModifier(angle: -28, offset: 220, opacity: 0),
+                    identity: .identity
+                ),
+                removal: .modifier(
+                    active: StoryPerspectiveModifier(angle: 28, offset: -220, opacity: 0),
+                    identity: .identity
+                )
+            )
+        case .backward:
+            return .asymmetric(
+                insertion: .modifier(
+                    active: StoryPerspectiveModifier(angle: 28, offset: -220, opacity: 0),
+                    identity: .identity
+                ),
+                removal: .modifier(
+                    active: StoryPerspectiveModifier(angle: -28, offset: 220, opacity: 0),
+                    identity: .identity
+                )
+            )
+        }
+    }
+}
+
+private struct StoryPerspectiveModifier: ViewModifier {
+    let angle: Double
+    let offset: CGFloat
+    let opacity: Double
+
+    func body(content: Content) -> some View {
+        content
+            .rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0), perspective: 0.85)
+            .offset(x: offset)
+            .opacity(opacity)
+    }
+
+    static var identity: StoryPerspectiveModifier {
+        StoryPerspectiveModifier(angle: 0, offset: 0, opacity: 1)
     }
 }
 
