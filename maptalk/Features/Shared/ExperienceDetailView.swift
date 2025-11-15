@@ -1994,7 +1994,6 @@ private struct POIStoryViewer: View {
                 if let contributor {
             storyStage(width: geometry.size.width, contributor: contributor)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .id(contributor.id)
                 .transition(contributorTransition)
                 .gesture(contributorDragGesture(containerWidth: geometry.size.width))
                 } else {
@@ -2013,13 +2012,6 @@ private struct POIStoryViewer: View {
         return contributors[contributorIndex]
     }
 
-    private var currentItem: ExperienceDetailView.POIStoryContributor.Item? {
-        guard let contributor = currentContributor else { return nil }
-        let clampedIndex = min(itemIndex, max(contributor.items.count - 1, 0))
-        guard contributor.items.indices.contains(clampedIndex) else { return nil }
-        return contributor.items[clampedIndex]
-    }
-
     private var contributorTransition: AnyTransition {
         contributorTransitionDirection.transition
     }
@@ -2033,21 +2025,7 @@ private struct POIStoryViewer: View {
         let progress = dragProgress(width: width)
         let direction = activeDragDirection
 
-        let activeCard = storyMedia(for: contributor)
-            .overlay(alignment: .top) {
-                storyProgress(for: contributor)
-                    .padding(.top, 28)
-                    .padding(.horizontal, 20)
-            }
-            .overlay(alignment: .topLeading) {
-                header(for: contributor)
-                    .padding(.top, 60)
-                    .padding(.horizontal, 20)
-            }
-        .overlay(alignment: .bottom) {
-            actionBar
-                .padding(.horizontal, 24)
-            }
+        let activeCard = storyCard(for: contributor, direction: .none)
             .scaleEffect(direction == .none ? 1 : (1 - 0.05 * progress))
             .rotation3DEffect(
                 .degrees(
@@ -2067,7 +2045,7 @@ private struct POIStoryViewer: View {
             activeCard
 
             if let preview = previewContributor {
-                previewStoryMedia(for: preview, direction: direction)
+                storyCard(for: preview, direction: direction)
                     .offset(x: previewOffset(width: width))
                     .rotation3DEffect(
                         .degrees(
@@ -2086,31 +2064,33 @@ private struct POIStoryViewer: View {
         }
     }
 
-    @ViewBuilder
-    private func storyMedia(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
-        mediaContent(for: contributor, itemIndex: activeItemIndex(for: contributor, direction: .none))
-            .overlay {
-                HStack(spacing: 0) {
-                    Color.black.opacity(0.001)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            goToPreviousItem()
-                        }
-                    Color.black.opacity(0.001)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            goToNextItem()
-                        }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-    }
-
-    private func previewStoryMedia(
+    private func storyCard(
         for contributor: ExperienceDetailView.POIStoryContributor,
         direction: ContributorTransitionDirection
     ) -> some View {
-        mediaContent(for: contributor, itemIndex: activeItemIndex(for: contributor, direction: direction))
+        let activeIndex = activeItemIndex(for: contributor, direction: direction)
+        let activeItem = contributorItem(contributor, at: activeIndex)
+
+        return mediaContent(for: contributor, itemIndex: activeIndex)
+            .overlay {
+                if direction == .none {
+                    storyNavigationOverlay
+                }
+            }
+            .overlay(alignment: .top) {
+                storyProgress(for: contributor, activeIndex: activeIndex)
+                    .padding(.top, 28)
+                    .padding(.horizontal, 20)
+            }
+            .overlay(alignment: .topLeading) {
+                header(for: contributor, activeItem: activeItem)
+                    .padding(.top, 60)
+                    .padding(.horizontal, 20)
+            }
+            .overlay(alignment: .bottom) {
+                actionBar
+                    .padding(.horizontal, 24)
+            }
     }
 
     private func mediaContent(
@@ -2130,18 +2110,24 @@ private struct POIStoryViewer: View {
         }
     }
 
-    private func storyProgress(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
-        let activeIndex = min(itemIndex, max(contributor.items.count - 1, 0))
+    private func storyProgress(
+        for contributor: ExperienceDetailView.POIStoryContributor,
+        activeIndex: Int
+    ) -> some View {
+        let clampedIndex = min(activeIndex, max(contributor.items.count - 1, 0))
         return HStack(spacing: 4) {
             ForEach(contributor.items.indices, id: \.self) { index in
                 Capsule()
-                    .fill(index <= activeIndex ? Color.white : Color.white.opacity(0.35))
+                    .fill(index <= clampedIndex ? Color.white : Color.white.opacity(0.35))
                     .frame(height: 4)
             }
         }
     }
 
-    private func header(for contributor: ExperienceDetailView.POIStoryContributor) -> some View {
+    private func header(
+        for contributor: ExperienceDetailView.POIStoryContributor,
+        activeItem: ExperienceDetailView.POIStoryContributor.Item?
+    ) -> some View {
         HStack(spacing: 12) {
             POIStoryAvatarView(contributor: contributor)
                 .frame(width: 56, height: 56)
@@ -2150,7 +2136,7 @@ private struct POIStoryViewer: View {
                 Text(contributor.user?.handle ?? "Friend")
                     .font(.headline.bold())
                     .foregroundStyle(.white)
-                if let timestamp = currentItem?.timestamp {
+                if let timestamp = activeItem?.timestamp {
                     Text(timestamp.formatted(.relative(presentation: .named)))
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.7))
@@ -2192,6 +2178,22 @@ private struct POIStoryViewer: View {
             .background(Color.white.opacity(0.12), in: Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    private var storyNavigationOverlay: some View {
+        HStack(spacing: 0) {
+            Color.black.opacity(0.001)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    goToPreviousItem()
+                }
+            Color.black.opacity(0.001)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    goToNextItem()
+                }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func goToNextItem() {
@@ -2253,7 +2255,11 @@ private struct POIStoryViewer: View {
             }
         } else {
             contributorTransitionDirection = .none
-            updateState()
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                updateState()
+            }
         }
     }
 
