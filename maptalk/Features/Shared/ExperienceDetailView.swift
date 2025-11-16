@@ -2024,6 +2024,14 @@ private struct POIStoryViewer: View {
         let offset = dragOffsetForDisplay(width: width)
         let progress = dragProgress(width: width)
         let direction = activeDragDirection
+        let preview = previewContributor
+        let headerContext = headerDisplayContext(
+            current: contributor,
+            preview: preview,
+            direction: direction,
+            progress: progress
+        )
+        let preloadTargets = preloadContributors(around: contributor)
 
         let activeCard = storyCard(for: contributor, direction: .none)
             .scaleEffect(direction == .none ? 1 : (1 - 0.05 * progress))
@@ -2042,9 +2050,15 @@ private struct POIStoryViewer: View {
             .opacity(direction == .none ? 1 : (1 - 0.4 * Double(progress)))
 
         return ZStack {
+            ForEach(preloadTargets, id: \.id) { target in
+                storyCard(for: target, direction: .none)
+                    .opacity(0)
+                    .allowsHitTesting(false)
+            }
+
             activeCard
 
-            if let preview = previewContributor {
+            if let preview {
                 storyCard(for: preview, direction: direction)
                     .offset(x: previewOffset(width: width))
                     .rotation3DEffect(
@@ -2062,6 +2076,42 @@ private struct POIStoryViewer: View {
                     .allowsHitTesting(false)
             }
         }
+        .overlay(alignment: .topLeading) {
+            header(for: headerContext.contributor, activeItem: headerContext.item)
+                .padding(.top, 60)
+                .padding(.horizontal, 20)
+        }
+    }
+
+    private func preloadContributors(
+        around contributor: ExperienceDetailView.POIStoryContributor
+    ) -> [ExperienceDetailView.POIStoryContributor] {
+        guard let index = contributors.firstIndex(where: { $0.id == contributor.id }) else { return [] }
+        var targets: [ExperienceDetailView.POIStoryContributor] = []
+        let neighborIndices = [index - 1, index + 1]
+        for idx in neighborIndices {
+            if contributors.indices.contains(idx) {
+                targets.append(contributors[idx])
+            }
+        }
+        return targets
+    }
+
+    private func headerDisplayContext(
+        current: ExperienceDetailView.POIStoryContributor,
+        preview: ExperienceDetailView.POIStoryContributor?,
+        direction: ContributorTransitionDirection,
+        progress: CGFloat
+    ) -> (contributor: ExperienceDetailView.POIStoryContributor, item: ExperienceDetailView.POIStoryContributor.Item?) {
+        if progress > 0.5,
+           direction != .none,
+           let preview {
+            let index = activeItemIndex(for: preview, direction: direction)
+            return (preview, contributorItem(preview, at: index))
+        }
+
+        let index = activeItemIndex(for: current, direction: .none)
+        return (current, contributorItem(current, at: index))
     }
 
     private func storyCard(
@@ -2069,7 +2119,6 @@ private struct POIStoryViewer: View {
         direction: ContributorTransitionDirection
     ) -> some View {
         let activeIndex = activeItemIndex(for: contributor, direction: direction)
-        let activeItem = contributorItem(contributor, at: activeIndex)
 
         return mediaContent(for: contributor, itemIndex: activeIndex)
             .overlay {
@@ -2080,11 +2129,6 @@ private struct POIStoryViewer: View {
             .overlay(alignment: .top) {
                 storyProgress(for: contributor, activeIndex: activeIndex)
                     .padding(.top, 28)
-                    .padding(.horizontal, 20)
-            }
-            .overlay(alignment: .topLeading) {
-                header(for: contributor, activeItem: activeItem)
-                    .padding(.top, 60)
                     .padding(.horizontal, 20)
             }
             .overlay(alignment: .bottom) {
