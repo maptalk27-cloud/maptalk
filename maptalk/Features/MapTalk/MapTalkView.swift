@@ -21,6 +21,23 @@ struct MapTalkView: View {
         GeometryReader { geometry in
             let sortedReals = viewModel.reals.sorted { $0.createdAt < $1.createdAt }
             let realItems = sortedReals.map { ActiveExperience.RealItem(real: $0, user: viewModel.user(for: $0.userId)) }
+            let poiSharers = viewModel.ratedPOIs.flatMap { rated -> [RealStoriesRow.POISharer] in
+                rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
+                    let hasPhoto = checkIn.media.contains { media in
+                        if case .photo = media.kind { return true }
+                        return false
+                    }
+                    guard hasPhoto, checkIn.createdAt >= Date().addingTimeInterval(-60 * 60 * 24) else { return nil }
+                    let user = viewModel.user(for: checkIn.userId)
+                    return RealStoriesRow.POISharer(
+                        id: checkIn.id,
+                        ratedPOI: rated,
+                        user: user,
+                        timestamp: checkIn.createdAt
+                    )
+                }
+            }
+            .sorted { $0.timestamp > $1.timestamp }
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
             let collapseDetent = {
@@ -91,7 +108,7 @@ struct MapTalkView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, 16)
 
-                    if sortedReals.isEmpty == false {
+                    if sortedReals.isEmpty == false || poiSharers.isEmpty == false {
                         RealStoriesRow(
                             reals: sortedReals,
                             selectedId: selectedRealId,
@@ -101,7 +118,17 @@ struct MapTalkView: View {
                                 viewModel.focus(on: real)
                             },
                             userProvider: viewModel.user(for:),
-                            alignTrigger: reelAlignTrigger
+                            alignTrigger: reelAlignTrigger,
+                            poiSharers: poiSharers,
+                            onSelectPOISharer: { sharer in
+                                pendingRegionCause = .poi
+                                viewModel.focus(on: sharer.ratedPOI)
+                                activeExperience = .poi(rated: sharer.ratedPOI, nonce: UUID())
+                                if isExperiencePresented == false {
+                                    isExperiencePresented = true
+                                }
+                                collapseDetent()
+                            }
                         )
                     }
                 }
