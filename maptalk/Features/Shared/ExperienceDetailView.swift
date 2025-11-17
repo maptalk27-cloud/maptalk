@@ -173,6 +173,7 @@ private struct FriendEngagement: Identifiable {
     }
 
     let id: UUID
+    let userId: UUID?
     let kind: Kind
     let user: User?
     let message: String
@@ -340,6 +341,7 @@ private extension ExperienceDetailView {
                 guard let user = userProvider(userId) else { return nil }
                 return FriendEngagement(
                     id: userId,
+                    userId: userId,
                     kind: .like,
                     user: user,
                     message: "Reacted to this drop.",
@@ -355,6 +357,7 @@ private extension ExperienceDetailView {
                     guard let replyUser = userProvider(reply.userId) else { return nil }
                     return FriendEngagement(
                         id: reply.id,
+                        userId: reply.userId,
                         kind: .comment,
                         user: replyUser,
                         message: reply.text,
@@ -366,6 +369,7 @@ private extension ExperienceDetailView {
                 }
                 return FriendEngagement(
                     id: comment.id,
+                    userId: comment.userId,
                     kind: .comment,
                     user: user,
                     message: comment.text,
@@ -551,6 +555,7 @@ private extension ExperienceDetailView {
             let kind: FriendEngagement.Kind = endorsement == nil ? .like : .rating
             return FriendEngagement(
                 id: checkIn.id,
+                userId: checkIn.userId,
                 kind: kind,
                 user: userProvider(checkIn.userId),
                 message: endorsementMessage(for: endorsement),
@@ -566,6 +571,7 @@ private extension ExperienceDetailView {
         ratedPOI.comments.map { comment in
             FriendEngagement(
                 id: comment.id,
+                userId: comment.userId,
                 kind: .comment,
                 user: userProvider(comment.userId),
                 message: commentMessage(for: comment.content),
@@ -1907,16 +1913,14 @@ private struct LikesAvatarGrid: View {
 
             LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
                 ForEach(entries) { entry in
-                    let storyIndex = contributorIndex(for: entry.user?.id)
-                    if let index = storyIndex {
+                    if let info = contributorInfo(for: entry.userId) {
                         Button {
-                            viewerState = POIStoryViewerState(contributorIndex: index)
+                            viewerState = POIStoryViewerState(contributorIndex: info.index)
                         } label: {
                             AvatarSquare(
                                 user: entry.user,
                                 endorsement: entry.endorsement,
-                                hasStory: true,
-                                storyAccent: accentColor
+                                highlight: highlightStyle(for: info.contributor)
                             )
                         }
                         .buttonStyle(.plain)
@@ -1941,10 +1945,22 @@ private struct LikesAvatarGrid: View {
         }
     }
 
-    private func contributorIndex(for userId: UUID?) -> Int? {
-        guard let userId else { return nil }
-        return storyIndexMap[userId]
+    private func contributorInfo(for userId: UUID?) -> (contributor: ExperienceDetailView.POIStoryContributor, index: Int)? {
+        guard let userId, let index = storyIndexMap[userId], storyContributors.indices.contains(index) else {
+            return nil
+        }
+        return (storyContributors[index], index)
     }
+
+    private func highlightStyle(for contributor: ExperienceDetailView.POIStoryContributor) -> AvatarSquare.HighlightStyle {
+        let delta = Date().timeIntervalSince(contributor.mostRecent)
+        if delta <= recentStoryWindow {
+            return .recent(accent: accentColor)
+        }
+        return .past(accent: accentColor)
+    }
+
+    private var recentStoryWindow: TimeInterval { 60 * 60 * 24 }
 
     private var storyIndexMap: [UUID: Int] {
         var map: [UUID: Int] = [:]
@@ -2579,8 +2595,13 @@ private struct AvatarSquare: View {
     let user: User?
     var size: CGFloat = 44
     var endorsement: RatedPOI.Endorsement? = nil
-    var hasStory: Bool = false
-    var storyAccent: Color = Theme.neonPrimary
+    var highlight: HighlightStyle = .none
+
+    enum HighlightStyle {
+        case none
+        case recent(accent: Color)
+        case past(accent: Color)
+    }
 
     var body: some View {
         avatarContent
@@ -2588,29 +2609,63 @@ private struct AvatarSquare: View {
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.white.opacity(hasStory ? 0.2 : 0.3), lineWidth: 1)
+                    .stroke(Color.white.opacity(baseStrokeOpacity), lineWidth: 1)
             }
-            .overlay {
-                if hasStory {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(
-                            AngularGradient(
-                                gradient: Gradient(colors: [
-                                    storyAccent,
-                                    Theme.neonAccent,
-                                    storyAccent
-                                ]),
-                                center: .center
-                            ),
-                            lineWidth: 3
-                        )
-                        .padding(-4)
-                        .shadow(color: storyAccent.opacity(0.4), radius: 6, y: 3)
-                }
-            }
+            .overlay { highlightOverlay }
             .overlay(alignment: .bottomTrailing) {
                 endorsementBadge
             }
+    }
+
+    private var baseStrokeOpacity: Double {
+        switch highlight {
+        case .none:
+            return 0.3
+        default:
+            return 0.2
+        }
+    }
+
+    @ViewBuilder
+    private var highlightOverlay: some View {
+        switch highlight {
+        case .none:
+            EmptyView()
+        case let .recent(accent):
+            let colors: [Color] = [
+                Color.blue,
+                Color.cyan,
+                accent,
+                Color.indigo,
+                Color.blue
+            ]
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(
+                    AngularGradient(
+                        gradient: Gradient(colors: colors),
+                        center: .center
+                    ),
+                    lineWidth: 3.5
+                )
+                .padding(-4.5)
+                .shadow(color: Color.cyan.opacity(0.45), radius: 7, y: 3)
+        case let .past(accent):
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(Color.white.opacity(0.35), lineWidth: 2.4)
+                .padding(-4)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.65), accent.opacity(0.2)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1.2
+                        )
+                        .padding(-5.4)
+                }
+        }
     }
 
     private var avatarContent: some View {

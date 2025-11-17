@@ -157,6 +157,25 @@ enum PreviewData {
                                 )
                             )
                         ]
+                    ),
+                    poiCheckIn(
+                        6501,
+                        user: sampleFriends[9],
+                        minutesAgo: 60 * 27,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .detour
+                    ),
+                    poiCheckIn(
+                        6502,
+                        user: sampleFriends[10],
+                        minutesAgo: 12,
+                        relativeTo: referenceDate,
+                        media: [],
+                        tag: .social
                     )
                 ],
                 comments: [
@@ -213,6 +232,25 @@ enum PreviewData {
                                 )
                             )
                         ],
+                        tag: .study
+                    ),
+                    poiCheckIn(
+                        6503,
+                        user: sampleFriends[11],
+                        minutesAgo: 60 * 29,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .date
+                    ),
+                    poiCheckIn(
+                        6504,
+                        user: sampleFriends[12],
+                        minutesAgo: 16,
+                        relativeTo: referenceDate,
+                        media: [],
                         tag: .study
                     )
                 ],
@@ -295,6 +333,25 @@ enum PreviewData {
                             )
                         ],
                         tag: .social
+                    ),
+                    poiCheckIn(
+                        6505,
+                        user: sampleFriends[13],
+                        minutesAgo: 60 * 32,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1506157786151-b8491531f063?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .entertainment
+                    ),
+                    poiCheckIn(
+                        6506,
+                        user: sampleFriends[14],
+                        minutesAgo: 20,
+                        relativeTo: referenceDate,
+                        media: [],
+                        tag: .explore
                     )
                 ],
                 comments: [
@@ -353,6 +410,25 @@ enum PreviewData {
                             )
                         ],
                         tag: .express
+                    ),
+                    poiCheckIn(
+                        6507,
+                        user: sampleFriends[15],
+                        minutesAgo: 60 * 34,
+                        relativeTo: referenceDate,
+                        endorsement: .meh,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1529429617124-aee401f3c21f?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .study
+                    ),
+                    poiCheckIn(
+                        6508,
+                        user: sampleFriends[16],
+                        minutesAgo: 24,
+                        relativeTo: referenceDate,
+                        media: [],
+                        tag: .explore
                     )
                 ],
                 comments: [
@@ -418,6 +494,25 @@ enum PreviewData {
                                 )
                             )
                         ],
+                        tag: .social
+                    ),
+                    poiCheckIn(
+                        6509,
+                        user: sampleFriends[17],
+                        minutesAgo: 60 * 36,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1478145046317-39f10e56b5e9?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .premium
+                    ),
+                    poiCheckIn(
+                        6510,
+                        user: sampleFriends[18],
+                        minutesAgo: 30,
+                        relativeTo: referenceDate,
+                        media: [],
                         tag: .social
                     )
                 ],
