@@ -10,11 +10,16 @@ struct MapOverlays: MapContent {
 
     var body: some MapContent {
         ForEach(ratedPOIs) { rated in
+            let isRecent = rated.hasRecentPhotoShare
             Annotation("", coordinate: rated.poi.coordinate) {
                 Button {
                     onSelectPOI(rated)
                 } label: {
-                    POICategoryMarker(category: rated.poi.category, count: rated.checkIns.count)
+                    POICategoryMarker(
+                        category: rated.poi.category,
+                        count: rated.checkIns.count,
+                        isRecentHighlight: isRecent
+                    )
                 }
                 .buttonStyle(.plain)
             }
@@ -141,6 +146,7 @@ private struct UserLocationMarker: View {
 private struct POICategoryMarker: View {
     let category: POICategory
     let count: Int
+    let isRecentHighlight: Bool
 
     var body: some View {
         ZStack {
@@ -149,6 +155,19 @@ private struct POICategoryMarker: View {
                 .frame(width: 46, height: 46)
                 .rotationEffect(.degrees(45))
                 .shadow(color: markerGlow.opacity(0.45), radius: 12, y: 4)
+
+            if isRecentHighlight {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.orange.opacity(0.75), lineWidth: 3)
+                    .frame(width: 48, height: 48)
+                    .rotationEffect(.degrees(45))
+
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(Color.orange.opacity(0.3), lineWidth: 6)
+                    .frame(width: 56, height: 56)
+                    .rotationEffect(.degrees(45))
+                    .blur(radius: 3)
+            }
 
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .stroke(Color.white.opacity(0.45), lineWidth: 1.25)
@@ -161,6 +180,7 @@ private struct POICategoryMarker: View {
                 .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
         }
         .frame(width: 48, height: 48)
+        .shadow(color: isRecentHighlight ? Color.orange.opacity(0.4) : .clear, radius: 14, y: 6)
         .overlay(alignment: .bottomTrailing) {
             if count > 1 {
                 Text("\(count)")
@@ -187,5 +207,18 @@ private struct POICategoryMarker: View {
 
     private var markerGlow: Color {
         category.markerGradientColors.last ?? Theme.neonPrimary
+    }
+}
+
+extension RatedPOI {
+    var hasRecentPhotoShare: Bool {
+        let recentThreshold = Date().addingTimeInterval(-60 * 60 * 24)
+        return checkIns.contains { checkIn in
+            guard checkIn.createdAt >= recentThreshold else { return false }
+            return checkIn.media.contains { media in
+                if case .photo = media.kind { return true }
+                return false
+            }
+        }
     }
 }

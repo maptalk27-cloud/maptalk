@@ -67,8 +67,8 @@ enum PreviewData {
 
         let cafe = POI(
             id: UUID(uuidString: "BBBBBBBB-5555-6666-7777-888888888888") ?? UUID(),
-            name: "Seattle Cafe",
-            coordinate: .init(latitude: 47.61, longitude: -122.33),
+            name: "Bellevue Roastery",
+            coordinate: .init(latitude: 47.6159, longitude: -122.1912),
             category: .coffee
         )
 
@@ -91,6 +91,34 @@ enum PreviewData {
             name: "Waterfront Bistro",
             coordinate: .init(latitude: 47.6075, longitude: -122.3405),
             category: .restaurant
+        )
+
+        let gasWorks = POI(
+            id: UUID(uuidString: "BBBBBBBB-ABAB-CDCD-EFEF-999999999999") ?? UUID(),
+            name: "Downtown Park Vista",
+            coordinate: .init(latitude: 47.6103, longitude: -122.2015),
+            category: .viewpoint
+        )
+
+        let capitolCafe = POI(
+            id: UUID(uuidString: "BBBBBBBB-A1A1-B2B2-C3C3-D4D4D4D4D4D4") ?? UUID(),
+            name: "BelRed Test Kitchen",
+            coordinate: .init(latitude: 47.6207, longitude: -122.1415),
+            category: .restaurant
+        )
+
+        let redmondMeadow = POI(
+            id: UUID(uuidString: "BBBBBBBB-AAAA-FFFF-EEEE-010101010101") ?? UUID(),
+            name: "Redmond Meadow Commons",
+            coordinate: .init(latitude: 47.6802, longitude: -122.1201),
+            category: .viewpoint
+        )
+
+        let redmondArcade = POI(
+            id: UUID(uuidString: "BBBBBBBB-CECE-FAFA-BCBC-020202020202") ?? UUID(),
+            name: "Redmond Retro Arcade",
+            coordinate: .init(latitude: 47.6748, longitude: -122.1228),
+            category: .nightlife
         )
 
         func mediaPhoto(_ url: String) -> RatedPOI.Media {
@@ -193,8 +221,8 @@ enum PreviewData {
             ),
             RatedPOI(
                 poi: cafe,
-                highlight: nil,
-                secondary: nil,
+                highlight: "Micro-batch roastery fueling Bellevue's startup core.",
+                secondary: "Sunlit patio tucked off 110th Ave NE.",
                 media: [
                     RatedPOI.Media(
                         kind: .video(
@@ -269,9 +297,9 @@ enum PreviewData {
                 ],
                 endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 1, questionable: 0),
                 tags: [
-                    RatedPOI.TagStat(tag: .dine, count: 6),
-                    RatedPOI.TagStat(tag: .study, count: 5),
-                    RatedPOI.TagStat(tag: .social, count: 4),
+                    RatedPOI.TagStat(tag: .study, count: 7),
+                    RatedPOI.TagStat(tag: .social, count: 5),
+                    RatedPOI.TagStat(tag: .dine, count: 4),
                     RatedPOI.TagStat(tag: .date, count: 3)
                 ],
                 isFavoritedByCurrentUser: false,
@@ -529,6 +557,184 @@ enum PreviewData {
                 ],
                 isFavoritedByCurrentUser: true,
                 favoritesCount: 34
+            ),
+            RatedPOI(
+                poi: gasWorks,
+                highlight: "Fountain mist catching Bellevue's skyline glow.",
+                secondary: "Neighbors sprawl across Downtown Park's lawn terraces.",
+                media: [
+                    mediaPhoto("https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=600&q=60"),
+                    mediaPhoto("https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=600&q=60")
+                ],
+                checkIns: [
+                    poiCheckIn(
+                        6511,
+                        user: sampleFriends[0],
+                        minutesAgo: 25,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .explore
+                    ),
+                    poiCheckIn(
+                        6512,
+                        user: sampleFriends[5],
+                        minutesAgo: 60 * 30,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1491553895911-0055eca6402d?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .unwind
+                    )
+                ],
+                comments: [
+                    poiComment(6110, user: sampleFriends[6], content: .text("Projected a laser show onto the waterfall wall last night."), minutesAgo: 33, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 1, meh: 0, questionable: 0),
+                tags: [
+                    RatedPOI.TagStat(tag: .explore, count: 5),
+                    RatedPOI.TagStat(tag: .unwind, count: 4),
+                    RatedPOI.TagStat(tag: .social, count: 2)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 14
+            ),
+            RatedPOI(
+                poi: capitolCafe,
+                highlight: "Experimental test kitchen fueling BelRed's late nights.",
+                secondary: "Chef's counter hidden between maker garages.",
+                media: [
+                    mediaPhoto("https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")
+                ],
+                checkIns: [
+                    poiCheckIn(
+                        6513,
+                        user: sampleFriends[3],
+                        minutesAgo: 14,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1459257868276-5e65389e2722?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .study
+                    ),
+                    poiCheckIn(
+                        6514,
+                        user: sampleFriends[8],
+                        minutesAgo: 60 * 52,
+                        relativeTo: referenceDate,
+                        endorsement: .meh,
+                        media: [],
+                        tag: .express
+                    ),
+                    poiCheckIn(
+                        6515,
+                        user: currentUser,
+                        minutesAgo: 60 * 3,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1459257868276-5e65389e2722?auto=format&fit=crop&w=600&q=60"),
+                            RatedPOI.Media(kind: .video(url: URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4")!, poster: URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=600&q=60")!))
+                        ],
+                        tag: .social
+                    )
+                ],
+                comments: [
+                    poiComment(6111, user: sampleFriends[1], content: .text("Synth set + tasting flight this Saturday night!"), minutesAgo: 41, relativeTo: referenceDate),
+                    poiComment(6112, user: sampleFriends[4], content: .photo(URL(string: "https://images.unsplash.com/photo-1529429617124-aee401f3c21f?auto=format&fit=crop&w=600&q=60")!), minutesAgo: 90, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 1, meh: 1, questionable: 0),
+                tags: [
+                    RatedPOI.TagStat(tag: .dine, count: 8),
+                    RatedPOI.TagStat(tag: .social, count: 6),
+                    RatedPOI.TagStat(tag: .study, count: 3)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 18
+            ),
+            RatedPOI(
+                poi: redmondMeadow,
+                highlight: "Open-air meadow hugging the Sammamish River trail.",
+                secondary: "Families fly drones and kites every weekend.",
+                media: [
+                    mediaPhoto("https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=600&q=60")
+                ],
+                checkIns: [
+                    poiCheckIn(
+                        6516,
+                        user: sampleFriends[4],
+                        minutesAgo: 60 * 32,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .unwind
+                    ),
+                    poiCheckIn(
+                        6517,
+                        user: sampleFriends[7],
+                        minutesAgo: 60 * 48,
+                        relativeTo: referenceDate,
+                        endorsement: .meh,
+                        media: [],
+                        tag: .detour
+                    )
+                ],
+                comments: [
+                    poiComment(6113, user: sampleFriends[2], content: .text("Best place to stretch before a trail ride."), minutesAgo: 60 * 30, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 1, questionable: 0),
+                tags: [
+                    RatedPOI.TagStat(tag: .unwind, count: 6),
+                    RatedPOI.TagStat(tag: .explore, count: 4)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 11
+            ),
+            RatedPOI(
+                poi: redmondArcade,
+                highlight: "Synthwave arcade tucked under Cleveland Street.",
+                secondary: "Quarter night every Thursday.",
+                media: [
+                    mediaPhoto("https://images.unsplash.com/photo-1503602642458-232111445657?auto=format&fit=crop&w=600&q=60")
+                ],
+                checkIns: [
+                    poiCheckIn(
+                        6518,
+                        user: sampleFriends[0],
+                        minutesAgo: 60 * 40,
+                        relativeTo: referenceDate,
+                        endorsement: .hype,
+                        media: [
+                            mediaPhoto("https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=600&q=60")
+                        ],
+                        tag: .entertainment
+                    ),
+                    poiCheckIn(
+                        6519,
+                        user: sampleFriends[6],
+                        minutesAgo: 60 * 56,
+                        relativeTo: referenceDate,
+                        endorsement: .solid,
+                        media: [],
+                        tag: .social
+                    )
+                ],
+                comments: [
+                    poiComment(6114, user: sampleFriends[8], content: .text("DDR tournament bracket still posted from last week."), minutesAgo: 60 * 42, relativeTo: referenceDate)
+                ],
+                endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 1, meh: 0, questionable: 0),
+                tags: [
+                    RatedPOI.TagStat(tag: .entertainment, count: 5),
+                    RatedPOI.TagStat(tag: .social, count: 4)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 9
             )
         ]
     }()

@@ -198,8 +198,10 @@ struct MapTalkView: View {
                             ExperienceDetailView(
                                 ratedPOI: rated,
                                 isExpanded: isExpanded,
+                                autoPresentRecentStories: rated.hasRecentPhotoShare,
                                 userProvider: viewModel.user(for:)
                             )
+                            .id(rated.id)
                         }
                     }
                     .presentationDetents([.fraction(0.25), .large], selection: $experienceDetent)
