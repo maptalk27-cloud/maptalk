@@ -25,14 +25,22 @@ extension ExperienceDetailView {
                 TabView(selection: context.selection) {
                     ForEach(context.pager.items) { item in
                         ExperiencePanel(
-                            data: contentData(for: item.mode)
+                            data: contentData(for: item.mode),
+                            onRecentSharerSelected: { index, data in
+                                openRecentSharer(at: index, using: data)
+                            }
                         )
                         .tag(item.id)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
             } else {
-                ExperiencePanel(data: data)
+                ExperiencePanel(
+                    data: data,
+                    onRecentSharerSelected: { index, content in
+                        openRecentSharer(at: index, using: content)
+                    }
+                )
             }
         }
     }
@@ -75,7 +83,11 @@ extension ExperienceDetailView {
             POICollapsedHero(
                 info: poiInfo,
                 stats: data.poiStats,
-                accentColor: data.accentColor
+                accentColor: data.accentColor,
+                recentSharers: data.recentSharers,
+                onRecentSharerSelected: { index in
+                    openRecentSharer(at: index, using: data)
+                }
             )
         } else {
             VStack(spacing: 12) {

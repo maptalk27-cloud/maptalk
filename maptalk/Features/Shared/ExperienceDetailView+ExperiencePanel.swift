@@ -5,6 +5,7 @@ import SwiftUI
 extension ExperienceDetailView {
 struct ExperiencePanel: View {
     let data: ExperienceDetailView.ContentData
+    let onRecentSharerSelected: ((Int, ExperienceDetailView.ContentData) -> Void)?
 
     var body: some View {
         ScrollView {
@@ -35,7 +36,11 @@ struct ExperiencePanel: View {
                 POIExpandedHero(
                     info: poiInfo,
                     stats: data.poiStats,
-                    accentColor: data.accentColor
+                    accentColor: data.accentColor,
+                    recentSharers: data.recentSharers,
+                    onRecentSharerSelected: { index in
+                        onRecentSharerSelected?(index, data)
+                    }
                 )
                 .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
 
@@ -111,15 +116,16 @@ struct POICollapsedHero: View {
     let info: ExperienceDetailView.POIInfoModel
     let stats: ExperienceDetailView.POIStatsModel?
     let accentColor: Color
+    let recentSharers: [ExperienceDetailView.POIStoryContributor]
+    let onRecentSharerSelected: ((Int) -> Void)?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
-                .alignmentGuide(.top) { $0[.top] }
-                .padding(.trailing, POIHeroLayout.avatarSpacing)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: POIHeroLayout.avatarSpacing) {
+                POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
+                    .alignmentGuide(.top) { $0[.top] }
 
-            VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(info.name)
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
@@ -132,10 +138,19 @@ struct POICollapsedHero: View {
                         }
                     }
                 }
+            }
 
-                if let stats {
-                    POIHeroStatsRow(model: stats)
+            if recentSharers.isEmpty == false {
+                POIRecentSharersRow(
+                    sharers: recentSharers,
+                    accentColor: accentColor
+                ) { index in
+                    onRecentSharerSelected?(index)
                 }
+            }
+
+            if let stats {
+                POIHeroStatsRow(model: stats)
             }
         }
         .padding(.top, POIHeroLayout.headerTopPadding)
@@ -148,15 +163,16 @@ struct POIExpandedHero: View {
     let info: ExperienceDetailView.POIInfoModel
     let stats: ExperienceDetailView.POIStatsModel?
     let accentColor: Color
+    let recentSharers: [ExperienceDetailView.POIStoryContributor]
+    let onRecentSharerSelected: ((Int) -> Void)?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
-                .alignmentGuide(.top) { $0[.top] }
-                .padding(.trailing, POIHeroLayout.avatarSpacing)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: POIHeroLayout.avatarSpacing) {
+                POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
+                    .alignmentGuide(.top) { $0[.top] }
 
-            VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(info.name)
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
@@ -169,10 +185,19 @@ struct POIExpandedHero: View {
                         }
                     }
                 }
+            }
 
-                if let stats {
-                    POIHeroStatsRow(model: stats)
+            if recentSharers.isEmpty == false {
+                POIRecentSharersRow(
+                    sharers: recentSharers,
+                    accentColor: accentColor
+                ) { index in
+                    onRecentSharerSelected?(index)
                 }
+            }
+
+            if let stats {
+                POIHeroStatsRow(model: stats)
             }
         }
         .padding(.top, POIHeroLayout.headerTopPadding)
@@ -191,7 +216,6 @@ struct POIHeroStatsRow: View {
             POIStatPill(icon: "star.fill", value: model.favorites)
         }
         .padding(.horizontal, 2)
-        .padding(.top, 4)
     }
 }
 struct POIStatPill: View {
@@ -399,13 +423,101 @@ struct POIAvatar: View {
         .frame(width: size, height: size)
     }
 }
+
+struct POIRecentSharersRow: View {
+    let sharers: [ExperienceDetailView.POIStoryContributor]
+    let accentColor: Color
+    let onSelect: (Int) -> Void
+
+    private let avatarSize: CGFloat = 56
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 18) {
+                ForEach(Array(sharers.enumerated()), id: \.element.id) { index, sharer in
+                    Button {
+                        onSelect(index)
+                    } label: {
+                        VStack(spacing: 6) {
+                            POISharerAvatarCircle(
+                                contributor: sharer,
+                                accentColor: accentColor,
+                                size: avatarSize
+                            )
+                            Text(sharer.user?.handle ?? "Friend")
+                                .font(.caption2.bold())
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                        }
+                        .frame(width: avatarSize + 8)
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 2)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct POISharerAvatarCircle: View {
+    let contributor: ExperienceDetailView.POIStoryContributor
+    let accentColor: Color
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let url = contributor.user?.avatarURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFill()
+                    case .empty:
+                        ProgressView()
+                    default:
+                        placeholder
+                    }
+                }
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay {
+            Circle()
+                .stroke(
+                    LinearGradient(
+                        colors: [accentColor, .white.opacity(0.6)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 2
+                )
+        }
+    }
+
+    private var placeholder: some View {
+        Text(initials)
+            .font(.headline.bold())
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Color.gray.opacity(0.5))
+    }
+
+    private var initials: String {
+        let handle = contributor.user?.handle ?? "PO"
+        return String(handle.prefix(2)).uppercased()
+    }
+}
 enum POIHeroLayout {
     static let headerTopPadding: CGFloat = 40
     static let collapsedHorizontalPadding: CGFloat = 32
     static let collapsedVerticalPadding: CGFloat = 12
     static let standardHorizontalPadding: CGFloat = 24
     static let standardVerticalPadding: CGFloat = 22
-    static let collapsedAvatarSize: CGFloat = 34
+    static let collapsedAvatarSize: CGFloat = 30
     static let standardAvatarSize: CGFloat = 40
     static let avatarSpacing: CGFloat = 10
 }

@@ -109,6 +109,7 @@ struct ExperienceDetailView: View {
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
     let userProvider: (UUID) -> User?
+    @State private var storyViewerState: POIStoryViewerState?
 
     init(
         ratedPOI: RatedPOI,
@@ -149,6 +150,21 @@ struct ExperienceDetailView: View {
         .onAppear {
             logPOIDebug(event: "onAppear", data: currentData)
         }
+        .fullScreenCover(item: $storyViewerState) { state in
+            let refreshedData = contentData(for: currentMode)
+            POIStoryViewer(
+                contributors: refreshedData.recentSharers,
+                initialIndex: min(state.contributorIndex, max(refreshedData.recentSharers.count - 1, 0)),
+                accentColor: refreshedData.accentColor
+            ) {
+                storyViewerState = nil
+            }
+        }
+    }
+
+    func openRecentSharer(at index: Int, using data: ContentData) {
+        guard data.recentSharers.indices.contains(index) else { return }
+        storyViewerState = POIStoryViewerState(contributorIndex: index)
     }
 }
 
