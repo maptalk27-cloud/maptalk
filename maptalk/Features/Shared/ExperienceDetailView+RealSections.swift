@@ -745,14 +745,7 @@ struct AvatarSquare: View {
     }
 
     var body: some View {
-        avatarContent
-            .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.white.opacity(baseStrokeOpacity), lineWidth: 1)
-            }
-            .overlay { highlightOverlay }
+        highlightedAvatar
             .overlay(alignment: .bottomTrailing) {
                 endorsementBadge
             }
@@ -769,44 +762,9 @@ struct AvatarSquare: View {
 
     @ViewBuilder
     private var highlightOverlay: some View {
-        switch highlight {
-        case .none:
-            EmptyView()
-        case let .recent(accent):
-            let colors: [Color] = [
-                Color.blue,
-                Color.cyan,
-                accent,
-                Color.indigo,
-                Color.blue
-            ]
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(
-                    AngularGradient(
-                        gradient: Gradient(colors: colors),
-                        center: .center
-                    ),
-                    lineWidth: 3.5
-                )
-                .padding(-4.5)
-                .shadow(color: Color.cyan.opacity(0.45), radius: 7, y: 3)
-        case let .past(accent):
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(Color.white.opacity(0.35), lineWidth: 2.4)
-                .padding(-4)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: [Color.white.opacity(0.65), accent.opacity(0.2)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 1.2
-                        )
-                        .padding(-5.4)
-                }
-        }
+                .stroke(Color.white.opacity(0.65), lineWidth: 3.0)
+                .padding(-2)
     }
 
     private var avatarContent: some View {
@@ -825,6 +783,26 @@ struct AvatarSquare: View {
             } else {
                 avatarPlaceholder
             }
+        }
+    }
+
+    @ViewBuilder
+    private var highlightedAvatar: some View {
+        let base = avatarContent
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(baseStrokeOpacity), lineWidth: 1)
+            }
+
+        switch highlight {
+        case .none:
+            base
+        case .recent, .past:
+            base
+                .padding(2.5)
+                .overlay { highlightOverlay }
         }
     }
 

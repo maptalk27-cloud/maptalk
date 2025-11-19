@@ -461,13 +461,19 @@ struct POIRecentSharersRow: View {
     }
 }
 
+private enum POIHighlightStyle {
+    static let highlightColor = Color.orange
+    static let avatarLineWidth: CGFloat = 2.0
+    static let statLineWidth: CGFloat = 1.2
+}
+
 private struct POISharerAvatarCircle: View {
     let contributor: ExperienceDetailView.POIStoryContributor
     let accentColor: Color
     let size: CGFloat
 
     var body: some View {
-        Group {
+        let avatar = Group {
             if let url = contributor.user?.avatarURL {
                 AsyncImage(url: url) { phase in
                     switch phase {
@@ -483,19 +489,19 @@ private struct POISharerAvatarCircle: View {
                 placeholder
             }
         }
-        .frame(width: size, height: size)
-        .clipShape(Circle())
-        .overlay {
-            Circle()
-                .stroke(
-                    LinearGradient(
-                        colors: [accentColor, .white.opacity(0.6)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 2
-                )
-        }
+
+        avatar
+            .frame(width: size, height: size)
+            .clipShape(Circle())
+            .overlay {
+                Circle()
+                    .inset(by: 1.5)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1.5)
+            }
+            .overlay {
+                Circle()
+                    .stroke(POIHighlightStyle.highlightColor, lineWidth: POIHighlightStyle.avatarLineWidth)
+            }
     }
 
     private var placeholder: some View {
