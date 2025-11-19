@@ -156,6 +156,7 @@ struct ExperienceDetailView: View {
         }
         .background(Color.black.ignoresSafeArea())
         .onAppear {
+            logPOIDebug(event: "onAppear", data: currentData)
             triggerAutoStoryIfNeeded(with: currentData)
         }
         .onChange(of: poi?.id) { _ in
@@ -163,6 +164,7 @@ struct ExperienceDetailView: View {
             hasTriggeredAutoStory = false
             guard autoPresentRecentStories else { return }
             let latestData = contentData(for: currentMode)
+            logPOIDebug(event: "poiChanged", data: latestData)
             triggerAutoStoryIfNeeded(with: latestData)
         }
         .fullScreenCover(item: $autoStoryViewerState) { state in
@@ -176,6 +178,20 @@ struct ExperienceDetailView: View {
         }
     }
 }
+
+#if DEBUG
+extension ExperienceDetailView {
+    func logPOIDebug(event: String, data: ContentData) {
+        let currentPOI = poi?.poi.name ?? "nil"
+        let sharers = data.recentSharers.count
+        print("[ExperienceDetailView] \(event) poi=\(currentPOI) id=\(poi?.id.uuidString ?? "nil") autoPresent=\(autoPresentRecentStories) sharers=\(sharers)")
+    }
+}
+#else
+extension ExperienceDetailView {
+    func logPOIDebug(event: String, data: ContentData) {}
+}
+#endif
 
 #if DEBUG
 struct ExperienceDetailView_Previews: PreviewProvider {

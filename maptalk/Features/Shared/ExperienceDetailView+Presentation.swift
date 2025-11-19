@@ -98,8 +98,16 @@ extension ExperienceDetailView {
         let canAutoPresent = autoPresentRecentStories
         let hasNotTriggered = hasTriggeredAutoStory == false
         let hasSharers = data.recentSharers.isEmpty == false
-        guard canAutoPresent, hasNotTriggered, hasSharers else { return }
+        guard canAutoPresent, hasNotTriggered, hasSharers else {
+#if DEBUG
+            print("[ExperienceDetailView] autoStory skipped autoPresent=\(canAutoPresent) hasTriggered=\(hasTriggeredAutoStory) sharers=\(data.recentSharers.count)")
+#endif
+            return
+        }
         autoStoryViewerState = POIStoryViewerState(contributorIndex: 0)
         hasTriggeredAutoStory = true
+#if DEBUG
+        print("[ExperienceDetailView] autoStory presenting sharers=\(data.recentSharers.count)")
+#endif
     }
 }
