@@ -21,7 +21,6 @@ struct MapTalkView: View {
     var body: some View {
         GeometryReader { geometry in
             let sortedReals = viewModel.reals.sorted { $0.createdAt > $1.createdAt }
-            let realItems = sortedReals.map { ActiveExperience.RealItem(real: $0, user: viewModel.user(for: $0.userId)) }
             let poiGroups = viewModel.ratedPOIs.compactMap { rated -> RealStoriesRow.POIStoryGroup? in
                 let sharers = rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
                     let hasPhoto = checkIn.media.contains { media in
@@ -50,6 +49,20 @@ struct MapTalkView: View {
             )
             .sorted { $0.timestamp > $1.timestamp }
             let storyItemIds = storyItems.map(\.id)
+            let sequenceItems = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
+                switch item.source {
+                case let .real(real):
+                    return ExperienceDetailView.SequencePager.Item(
+                        id: real.id,
+                        mode: .real(real, viewModel.user(for: real.userId))
+                    )
+                case let .poi(group):
+                    return ExperienceDetailView.SequencePager.Item(
+                        id: group.id,
+                        mode: .poi(group.ratedPOI)
+                    )
+                }
+            }
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
             let collapseDetent = {
@@ -58,22 +71,34 @@ struct MapTalkView: View {
                 }
             }
 
-            let updateSelection: (RealPost, Bool) -> Void = { real, shouldPresent in
-                let previousSelection = selectedRealId
-                selectedRealId = real.id
-                selectedStoryId = real.id
-                if previousSelection == real.id {
-                    pendingRegionCause = .other
-                } else if previousSelection == nil && pendingRegionCause == .initial {
-                    pendingRegionCause = .initial
-                } else {
-                    pendingRegionCause = .real
+            let storyItemForReal: (RealPost) -> RealStoriesRow.StoryItem? = { real in
+                storyItems.first { item in
+                    if case let .real(candidate) = item.source {
+                        return candidate.id == real.id
+                    }
+                    return false
                 }
+            }
+            let storyItemForPOI: (RatedPOI) -> RealStoriesRow.StoryItem? = { rated in
+                storyItems.first { item in
+                    if case let .poi(group) = item.source {
+                        return group.ratedPOI.id == rated.id
+                    }
+                    return false
+                }
+            }
+            let storyItemForId: (UUID) -> RealStoriesRow.StoryItem? = { id in
+                storyItems.first { $0.id == id }
+            }
+
+            let presentSequenceIfNeeded: (Bool) -> Void = { shouldPresent in
+                guard sequenceItems.isEmpty == false else { return }
                 let wasActive = isExperiencePresented
                 guard shouldPresent || wasActive else { return }
-                let context = ActiveExperience.RealContext(items: realItems, currentId: real.id)
-                let nonce = (shouldPresent || activeExperience == nil) ? UUID() : (activeExperience?.realNonce ?? UUID())
-                activeExperience = .real(context: context, nonce: nonce)
+                let nonce = (shouldPresent || activeExperience?.sequenceNonce == nil)
+                    ? UUID()
+                    : (activeExperience?.sequenceNonce ?? UUID())
+                activeExperience = .sequence(nonce: nonce)
                 if isExperiencePresented == false {
                     isExperiencePresented = true
                 }
@@ -81,7 +106,66 @@ struct MapTalkView: View {
                     collapseDetent()
                 }
             }
-            let presentReal: (RealPost) -> Void = { real in updateSelection(real, true) }
+
+            let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
+                selectedStoryId = item.id
+                switch item.source {
+                case let .real(real):
+                    let previousSelection = selectedRealId
+                    selectedRealId = real.id
+                    if let overrideCause {
+                        pendingRegionCause = overrideCause
+                    } else if previousSelection == real.id {
+                        pendingRegionCause = .other
+                    } else if previousSelection == nil && pendingRegionCause == .initial {
+                        pendingRegionCause = .initial
+                    } else {
+                        pendingRegionCause = .real
+                    }
+                    if shouldFocus {
+                        viewModel.focus(on: real)
+                    }
+                case let .poi(group):
+                    if let overrideCause {
+                        pendingRegionCause = overrideCause
+                    } else if pendingRegionCause == .initial {
+                        pendingRegionCause = .initial
+                    } else {
+                        pendingRegionCause = .poi
+                    }
+                    selectedRealId = nil
+                    if shouldFocus {
+                        viewModel.focus(on: group.ratedPOI)
+                    }
+                }
+                presentSequenceIfNeeded(shouldPresent)
+            }
+
+            let presentReal: (RealPost) -> Void = { real in
+                guard let item = storyItemForReal(real) else { return }
+                selectStoryItem(item, true, false, nil)
+            }
+
+            let ensureSelectionIfNeeded: () -> Void = {
+                if storyItems.isEmpty {
+                    selectedStoryId = nil
+                    selectedRealId = nil
+                    return
+                }
+                if let currentId = selectedStoryId,
+                   let currentItem = storyItemForId(currentId) {
+                    if case let .real(real) = currentItem.source {
+                        selectedRealId = real.id
+                    } else {
+                        selectedRealId = nil
+                    }
+                    return
+                }
+                if let first = storyItems.first {
+                    let override: RegionChangeCause = pendingRegionCause == .initial ? .initial : .other
+                    selectStoryItem(first, false, false, override)
+                }
+            }
 
             ZStack(alignment: .top) {
                 Map(position: $cameraPosition, interactionModes: .all) {
@@ -95,27 +179,25 @@ struct MapTalkView: View {
                             print("[MapTalkView] Pin tap poi=\(rated.poi.name) id=\(rated.id) hasRecent=\(rated.hasRecentPhotoShare) firstCheckInUser=\(handle?.uuidString ?? "nil")")
 #endif
                             let targetRegion = viewModel.region(for: rated)
+                            let cause: RegionChangeCause
                             if let region = currentRegion,
                                region.center.distance(to: targetRegion.center) < 1_000 {
-                                pendingRegionCause = .other
+                                cause = .other
                             } else {
-                                pendingRegionCause = .poi
+                                cause = .poi
                             }
-                            if let match = storyItems.first(where: { item in
-                                if case let .poi(group) = item.source {
-                                    return group.ratedPOI.id == rated.id
-                                }
-                                return false
-                            }) {
-                                selectedStoryId = match.id
+                            if let item = storyItemForPOI(rated) {
+                                selectStoryItem(item, true, false, cause)
                             } else {
+                                pendingRegionCause = cause
                                 selectedStoryId = nil
+                                selectedRealId = nil
+                                activeExperience = .poi(rated: rated, nonce: UUID())
+                                if isExperiencePresented == false {
+                                    isExperiencePresented = true
+                                }
+                                collapseDetent()
                             }
-                            activeExperience = .poi(rated: rated, nonce: UUID())
-                            if isExperiencePresented == false {
-                                isExperiencePresented = true
-                            }
-                            collapseDetent()
                         },
                         onSelectReal: { real in
                             presentReal(real)
@@ -140,23 +222,17 @@ struct MapTalkView: View {
                             items: storyItems,
                             selectedId: selectedStoryId,
                             onSelectReal: { real in
-                                pendingRegionCause = .real
-                                updateSelection(real, true)
-                                viewModel.focus(on: real)
+                                guard let item = storyItemForReal(real) else { return }
+                                selectStoryItem(item, true, true, nil)
                             },
                             onSelectPOIGroup: { group in
 #if DEBUG
                                 let userHandle = group.primarySharers.first?.user?.handle ?? "unknown"
                                 print("[MapTalkView] Row tap poi=\(group.poiName) id=\(group.ratedPOI.id) topSharer=\(userHandle) hasRecent=\(group.ratedPOI.hasRecentPhotoShare)")
 #endif
-                                pendingRegionCause = .poi
-                                selectedStoryId = group.id
-                                viewModel.focus(on: group.ratedPOI)
-                                activeExperience = .poi(rated: group.ratedPOI, nonce: UUID())
-                                if isExperiencePresented == false {
-                                    isExperiencePresented = true
+                                if let item = storyItemForPOI(group.ratedPOI) {
+                                    selectStoryItem(item, true, true, nil)
                                 }
-                                collapseDetent()
                             },
                             userProvider: viewModel.user(for:),
                             alignTrigger: reelAlignTrigger
@@ -202,37 +278,36 @@ struct MapTalkView: View {
                     let isExpanded = experienceDetent == .large
                     Group {
                         switch experience {
-                        case let .real(context: context, nonce: _):
-                            let pagerItems = context.items.map { item in
-                                ExperienceDetailView.ReelPager.Item(real: item.real, user: item.user)
-                            }
-                            let pager = ExperienceDetailView.ReelPager(
-                                items: pagerItems,
-                                initialId: context.currentId
-                            )
-                            let selectionBinding = Binding<UUID>(
-                                get: { selectedRealId ?? context.currentId },
-                                set: { newValue in
-                                    if let real = context.items.first(where: { $0.id == newValue })?.real {
-                                        pendingRegionCause = .real
-                                        updateSelection(real, false)
-                                        selectedStoryId = newValue
-                                        viewModel.focus(on: real)
+                        case .sequence:
+                            if sequenceItems.isEmpty == false {
+                                let pager = ExperienceDetailView.SequencePager(items: sequenceItems)
+                                let selectionBinding = Binding<UUID>(
+                                    get: {
+                                        if let current = selectedStoryId,
+                                           sequenceItems.contains(where: { $0.id == current }) {
+                                            return current
+                                        }
+                                        return sequenceItems.first!.id
+                                    },
+                                    set: { newValue in
+                                        guard let item = storyItemForId(newValue) else { return }
+                                        selectStoryItem(item, false, true, nil)
                                         reelAlignTrigger += 1
                                     }
-                                }
-                            )
-                            ExperienceDetailView(
-                                reelPager: pager,
-                                selection: selectionBinding,
-                                isExpanded: isExpanded,
-                                userProvider: viewModel.user(for:)
-                            )
+                                )
+                                ExperienceDetailView(
+                                    sequencePager: pager,
+                                    selection: selectionBinding,
+                                    isExpanded: isExpanded,
+                                    userProvider: viewModel.user(for:)
+                                )
+                            } else {
+                                EmptyView()
+                            }
                         case let .poi(rated: rated, nonce: nonce):
                             ExperienceDetailView(
                                 ratedPOI: rated,
                                 isExpanded: isExpanded,
-                                autoPresentRecentStories: rated.hasRecentPhotoShare,
                                 userProvider: viewModel.user(for:)
                             )
                             .id("\(rated.id)-\(nonce)")
@@ -253,43 +328,39 @@ struct MapTalkView: View {
                 pendingRegionCause = .initial
                 viewModel.onAppear()
                 controlsBottomPadding = baseControlsPadding
-                if selectedRealId == nil, let first = sortedReals.first {
-                    updateSelection(first, false)
-                }
+                ensureSelectionIfNeeded()
             }
             .onReceive(viewModel.$region.dropFirst()) { newRegion in
                 handleRegionChange(to: newRegion)
             }
-            .onChange(of: sortedReals.map(\.id)) { _ in
-                if sortedReals.isEmpty {
+            .onChangeCompat(of: storyItemIds) { ids in
+                if ids.isEmpty {
                     selectedRealId = nil
                     selectedStoryId = nil
                     activeExperience = nil
                     isExperiencePresented = false
                     return
                 }
-                if let currentId = selectedRealId,
-                   sortedReals.contains(where: { $0.id == currentId }) == false {
-                    selectedRealId = nil
-                    selectedStoryId = nil
-                }
-                if selectedRealId == nil, let first = sortedReals.first {
-                    updateSelection(first, false)
-                }
-            }
-            .onChange(of: storyItemIds) { ids in
-                guard let selectedId = selectedStoryId else { return }
-                if ids.contains(selectedId) == false {
-                    selectedStoryId = nil
+                if let currentId = selectedStoryId {
+                    if ids.contains(currentId) == false {
+                        if let first = storyItems.first {
+                            selectStoryItem(first, false, false, .other)
+                        } else {
+                            selectedStoryId = nil
+                            selectedRealId = nil
+                        }
+                    }
+                } else if let first = storyItems.first {
+                    selectStoryItem(first, false, false, .other)
                 }
             }
-            .onChange(of: isExperiencePresented) { isActive in
+            .onChangeCompat(of: isExperiencePresented) { isActive in
                 let target = isActive ? previewControlsPadding : baseControlsPadding
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                     controlsBottomPadding = target
                 }
             }
-            .onChange(of: experienceDetent) { detent in
+            .onChangeCompat(of: experienceDetent) { detent in
                 if detent == .fraction(0.25), isExperiencePresented {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                         controlsBottomPadding = previewControlsPadding
@@ -300,21 +371,21 @@ struct MapTalkView: View {
                     }
                 }
             }
-            .onChange(of: geometry.size) { _ in
+            .onChangeCompat(of: geometry.size) { _ in
                 let recalculatedBase = ControlsLayout.basePadding(for: geometry)
                 let recalculatedPreview = ControlsLayout.previewPadding(for: geometry)
                 let isElevated = controlsBottomPadding > recalculatedBase + 1
                 controlsBottomPadding = isElevated ? recalculatedPreview : recalculatedBase
             }
-            .onChange(of: baseControlsPadding) { newValue in
+            .onChangeCompat(of: baseControlsPadding) { newValue in
                 guard isExperiencePresented == false else { return }
                 controlsBottomPadding = newValue
             }
-            .onChange(of: previewControlsPadding) { newValue in
+            .onChangeCompat(of: previewControlsPadding) { newValue in
                 guard isExperiencePresented else { return }
                 controlsBottomPadding = newValue
             }
-            .onChange(of: viewModel.mode) { _ in
+            .onChangeCompat(of: viewModel.mode) { _ in
                 collapseDetent()
             }
         }
@@ -680,39 +751,20 @@ private struct MapTalkControls: View {
 }
 
 private enum ActiveExperience: Identifiable {
-    struct RealItem: Identifiable {
-        let real: RealPost
-        let user: User?
-
-        var id: UUID { real.id }
-    }
-
-    struct RealContext {
-        let items: [RealItem]
-        let currentId: UUID
-    }
-
-    case real(context: RealContext, nonce: UUID)
+    case sequence(nonce: UUID)
     case poi(rated: RatedPOI, nonce: UUID)
 
     var id: UUID {
         switch self {
-        case let .real(_, nonce):
+        case let .sequence(nonce):
             return nonce
         case let .poi(_, nonce):
             return nonce
         }
     }
 
-    var realContext: RealContext? {
-        if case let .real(context, _) = self {
-            return context
-        }
-        return nil
-    }
-
-    var realNonce: UUID? {
-        if case let .real(_, nonce) = self {
+    var sequenceNonce: UUID? {
+        if case let .sequence(nonce) = self {
             return nonce
         }
         return nil

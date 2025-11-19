@@ -82,7 +82,7 @@ struct RealStoriesRow: View {
                     }
                 }
             }
-            .onChange(of: alignTrigger) { _ in
+            .onChangeCompat(of: alignTrigger) { _ in
                 centerOnSelected(using: proxy, animated: true)
             }
         }

@@ -10,15 +10,10 @@ struct LikesAvatarGrid: View {
     let accentColor: Color
 
     @State private var viewerState: POIStoryViewerState?
-
-    private let columns: [GridItem] = {
-        let availableWidth = UIScreen.main.bounds.width - (ExperienceSheetLayout.engagementHorizontalInset * 2) - 16
-        let count = 6
-        let spacing: CGFloat = 8
-        let totalSpacing = spacing * CGFloat(count - 1)
-        let tileWidth = max((availableWidth - totalSpacing) / CGFloat(count), 34)
-        return Array(repeating: GridItem(.fixed(tileWidth), spacing: spacing), count: count)
-    }()
+    @State private var containerWidth: CGFloat = 0
+    private var columns: [GridItem] {
+        gridColumns(for: containerWidth)
+    }
     private let leadingInset: CGFloat = 16
 
     var body: some View {
@@ -49,6 +44,8 @@ struct LikesAvatarGrid: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, ExperienceSheetLayout.engagementHorizontalInset)
+        .background(ContainerWidthReader())
+        .onPreferenceChange(LikesAvatarGridWidthPreferenceKey.self) { containerWidth = $0 }
         .fullScreenCover(item: $viewerState) { state in
             POIStoryViewer(
                 contributors: storyContributors,
@@ -84,6 +81,34 @@ struct LikesAvatarGrid: View {
             map[contributor.id] = index
         }
         return map
+    }
+
+    private func gridColumns(for width: CGFloat) -> [GridItem] {
+        let count = 6
+        let spacing: CGFloat = 8
+        let adjustedWidth = max(width - (ExperienceSheetLayout.engagementHorizontalInset * 2) - leadingInset, 0)
+        let totalSpacing = spacing * CGFloat(count - 1)
+        let tileWidth = max((adjustedWidth - totalSpacing) / CGFloat(count), 34)
+        return Array(repeating: GridItem(.fixed(tileWidth), spacing: spacing), count: count)
+    }
+}
+
+private struct LikesAvatarGridWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 {
+            value = next
+        }
+    }
+}
+
+private struct ContainerWidthReader: View {
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear.preference(key: LikesAvatarGridWidthPreferenceKey.self, value: proxy.size.width)
+        }
     }
 }
 

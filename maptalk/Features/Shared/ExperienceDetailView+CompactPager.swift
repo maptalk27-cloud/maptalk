@@ -1,32 +1,7 @@
 import SwiftUI
 
-// MARK: - Compact reel pager
-
-extension ExperienceDetailView {
-struct CompactReelPager: View {
-    let pager: ExperienceDetailView.ReelPager
-    let selection: Binding<UUID>
-
-    var body: some View {
-        TabView(selection: selection) {
-            ForEach(pager.items) { item in
-                HeroSection(
-                    model: ExperienceDetailView.HeroSectionModel(
-                        real: item.real,
-                        user: item.user,
-                        displayNameOverride: nil,
-                        avatarCategory: nil,
-                        suppressContent: false
-                    ),
-                    style: .collapsed
-                )
-                .padding(.horizontal, 8)
-                .tag(item.id)
-            }
-        }
-        .tabViewStyle(.page(indexDisplayMode: .never))
-    }
-}
+typealias MediaDisplayItem = ExperienceDetailView.MediaDisplayItem
+typealias FriendEngagement = ExperienceDetailView.FriendEngagement
 
 struct CompactRealCard: View {
     enum Style {
@@ -87,7 +62,7 @@ struct CompactRealCard: View {
         .frame(maxWidth: .infinity)
         .fullScreenCover(isPresented: $isLightboxPresented) {
             if lightboxItems.isEmpty == false {
-                MediaLightbox(
+                ExperienceDetailView.MediaLightbox(
                     items: lightboxItems,
                     selection: $lightboxSelection,
                     accentColor: lightboxAccentColor,
@@ -560,7 +535,7 @@ struct FriendEngagementList: View {
                 }
             }
         }
-        .padding(.horizontal, ExperienceSheetLayout.engagementHorizontalInset)
+        .padding(.horizontal, ExperienceDetailView.ExperienceSheetLayout.engagementHorizontalInset)
     }
 }
 
@@ -695,5 +670,4 @@ struct FriendEngagementRow: View {
     private var timestampText: String? {
         entry.timestamp?.formatted(.relative(presentation: .named))
     }
-}
 }

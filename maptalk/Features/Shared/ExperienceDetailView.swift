@@ -8,20 +8,17 @@ struct ExperienceDetailView: View {
         case poi(RatedPOI)
     }
 
-    struct ReelPager {
+    struct SequencePager {
         struct Item: Identifiable {
-            let real: RealPost
-            let user: User?
-
-            var id: UUID { real.id }
+            let id: UUID
+            let mode: Mode
         }
 
         let items: [Item]
-        let initialId: UUID
     }
 
-    struct ReelContext {
-        let pager: ReelPager
+    struct SequenceContext {
+        let pager: SequencePager
         var selection: Binding<UUID>
     }
 
@@ -109,36 +106,30 @@ struct ExperienceDetailView: View {
     }
 
     let poi: RatedPOI?
-    let reelContext: ReelContext?
+    let sequenceContext: SequenceContext?
     let isExpanded: Bool
     let userProvider: (UUID) -> User?
-    let autoPresentRecentStories: Bool
-    @State var autoStoryViewerState: POIStoryViewerState?
-    @State var hasTriggeredAutoStory = false
 
     init(
         ratedPOI: RatedPOI,
         isExpanded: Bool,
-        autoPresentRecentStories: Bool = false,
         userProvider: @escaping (UUID) -> User? = { _ in nil }
     ) {
         self.poi = ratedPOI
-        self.reelContext = nil
+        self.sequenceContext = nil
         self.isExpanded = isExpanded
-        self.autoPresentRecentStories = autoPresentRecentStories
         self.userProvider = userProvider
     }
 
     init(
-        reelPager: ReelPager,
+        sequencePager: SequencePager,
         selection: Binding<UUID>,
         isExpanded: Bool,
         userProvider: @escaping (UUID) -> User? = { _ in nil }
     ) {
         self.poi = nil
-        self.reelContext = ReelContext(pager: reelPager, selection: selection)
+        self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
-        self.autoPresentRecentStories = false
         self.userProvider = userProvider
     }
 
@@ -157,24 +148,6 @@ struct ExperienceDetailView: View {
         .background(Color.black.ignoresSafeArea())
         .onAppear {
             logPOIDebug(event: "onAppear", data: currentData)
-            triggerAutoStoryIfNeeded(with: currentData)
-        }
-        .onChange(of: poi?.id) { _ in
-            autoStoryViewerState = nil
-            hasTriggeredAutoStory = false
-            guard autoPresentRecentStories else { return }
-            let latestData = contentData(for: currentMode)
-            logPOIDebug(event: "poiChanged", data: latestData)
-            triggerAutoStoryIfNeeded(with: latestData)
-        }
-        .fullScreenCover(item: $autoStoryViewerState) { state in
-            POIStoryViewer(
-                contributors: currentData.recentSharers,
-                initialIndex: state.contributorIndex,
-                accentColor: currentData.accentColor
-            ) {
-                autoStoryViewerState = nil
-            }
         }
     }
 }
@@ -184,7 +157,7 @@ extension ExperienceDetailView {
     func logPOIDebug(event: String, data: ContentData) {
         let currentPOI = poi?.poi.name ?? "nil"
         let sharers = data.recentSharers.count
-        print("[ExperienceDetailView] \(event) poi=\(currentPOI) id=\(poi?.id.uuidString ?? "nil") autoPresent=\(autoPresentRecentStories) sharers=\(sharers)")
+        print("[ExperienceDetailView] \(event) poi=\(currentPOI) id=\(poi?.id.uuidString ?? "nil") sharers=\(sharers)")
     }
 }
 #else
@@ -194,17 +167,18 @@ extension ExperienceDetailView {
 #endif
 
 #if DEBUG
+@MainActor
 struct ExperienceDetailView_Previews: PreviewProvider {
     static var previews: some View {
         let items = PreviewData.sampleReals.map {
-            ExperienceDetailView.ReelPager.Item(real: $0, user: PreviewData.user(for: $0.userId))
+            ExperienceDetailView.SequencePager.Item(
+                id: $0.id,
+                mode: .real($0, PreviewData.user(for: $0.userId))
+            )
         }
-        let pager = ExperienceDetailView.ReelPager(
-            items: items,
-            initialId: items.first!.id
-        )
+        let pager = ExperienceDetailView.SequencePager(items: items)
         ExperienceDetailView(
-            reelPager: pager,
+            sequencePager: pager,
             selection: .constant(items.first!.id),
             isExpanded: false,
             userProvider: PreviewData.user(for:)

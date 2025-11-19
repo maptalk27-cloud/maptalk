@@ -372,8 +372,9 @@ struct POIAvatar: View {
 
     var body: some View {
         let gradient = category.markerGradientColors
+        let corner = size * 0.22
         return ZStack {
-            Circle()
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: gradient,
@@ -382,13 +383,20 @@ struct POIAvatar: View {
                     )
                 )
                 .frame(width: size, height: size)
+                .rotationEffect(.degrees(45))
                 .shadow(color: accentColor.opacity(0.4), radius: 12, y: 6)
+                .overlay {
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .stroke(Color.white.opacity(0.35), lineWidth: 1.2)
+                        .rotationEffect(.degrees(45))
+                }
 
             Image(systemName: category.symbolName)
                 .font(.system(size: size * 0.42, weight: .bold))
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
         }
+        .frame(width: size, height: size)
     }
 }
 enum POIHeroLayout {
