@@ -5,19 +5,7 @@ struct ProfileView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Footprints") {
-                    Text("POI Moments: \(PreviewData.sampleRatedPOIs.count)")
-                    Text("Reals: \(PreviewData.sampleReals.count)")
-                }
-
-                Section("Preferences") {
-                    Toggle(isOn: .constant(true)) {
-                        Text("Anonymous interactions enabled")
-                    }
-                }
-            }
-            .navigationTitle("Profile")
+            ProfileHomeView(viewModel: viewModel)
         }
     }
 }

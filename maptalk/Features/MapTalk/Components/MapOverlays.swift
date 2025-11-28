@@ -5,8 +5,10 @@ struct MapOverlays: MapContent {
     let ratedPOIs: [RatedPOI]
     let reals: [RealPost]
     let userCoordinate: CLLocationCoordinate2D?
+    let currentUser: User
     let onSelectPOI: (RatedPOI) -> Void
     let onSelectReal: (RealPost) -> Void
+    let onSelectUser: () -> Void
 
     var body: some MapContent {
         ForEach(ratedPOIs) { rated in
@@ -44,8 +46,12 @@ struct MapOverlays: MapContent {
 
         if let userCoordinate {
             Annotation("", coordinate: userCoordinate) {
-                UserLocationMarker()
-                    .allowsHitTesting(false)
+                Button {
+                    onSelectUser()
+                } label: {
+                    ProfileAvatarView(user: currentUser, size: 48)
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -104,44 +110,6 @@ private struct RealAvatarMarker: View {
     }
 }
 
-private struct UserLocationMarker: View {
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            Theme.neonPrimary.opacity(0.9),
-                            Theme.neonPrimary.opacity(0.25)
-                        ],
-                        center: .center,
-                        startRadius: 6,
-                        endRadius: 36
-                    )
-                )
-
-            Circle()
-                .fill(.ultraThinMaterial)
-                .frame(width: 34, height: 34)
-                .overlay {
-                    Circle()
-                        .stroke(Color.white.opacity(0.6), lineWidth: 1.2)
-                }
-
-            Image(systemName: "person.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
-        }
-        .frame(width: 48, height: 48)
-        .overlay {
-            Circle()
-                .stroke(Theme.neonPrimary, lineWidth: 2)
-                .shadow(color: Theme.neonPrimary.opacity(0.5), radius: 10)
-        }
-        .modifier(Theme.neonGlow(Theme.neonPrimary))
-    }
-}
 
 private struct POICategoryMarker: View {
     let category: POICategory

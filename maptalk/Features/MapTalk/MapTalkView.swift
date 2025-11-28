@@ -6,6 +6,7 @@ import UIKit
 
 struct MapTalkView: View {
     @StateObject var viewModel: MapTalkViewModel
+    @Environment(\.appEnv) private var environment
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var selectedRealId: UUID?
     @State private var selectedStoryId: UUID?
@@ -17,6 +18,7 @@ struct MapTalkView: View {
     @State private var activeTransitionID: UUID?
     @State private var reelAlignTrigger: Int = 0
     @State private var controlsBottomPadding: CGFloat = 0
+    @State private var isProfilePresented: Bool = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -173,6 +175,7 @@ struct MapTalkView: View {
                         ratedPOIs: viewModel.ratedPOIs,
                         reals: viewModel.reals,
                         userCoordinate: viewModel.userCoordinate,
+                        currentUser: PreviewData.currentUser,
                         onSelectPOI: { rated in
 #if DEBUG
                             let handle = rated.checkIns.first?.userId
@@ -201,6 +204,9 @@ struct MapTalkView: View {
                         },
                         onSelectReal: { real in
                             presentReal(real)
+                        },
+                        onSelectUser: {
+                            isProfilePresented = true
                         }
                     )
                 }
@@ -318,6 +324,13 @@ struct MapTalkView: View {
                     .presentationSizing(.fitted)
                     .presentationCompactAdaptation(.none)
                     .applyBackgroundInteractionIfAvailable()
+                }
+            }
+            .fullScreenCover(isPresented: $isProfilePresented) {
+                NavigationStack {
+                        ProfileHomeView(
+                            viewModel: ProfileViewModel(environment: environment, context: .me)
+                        )
                 }
             }
             .onAppear {

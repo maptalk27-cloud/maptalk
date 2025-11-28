@@ -4,7 +4,7 @@ import Foundation
 enum PreviewData {
     static let currentUser: User = .init(
         id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1") ?? UUID(),
-        handle: "maptalk.me",
+        handle: "chengsi",
         avatarURL: URL(string: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=60")
     )
 
@@ -54,6 +54,176 @@ enum PreviewData {
     private static let generatedFriends: [User] = (0..<120).map { generatedFriend(index: $0) }
 
     static let sampleFriends: [User] = primaryFriends + generatedFriends
+
+    struct ChengsiMock {
+        let user: User
+        let pois: [RatedPOI]
+        let reels: [RealPost]
+    }
+
+    static let chengsi: ChengsiMock = {
+        let referenceDate = Date()
+
+        let neonPier = POI(
+            id: uuid(7001),
+            name: "Neon Pier Park",
+            coordinate: .init(latitude: 47.6101, longitude: -122.3459),
+            category: .nightlife
+        )
+
+        let harborStrata = POI(
+            id: uuid(7002),
+            name: "Harbor Strata Steps",
+            coordinate: .init(latitude: 47.6082, longitude: -122.3291),
+            category: .viewpoint
+        )
+
+        let chineMarket = POI(
+            id: uuid(7003),
+            name: "Chine Market Loft",
+            coordinate: .init(latitude: 47.6153, longitude: -122.3304),
+            category: .market
+        )
+
+        let recentFootprint = RatedPOI(
+            poi: neonPier,
+            highlight: "Clocktower lights pulse every 10 minutes.",
+            secondary: "Always dim summer breezes.",
+            media: [
+                RatedPOI.Media(kind: .photo(URL(string: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=760&q=60")!))
+            ],
+            checkIns: [
+                RatedPOI.CheckIn(
+                    id: uuid(9201),
+                    userId: currentUser.id,
+                    createdAt: referenceDate.addingTimeInterval(-45 * 60),
+                    endorsement: .hype,
+                    media: [],
+                    tag: .entertainment
+                )
+            ],
+            comments: [],
+            endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 0, meh: 0, questionable: 0),
+            tags: [
+                RatedPOI.TagStat(tag: .entertainment, count: 3),
+                RatedPOI.TagStat(tag: .explore, count: 1)
+            ],
+            isFavoritedByCurrentUser: true,
+            favoritesCount: 21
+        )
+
+        let pastFootprint = RatedPOI(
+            poi: harborStrata,
+            highlight: "Early morning drone loops.",
+            secondary: "South steps remain quiet in frost.",
+            media: [],
+            checkIns: [
+                RatedPOI.CheckIn(
+                    id: uuid(9202),
+                    userId: currentUser.id,
+                    createdAt: referenceDate.addingTimeInterval(-40 * 60 * 60),
+                    endorsement: .solid,
+                    media: [],
+                    tag: .explore
+                ),
+                RatedPOI.CheckIn(
+                    id: uuid(9203),
+                    userId: currentUser.id,
+                    createdAt: referenceDate.addingTimeInterval(-44 * 60 * 60),
+                    endorsement: .solid,
+                    media: [],
+                    tag: .express
+                )
+            ],
+            comments: [],
+            endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 2, meh: 0, questionable: 0),
+            tags: [
+                RatedPOI.TagStat(tag: .explore, count: 2)
+            ],
+            isFavoritedByCurrentUser: false,
+            favoritesCount: 9
+        )
+
+        let marketFootprint = RatedPOI(
+            poi: chineMarket,
+            highlight: "Market rooftop offers latte flights.",
+            secondary: "Sunset salsa happens weekly.",
+            media: [
+                RatedPOI.Media(kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=760&q=60")!))
+            ],
+            checkIns: [
+                RatedPOI.CheckIn(
+                    id: uuid(9204),
+                    userId: currentUser.id,
+                    createdAt: referenceDate.addingTimeInterval(-26 * 60 * 60),
+                    endorsement: .solid,
+                    media: [],
+                    tag: .explore
+                )
+            ],
+            comments: [],
+            endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 0, questionable: 0),
+            tags: [
+                RatedPOI.TagStat(tag: .explore, count: 1)
+            ],
+            isFavoritedByCurrentUser: true,
+            favoritesCount: 5
+        )
+
+        let recentReal = RealPost(
+            id: uuid(9101),
+            userId: currentUser.id,
+            center: .init(latitude: 47.6135, longitude: -122.3315),
+            radiusMeters: 520,
+            message: "Caught the midnight ferry glow with a film rig.",
+            attachments: [
+                .init(id: uuid(9102), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!))
+            ],
+            likes: [currentUser.id, sampleFriends[2].id],
+            comments: [
+                comment(
+                    9103,
+                    user: sampleFriends[0],
+                    text: "These reflections slay.",
+                    minutesAgo: 12,
+                    relativeTo: referenceDate
+                )
+            ],
+            visibility: .publicAll,
+            createdAt: referenceDate.addingTimeInterval(-60 * 35),
+            expiresAt: referenceDate.addingTimeInterval(14 * 3600)
+        )
+
+        let oldReal = RealPost(
+            id: uuid(9104),
+            userId: currentUser.id,
+            center: .init(latitude: 47.616, longitude: -122.328),
+            radiusMeters: 640,
+            message: "Rewinding the old neon run from last weekend.",
+            attachments: [
+                .init(id: uuid(9105), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")!))
+            ],
+            likes: [sampleFriends[1].id, sampleFriends[3].id],
+            comments: [
+                comment(
+                    9106,
+                    user: sampleFriends[1],
+                    text: "Still gives me chills.",
+                    minutesAgo: 60 * 30,
+                    relativeTo: referenceDate
+                )
+            ],
+            visibility: .friendsOnly,
+            createdAt: referenceDate.addingTimeInterval(-28 * 60 * 60),
+            expiresAt: referenceDate.addingTimeInterval(-4 * 3600)
+        )
+
+        return ChengsiMock(
+            user: currentUser,
+            pois: [recentFootprint, marketFootprint, pastFootprint],
+            reels: [recentReal, oldReal]
+        )
+    }()
 
     static let sampleRatedPOIs: [RatedPOI] = {
         let referenceDate = Date()
