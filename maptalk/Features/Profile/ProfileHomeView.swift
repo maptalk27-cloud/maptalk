@@ -38,10 +38,12 @@ struct ProfileHomeView: View {
                             reels: viewModel.reels,
                             region: viewModel.mapRegion
                         )
+                        .frame(maxWidth: .infinity)
                         .frame(height: mapHeight)
-                        .padding(.horizontal, 24)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .padding(.horizontal, 24)
 
                     ProfileWideButton(title: "Message")
                         .padding(.horizontal, 24)
