@@ -57,9 +57,20 @@ struct ProfileHomeView: View {
             ProfileMapDetailView(
                 pins: viewModel.mapPins,
                 reels: viewModel.reels,
+                footprints: viewModel.footprints,
                 region: viewModel.mapRegion,
+                userProvider: userProvider,
                 onDismiss: { isShowingMapDetail = false }
             )
+        }
+    }
+
+    private var userProvider: (UUID) -> User? {
+        { id in
+            if id == viewModel.identity.user.id {
+                return viewModel.identity.user
+            }
+            return PreviewData.user(for: id)
         }
     }
 
@@ -249,16 +260,27 @@ private struct ProfileMapPreview: View {
 private struct ProfileMapDetailView: View {
     let pins: [ProfileViewModel.MapPin]
     let reels: [RealPost]
+    let footprints: [ProfileViewModel.Footprint]
     let region: MKCoordinateRegion
+    let userProvider: (UUID) -> User?
     let onDismiss: () -> Void
 
     @State private var cameraPosition: MapCameraPosition
     @State private var sheetState: MapSheetState = .collapsed
 
-    init(pins: [ProfileViewModel.MapPin], reels: [RealPost], region: MKCoordinateRegion, onDismiss: @escaping () -> Void) {
+    init(
+        pins: [ProfileViewModel.MapPin],
+        reels: [RealPost],
+        footprints: [ProfileViewModel.Footprint],
+        region: MKCoordinateRegion,
+        userProvider: @escaping (UUID) -> User?,
+        onDismiss: @escaping () -> Void
+    ) {
         self.pins = pins
         self.reels = reels
+        self.footprints = footprints
         self.region = region
+        self.userProvider = userProvider
         self.onDismiss = onDismiss
         _cameraPosition = State(initialValue: .region(region))
     }
@@ -296,10 +318,36 @@ private struct ProfileMapDetailView: View {
                 .padding(.leading, 18)
             }
             .overlay(alignment: .bottom) {
-                ProfileMapBottomSheet(reels: reels, sheetState: $sheetState)
+                ProfileMapBottomSheet(entries: entries, userProvider: userProvider, sheetState: $sheetState)
             }
         }
         .background(Color.black)
+    }
+
+    private var entries: [Entry] {
+        let reelEntries = reels.map { real in
+            Entry(id: real.id, timestamp: real.createdAt, kind: .real(real))
+        }
+        let poiEntries = footprints.map { footprint in
+            Entry(
+                id: footprint.id,
+                timestamp: footprint.latestVisit ?? .distantPast,
+                kind: .poi(footprint.ratedPOI)
+            )
+        }
+        return (reelEntries + poiEntries)
+            .sorted { $0.timestamp > $1.timestamp }
+    }
+
+    struct Entry: Identifiable {
+        enum Kind {
+            case real(RealPost)
+            case poi(RatedPOI)
+        }
+
+        let id: UUID
+        let timestamp: Date
+        let kind: Kind
     }
 
     private func safeAreaTopInset() -> CGFloat {
@@ -318,11 +366,11 @@ private enum MapSheetState {
 }
 
 private struct ProfileMapBottomSheet: View {
-    let reels: [RealPost]
+    let entries: [ProfileMapDetailView.Entry]
+    let userProvider: (UUID) -> User?
     @Binding var sheetState: MapSheetState
     @GestureState private var dragOffset: CGFloat = 0
     @State private var headerHeight: CGFloat = 0
-    private let headerBuffer: CGFloat = 6
 
     var body: some View {
         GeometryReader { proxy in
@@ -348,16 +396,12 @@ private struct ProfileMapBottomSheet: View {
                             .font(.headline)
                             .foregroundStyle(.white)
                         Spacer()
-                        Text("\(reels.count)")
+                        Text("\(entries.count)")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.7))
                     }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 8)
-
-                    // Spacer(minLength: headerBuffer)
-                    //     .frame(maxWidth: .infinity)
-                    //     .accessibilityHidden(true)
                 }
                 .background(
                     GeometryReader { headerProxy in
@@ -365,9 +409,9 @@ private struct ProfileMapBottomSheet: View {
                     }
                 )
 
-                Divider().background(Color.white.opacity(0.1))
+                Divider().background(Color.white.opacity(0.12))
 
-                if reels.isEmpty {
+                if entries.isEmpty {
                     VStack(spacing: 6) {
                         Text("No posts yet")
                             .font(.subheadline)
@@ -379,13 +423,13 @@ private struct ProfileMapBottomSheet: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView(showsIndicators: false) {
-                        VStack(spacing: 16) {
-                            ForEach(reels) { real in
-                                ProfileMapListRow(real: real)
+                        VStack(spacing: 8) {
+                            ForEach(entries) { entry in
+                                ProfileMapListCard(entry: entry, userProvider: userProvider)
                                     .padding(.horizontal, 16)
                             }
-                            .padding(.top, 12)
-                            .padding(.bottom, 24)
+                            .padding(.top, 8)
+                            .padding(.bottom, 20)
                         }
                     }
                 }
@@ -393,7 +437,7 @@ private struct ProfileMapBottomSheet: View {
             .frame(width: proxy.size.width, height: maxHeight, alignment: .top)
             .background(
                 RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .fill(Color.black.opacity(0.86))
+                    .fill(Color.black.opacity(0.9))
                     .overlay(
                         RoundedRectangle(cornerRadius: 32, style: .continuous)
                             .stroke(Color.white.opacity(0.08), lineWidth: 1)
@@ -428,36 +472,70 @@ private struct ProfileMapBottomSheet: View {
     }
 }
 
-private struct ProfileMapListRow: View {
-    let real: RealPost
+private struct ProfileMapListCard: View {
+    let entry: ProfileMapDetailView.Entry
+    let userProvider: (UUID) -> User?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(real.message ?? "Shared moment")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                Spacer()
-            }
-            HStack(spacing: 12) {
-                Label {
-                    Text(real.createdAt, style: .relative)
-                } icon: {
-                    Image(systemName: "clock")
-                }
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.7))
+        cardContent
+            .background(cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.35), radius: 18, y: 8)
+    }
 
-                Spacer()
-
-                Label("\(real.metrics.likeCount)", systemImage: "hand.thumbsup.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-            Divider().background(Color.white.opacity(0.08))
+    @ViewBuilder
+    private var cardContent: some View {
+        switch entry.kind {
+        case let .real(real):
+            CompactRealCard(
+                real: real,
+                user: userProvider(real.userId),
+                style: .collapsed,
+                displayNameOverride: nil,
+                avatarCategory: nil,
+                suppressContent: false
+            )
+        case let .poi(rated):
+            ProfilePOICard(rated: rated)
         }
     }
+
+    private var cardBackground: some View {
+        let colors: [Color]
+        switch entry.kind {
+        case let .real(real):
+            colors = gradient(for: real.visibility)
+        case let .poi(rated):
+            let accent = rated.poi.category.accentColor
+            colors = [Color.black, accent.opacity(0.4)]
+        }
+        return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+            .overlay {
+                RadialGradient(
+                    colors: [Color.white.opacity(0.08), .clear],
+                    center: .topLeading,
+                    startRadius: 10,
+                    endRadius: 260
+                )
+                .blendMode(.screen)
+            }
+    }
+
+    private func gradient(for visibility: RealPost.Visibility) -> [Color] {
+        switch visibility {
+        case .publicAll:
+            return [Color.black, Theme.neonPrimary.opacity(0.25)]
+        case .friendsOnly:
+            return [Color.black, Theme.neonAccent.opacity(0.25)]
+        case .anonymous:
+            return [Color.black, Theme.neonWarning.opacity(0.25)]
+        }
+    }
+
 }
 
 private struct SheetHeaderHeightKey: PreferenceKey {
@@ -465,6 +543,92 @@ private struct SheetHeaderHeightKey: PreferenceKey {
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+private struct ProfilePOICard: View {
+    let rated: RatedPOI
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                categoryBadge
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(rated.poi.name)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(rated.poi.category.displayName)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                Spacer()
+                Label("\(rated.favoritesCount)", systemImage: "heart.fill")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+
+            if let highlight = rated.highlight {
+                Text(highlight)
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+            }
+            if let secondary = rated.secondary {
+                Text(secondary)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+
+            if rated.tags.isEmpty == false {
+                HStack(spacing: 8) {
+                    ForEach(Array(rated.tags.prefix(3))) { tag in
+                        Text("\(tag.tag.emoji) \(tag.tag.displayName)")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.white.opacity(0.12), in: Capsule())
+                    }
+                }
+            }
+
+            HStack(spacing: 12) {
+                statLabel(icon: "shoeprints.fill", value: rated.checkIns.count)
+                statLabel(icon: "text.bubble.fill", value: rated.comments.count)
+                statLabel(icon: "star.fill", value: rated.endorsements.hype + rated.endorsements.solid)
+                Spacer()
+            }
+            .padding(.top, 4)
+        }
+        .padding(20)
+    }
+
+    private var categoryBadge: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: rated.poi.category.markerGradientColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 48, height: 48)
+                .rotationEffect(.degrees(45))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.4), lineWidth: 1)
+                .frame(width: 48, height: 48)
+                .rotationEffect(.degrees(45))
+            Image(systemName: rated.poi.category.symbolName)
+                .font(.headline.weight(.bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 52, height: 52)
+    }
+
+    private func statLabel(icon: String, value: Int) -> some View {
+        Label("\(value)", systemImage: icon)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.85))
     }
 }
 

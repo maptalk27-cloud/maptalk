@@ -63,6 +63,12 @@ enum PreviewData {
 
     static let chengsi: ChengsiMock = {
         let referenceDate = Date()
+        let aurora = sampleFriends[0]
+        let night = sampleFriends[1]
+        let skyline = sampleFriends[2]
+        let bund = sampleFriends[3]
+        let hundredFriends = Array(sampleFriends.prefix(100))
+        let megaLikeList = hundredFriends.map(\.id)
 
         let neonPier = POI(
             id: uuid(7001),
@@ -83,6 +89,27 @@ enum PreviewData {
             name: "Chine Market Loft",
             coordinate: .init(latitude: 47.6153, longitude: -122.3304),
             category: .market
+        )
+
+        let laRooftop = POI(
+            id: uuid(7004),
+            name: "Downtown LA Skyline Deck",
+            coordinate: .init(latitude: 34.0522, longitude: -118.2437),
+            category: .nightlife
+        )
+
+        let londonFerry = POI(
+            id: uuid(7005),
+            name: "Thames Fog Ferry",
+            coordinate: .init(latitude: 51.5074, longitude: -0.1278),
+            category: .viewpoint
+        )
+
+        let bangkokAlley = POI(
+            id: uuid(7006),
+            name: "Charoen Alley Projections",
+            coordinate: .init(latitude: 13.7563, longitude: 100.5018),
+            category: .nightlife
         )
 
         let recentFootprint = RatedPOI(
@@ -170,6 +197,251 @@ enum PreviewData {
             favoritesCount: 5
         )
 
+        let laFootprint = RatedPOI(
+            poi: laRooftop,
+            highlight: "Rooftop synth loops as the skyline glows.",
+            secondary: "Neighbors project gradients onto smog.",
+            media: [
+                RatedPOI.Media(kind: .photo(URL(string: "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=760&q=60")!))
+            ],
+            checkIns: [
+                RatedPOI.CheckIn(
+                    id: uuid(9205),
+                    userId: currentUser.id,
+                    createdAt: referenceDate.addingTimeInterval(-38 * 60 * 60),
+                    endorsement: .hype,
+                    media: [],
+                    tag: .entertainment
+                )
+            ],
+            comments: [],
+            endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 0, meh: 0, questionable: 0),
+            tags: [RatedPOI.TagStat(tag: .entertainment, count: 2)],
+            isFavoritedByCurrentUser: true,
+            favoritesCount: 18
+        )
+
+        let londonFootprint = RatedPOI(
+            poi: londonFerry,
+            highlight: "Fog lasers turned the ferry deck into vapor.",
+            secondary: "Tea bar playlists drift across the river.",
+            media: [
+                RatedPOI.Media(kind: .photo(URL(string: "https://images.unsplash.com/photo-1505764706515-aa95265c5abc?auto=format&fit=crop&w=760&q=60")!))
+            ],
+            checkIns: [
+                RatedPOI.CheckIn(
+                    id: uuid(9206),
+                    userId: currentUser.id,
+                    createdAt: referenceDate.addingTimeInterval(-48 * 60 * 60),
+                    endorsement: .solid,
+                    media: [],
+                    tag: .explore
+                )
+            ],
+            comments: [],
+            endorsements: RatedPOI.EndorsementSummary(hype: 0, solid: 1, meh: 0, questionable: 0),
+            tags: [RatedPOI.TagStat(tag: .explore, count: 1)],
+            isFavoritedByCurrentUser: false,
+            favoritesCount: 7
+        )
+
+        let bangkokFootprint = RatedPOI(
+            poi: bangkokAlley,
+            highlight: "Tuk-tuk convoy projected pixel art on wet alleys.",
+            secondary: "Street vendors synced chimes to the visuals.",
+            media: [
+                RatedPOI.Media(kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=760&q=60")!))
+            ],
+            checkIns: [
+                RatedPOI.CheckIn(
+                    id: uuid(9207),
+                    userId: currentUser.id,
+                    createdAt: referenceDate.addingTimeInterval(-52 * 60 * 60),
+                    endorsement: .hype,
+                    media: [],
+                    tag: .express
+                )
+            ],
+            comments: [],
+            endorsements: RatedPOI.EndorsementSummary(hype: 1, solid: 0, meh: 0, questionable: 0),
+            tags: [RatedPOI.TagStat(tag: .express, count: 1)],
+            isFavoritedByCurrentUser: true,
+            favoritesCount: 11
+        )
+
+        let droneCountdownReal = RealPost(
+            id: uuid(101),
+            userId: currentUser.id,
+            center: .init(latitude: 47.61, longitude: -122.33),
+            radiusMeters: 600,
+            message: "Drone light show countdown on Pier 62.",
+            attachments: [
+                .init(
+                    id: uuid(1101),
+                    kind: .video(
+                        url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                        poster: URL(string: "https://images.unsplash.com/photo-1534447677768-be436bb09401?auto=format&fit=crop&w=900&q=60")
+                    )
+                ),
+                .init(id: uuid(1102), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")!)),
+                .init(id: uuid(1103), kind: .photo(URL(string: "https://images.unsplash.com/photo-1478720568477-152d9b164e26?auto=format&fit=crop&w=900&q=60")!)),
+                .init(id: uuid(1104), kind: .photo(URL(string: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=900&q=60")!))
+            ],
+            likes: megaLikeList,
+            comments: [
+                comment(
+                    3101,
+                    user: night,
+                    text: "Save me a vantage point!",
+                    minutesAgo: 14,
+                    relativeTo: referenceDate,
+                    replies: [
+                        reply(4101, user: skyline, text: "Posting clips later.", minutesAgo: 10, relativeTo: referenceDate),
+                        reply(4102, user: bund, text: "Tag me when you do.", minutesAgo: 9, relativeTo: referenceDate)
+                    ]
+                ),
+                comment(
+                    3102,
+                    user: bund,
+                    text: "Need to see that drone swarm IRL.",
+                    minutesAgo: 20,
+                    relativeTo: referenceDate,
+                    replies: [
+                        reply(4103, user: night, text: "Bring your long lens.", minutesAgo: 18, relativeTo: referenceDate)
+                    ]
+                ),
+                comment(
+                    3103,
+                    user: aurora,
+                    text: "City soundtrack is unreal tonight.",
+                    minutesAgo: 8,
+                    relativeTo: referenceDate,
+                    replies: [
+                        reply(4107, user: currentUser, text: "Capturing audio for later.", minutesAgo: 6, relativeTo: referenceDate)
+                    ]
+                )
+            ],
+            visibility: .friendsOnly,
+            createdAt: referenceDate,
+            expiresAt: referenceDate.addingTimeInterval(24 * 3600)
+        )
+
+        let stargazingReal = RealPost(
+            id: uuid(106),
+            userId: currentUser.id,
+            center: .init(latitude: 47.625, longitude: -122.35),
+            radiusMeters: 700,
+            message: "Stargazing circle sharing telescopes in Gas Works.",
+            attachments: [
+                .init(id: uuid(1451), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!)),
+                .init(id: uuid(1452), kind: .photo(URL(string: "https://images.unsplash.com/photo-1446776653964-20c1d3a81b06?auto=format&fit=crop&w=900&q=60")!))
+            ],
+            likes: [aurora.id, bund.id, skyline.id, night.id],
+            comments: [
+                comment(3151, user: skyline, text: "On my way north.", minutesAgo: 92, relativeTo: referenceDate),
+                comment(
+                    3152,
+                    user: bund,
+                    text: "Packing extra blankets for everyone.",
+                    minutesAgo: 85,
+                    relativeTo: referenceDate,
+                    replies: [
+                        reply(4112, user: currentUser, text: "Appreciate you!", minutesAgo: 83, relativeTo: referenceDate)
+                    ]
+                )
+            ],
+            visibility: .friendsOnly,
+            createdAt: referenceDate.addingTimeInterval(-18 * 3600),
+            expiresAt: referenceDate.addingTimeInterval(20 * 3600)
+        )
+
+        let moscowReal = RealPost(
+            id: uuid(112),
+            userId: currentUser.id,
+            center: .init(latitude: 55.7558, longitude: 37.6173),
+            radiusMeters: 620,
+            message: nil,
+            attachments: [
+                .init(id: uuid(1901), kind: .emoji("❄️")),
+                .init(id: uuid(1902), kind: .photo(URL(string: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=900&q=60")!)),
+                .init(id: uuid(1903), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!))
+            ],
+            likes: [bund.id, night.id, currentUser.id, aurora.id],
+            comments: [
+                comment(3211, user: aurora, text: "Sending cocoa asap.", minutesAgo: 16, relativeTo: referenceDate),
+                comment(3212, user: skyline, text: "Need that snow playlist.", minutesAgo: 12, relativeTo: referenceDate)
+            ],
+            visibility: .friendsOnly,
+            createdAt: referenceDate.addingTimeInterval(-18 * 3600),
+            expiresAt: referenceDate.addingTimeInterval(30 * 3600)
+        )
+
+        let laGlobalReal = RealPost(
+            id: uuid(116),
+            userId: currentUser.id,
+            center: .init(latitude: 34.0522, longitude: -118.2437),
+            radiusMeters: 700,
+            message: "Alley rooftop in DTLA beaming synth loops at sunset.",
+            attachments: [
+                .init(id: uuid(1910), kind: .photo(URL(string: "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(1911), kind: .photo(URL(string: "https://images.unsplash.com/photo-1497302347632-904729bc24aa?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(1912), kind: .photo(URL(string: "https://images.unsplash.com/photo-1478113988265-ff72cf1161fc?auto=format&fit=crop&w=1100&q=60")!))
+            ],
+            likes: [currentUser.id, aurora.id, bund.id],
+            comments: [
+                comment(3220, user: skyline, text: "Muted gold light is insane.", minutesAgo: 32, relativeTo: referenceDate),
+                comment(3221, user: bund, text: "Recording the whole set?", minutesAgo: 28, relativeTo: referenceDate)
+            ],
+            visibility: .publicAll,
+            createdAt: referenceDate.addingTimeInterval(-36 * 3600),
+            expiresAt: referenceDate.addingTimeInterval(26 * 3600)
+        )
+
+        let londonGlobalReal = RealPost(
+            id: uuid(117),
+            userId: currentUser.id,
+            center: .init(latitude: 51.5074, longitude: -0.1278),
+            radiusMeters: 640,
+            message: "River Thames ferry deck turned tea bar. Fog lasers!",
+            attachments: [
+                .init(id: uuid(1920), kind: .photo(URL(string: "https://images.unsplash.com/photo-1505764706515-aa95265c5abc?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(1921), kind: .photo(URL(string: "https://images.unsplash.com/photo-1523419409543-0c1df022bddb?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(1922), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(1923), kind: .emoji("☕️"))
+            ],
+            likes: [night.id, skyline.id, currentUser.id, bund.id],
+            comments: [
+                comment(3222, user: currentUser, text: "Shipping biscuits from Seattle.", minutesAgo: 44, relativeTo: referenceDate),
+                comment(3223, user: night, text: "Need those fog lasers at home.", minutesAgo: 41, relativeTo: referenceDate)
+            ],
+            visibility: .friendsOnly,
+            createdAt: referenceDate.addingTimeInterval(-48 * 3600),
+            expiresAt: referenceDate.addingTimeInterval(34 * 3600)
+        )
+
+        let bangkokGlobalReal = RealPost(
+            id: uuid(118),
+            userId: currentUser.id,
+            center: .init(latitude: 13.7563, longitude: 100.5018),
+            radiusMeters: 580,
+            message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
+            attachments: [
+                .init(id: uuid(1930), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(1931), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(1932), kind: .video(
+                    url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                    poster: URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")
+                ))
+            ],
+            likes: [currentUser.id, aurora.id],
+            comments: [
+                comment(3224, user: bund, text: "Pixel art crew is legendary.", minutesAgo: 52, relativeTo: referenceDate)
+            ],
+            visibility: .publicAll,
+            createdAt: referenceDate.addingTimeInterval(-52 * 3600),
+            expiresAt: referenceDate.addingTimeInterval(30 * 3600)
+        )
+
         let recentReal = RealPost(
             id: uuid(9101),
             userId: currentUser.id,
@@ -218,10 +490,74 @@ enum PreviewData {
             expiresAt: referenceDate.addingTimeInterval(-4 * 3600)
         )
 
+        let laReal = RealPost(
+            id: uuid(9107),
+            userId: currentUser.id,
+            center: .init(latitude: 34.0522, longitude: -118.2437),
+            radiusMeters: 700,
+            message: "Alley rooftop in DTLA beaming synth loops at sunset.",
+            attachments: [
+                .init(id: uuid(9108), kind: .photo(URL(string: "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(9109), kind: .photo(URL(string: "https://images.unsplash.com/photo-1497302347632-904729bc24aa?auto=format&fit=crop&w=1100&q=60")!))
+            ],
+            likes: [sampleFriends[4].id, sampleFriends[5].id],
+            comments: [],
+            visibility: .publicAll,
+            createdAt: referenceDate.addingTimeInterval(-36 * 60 * 60),
+            expiresAt: referenceDate.addingTimeInterval(26 * 3600)
+        )
+
+        let londonReal = RealPost(
+            id: uuid(9110),
+            userId: currentUser.id,
+            center: .init(latitude: 51.5074, longitude: -0.1278),
+            radiusMeters: 640,
+            message: "River Thames ferry deck turned tea bar. Fog lasers!",
+            attachments: [
+                .init(id: uuid(9111), kind: .photo(URL(string: "https://images.unsplash.com/photo-1505764706515-aa95265c5abc?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(9112), kind: .photo(URL(string: "https://images.unsplash.com/photo-1523419409543-0c1df022bddb?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(9113), kind: .emoji("☕️"))
+            ],
+            likes: [sampleFriends[6].id],
+            comments: [],
+            visibility: .friendsOnly,
+            createdAt: referenceDate.addingTimeInterval(-48 * 60 * 60),
+            expiresAt: referenceDate.addingTimeInterval(34 * 3600)
+        )
+
+        let bangkokReal = RealPost(
+            id: uuid(9114),
+            userId: currentUser.id,
+            center: .init(latitude: 13.7563, longitude: 100.5018),
+            radiusMeters: 620,
+            message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
+            attachments: [
+                .init(id: uuid(9115), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
+                .init(id: uuid(9116), kind: .video(
+                    url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                    poster: URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")
+                ))
+            ],
+            likes: [sampleFriends[7].id, sampleFriends[8].id],
+            comments: [],
+            visibility: .publicAll,
+            createdAt: referenceDate.addingTimeInterval(-52 * 60 * 60),
+            expiresAt: referenceDate.addingTimeInterval(30 * 3600)
+        )
+
         return ChengsiMock(
             user: currentUser,
-            pois: [recentFootprint, marketFootprint, pastFootprint],
-            reels: [recentReal, oldReal]
+            pois: [recentFootprint, marketFootprint, pastFootprint, laFootprint, londonFootprint, bangkokFootprint],
+            reels: [
+                droneCountdownReal,
+                stargazingReal,
+                moscowReal,
+                laGlobalReal,
+                londonGlobalReal,
+                bangkokGlobalReal,
+                recentReal,
+                oldReal
+            ]
         )
     }()
 
@@ -922,7 +1258,7 @@ enum PreviewData {
         let hundredFriends = Array(sampleFriends.prefix(100))
         let megaLikeList = hundredFriends.map(\.id)
 
-        return [
+        var reals: [RealPost] = [
             .init(
                 id: uuid(101),
                 userId: currentUser.id,
@@ -1416,8 +1752,76 @@ enum PreviewData {
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-18_000),
                 expiresAt: now.addingTimeInterval(30 * 3600)
+            ),
+            .init(
+                id: uuid(116),
+                userId: currentUser.id,
+                center: .init(latitude: 34.0522, longitude: -118.2437),
+                radiusMeters: 700,
+                message: "Alley rooftop in DTLA beaming synth loops at sunset.",
+                attachments: [
+                    .init(id: uuid(1910), kind: .photo(URL(string: "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1911), kind: .photo(URL(string: "https://images.unsplash.com/photo-1497302347632-904729bc24aa?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1912), kind: .photo(URL(string: "https://images.unsplash.com/photo-1478113988265-ff72cf1161fc?auto=format&fit=crop&w=1100&q=60")!))
+                ],
+                likes: [currentUser.id, aurora.id, bund.id],
+                comments: [
+                    comment(3220, user: skyline, text: "Muted gold light is insane.", minutesAgo: 32, relativeTo: now),
+                    comment(3221, user: bund, text: "Recording the whole set?", minutesAgo: 28, relativeTo: now)
+                ],
+                visibility: .publicAll,
+                createdAt: now.addingTimeInterval(-36_000),
+                expiresAt: now.addingTimeInterval(26 * 3600)
+            ),
+            .init(
+                id: uuid(117),
+                userId: currentUser.id,
+                center: .init(latitude: 51.5074, longitude: -0.1278),
+                radiusMeters: 640,
+                message: "River Thames ferry deck turned tea bar. Fog lasers!",
+                attachments: [
+                    .init(id: uuid(1920), kind: .photo(URL(string: "https://images.unsplash.com/photo-1505764706515-aa95265c5abc?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1921), kind: .photo(URL(string: "https://images.unsplash.com/photo-1523419409543-0c1df022bddb?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1922), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1923), kind: .emoji("☕️"))
+                ],
+                likes: [night.id, skyline.id, currentUser.id, bund.id],
+                comments: [
+                    comment(3222, user: currentUser, text: "Shipping biscuits from Seattle.", minutesAgo: 44, relativeTo: now),
+                    comment(3223, user: night, text: "Need those fog lasers at home.", minutesAgo: 41, relativeTo: now)
+                ],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-48_000),
+                expiresAt: now.addingTimeInterval(34 * 3600)
+            ),
+            .init(
+                id: uuid(118),
+                userId: currentUser.id,
+                center: .init(latitude: 13.7563, longitude: 100.5018),
+                radiusMeters: 580,
+                message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
+                attachments: [
+                    .init(id: uuid(1930), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1931), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!)),
+                    .init(id: uuid(1932), kind: .video(
+                        url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                        poster: URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")
+                    ))
+                ],
+                likes: [currentUser.id, aurora.id],
+                comments: [
+                    comment(3224, user: bund, text: "Pixel art crew is legendary.", minutesAgo: 52, relativeTo: now)
+                ],
+                visibility: .publicAll,
+                createdAt: now.addingTimeInterval(-52_000),
+                expiresAt: now.addingTimeInterval(30 * 3600)
             )
         ]
+
+        let chengsiIds = Set(chengsi.reels.map(\.id))
+        reals.removeAll { chengsiIds.contains($0.id) }
+        reals.insert(contentsOf: chengsi.reels, at: 0)
+        return reals
     }()
 
     static func user(for id: UUID) -> User? {
