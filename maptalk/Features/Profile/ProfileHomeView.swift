@@ -423,13 +423,11 @@ private struct ProfileMapBottomSheet: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView(showsIndicators: false) {
-                        VStack(spacing: 8) {
+                        VStack(spacing: 4) {
                             ForEach(entries) { entry in
                                 ProfileMapListCard(entry: entry, userProvider: userProvider)
-                                    .padding(.horizontal, 16)
                             }
-                            .padding(.top, 8)
-                            .padding(.bottom, 20)
+                            .padding(.vertical, 4)
                         }
                     }
                 }
@@ -479,12 +477,12 @@ private struct ProfileMapListCard: View {
     var body: some View {
         cardContent
             .background(cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .stroke(Color.white.opacity(0.1), lineWidth: 1)
             )
-            .shadow(color: Color.black.opacity(0.35), radius: 18, y: 8)
+            .shadow(color: Color.black.opacity(0.25), radius: 12, y: 6)
     }
 
     @ViewBuilder
