@@ -321,34 +321,49 @@ private struct ProfileMapBottomSheet: View {
     let reels: [RealPost]
     @Binding var sheetState: MapSheetState
     @GestureState private var dragOffset: CGFloat = 0
+    @State private var headerHeight: CGFloat = 0
+    private let headerBuffer: CGFloat = 6
 
     var body: some View {
         GeometryReader { proxy in
-            let maxHeight = min(proxy.size.height * 0.65, 520)
-            let minHeight: CGFloat = 110
-            let collapsedOffset = maxHeight - minHeight
+            let totalHeight = proxy.size.height
+            let maxHeight = max(totalHeight, 320)
+            let defaultPeek = max(totalHeight / 12, 72)
+            let peekHeight = min(max(headerHeight, defaultPeek), maxHeight)
+            let collapsedOffset = max(maxHeight - peekHeight, 0)
             let baseOffset = sheetState == .collapsed ? collapsedOffset : 0
             let rawOffset = baseOffset + dragOffset
             let offset = min(max(rawOffset, 0), collapsedOffset)
 
             VStack(spacing: 0) {
-                Capsule()
-                    .fill(Color.white.opacity(0.4))
-                    .frame(width: 44, height: 5)
-                    .padding(.top, 10)
+                VStack(spacing: 0) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.4))
+                        .frame(width: 44, height: 5)
+                        .padding(.top, 10)
+                        .padding(.bottom, 8)
+
+                    HStack {
+                        Text("Posts")
+                            .font(.headline)
+                            .foregroundStyle(.white)
+                        Spacer()
+                        Text("\(reels.count)")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                    .padding(.horizontal, 20)
                     .padding(.bottom, 8)
 
-                HStack {
-                    Text("Posts")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    Spacer()
-                    Text("\(reels.count)")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.7))
+                    // Spacer(minLength: headerBuffer)
+                    //     .frame(maxWidth: .infinity)
+                    //     .accessibilityHidden(true)
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
+                .background(
+                    GeometryReader { headerProxy in
+                        Color.clear.preference(key: SheetHeaderHeightKey.self, value: headerProxy.size.height)
+                    }
+                )
 
                 Divider().background(Color.white.opacity(0.1))
 
@@ -407,6 +422,9 @@ private struct ProfileMapBottomSheet: View {
             )
         }
         .ignoresSafeArea(edges: .bottom)
+        .onPreferenceChange(SheetHeaderHeightKey.self) { value in
+            headerHeight = value
+        }
     }
 }
 
@@ -439,6 +457,14 @@ private struct ProfileMapListRow: View {
             }
             Divider().background(Color.white.opacity(0.08))
         }
+    }
+}
+
+private struct SheetHeaderHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
