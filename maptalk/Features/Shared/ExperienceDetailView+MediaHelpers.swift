@@ -58,27 +58,7 @@ extension ExperienceDetailView {
     }
 
     static func mediaDescriptor(for real: RealPost) -> String? {
-        let counts = mediaCounts(for: real.attachments)
-        var segments: [String] = []
-
-        if counts.photos > 0 {
-            segments.append(counts.photos == 1 ? "1 photo" : "\(counts.photos) photos")
-        }
-        if counts.videos > 0 {
-            segments.append(counts.videos == 1 ? "1 video" : "\(counts.videos) videos")
-        }
-        if counts.emojis > 0 {
-            segments.append(counts.emojis == 1 ? "1 emoji" : "\(counts.emojis) emoji")
-        }
-
-        if segments.isEmpty {
-            if let message = real.message?.trimmingCharacters(in: .whitespacesAndNewlines),
-               message.isEmpty == false {
-                return "Shared a note"
-            }
-            return nil
-        }
-
-        return "Shared \(segments.joined(separator: " · "))"
+        // Suppress derived “Shared X” descriptors; rely on explicit text or visibility badges elsewhere.
+        return nil
     }
 }

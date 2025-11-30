@@ -1831,6 +1831,33 @@ enum PreviewData {
         return sampleFriends.first { $0.id == id }
     }
 
+    static func profileRatedPOIs(for user: User, customPOIs: [RatedPOI]) -> [RatedPOI] {
+        let sanitized: [RatedPOI] = sampleRatedPOIs.compactMap { rated in
+            let userVisits = rated.checkIns.filter { $0.userId == user.id }
+            guard userVisits.isEmpty == false else { return nil }
+
+            var copy = rated
+            copy.checkIns = userVisits
+            copy.media = []
+            copy.comments = []
+            copy.endorsements = RatedPOI.EndorsementSummary(hype: 0, solid: 0, meh: 0, questionable: 0)
+            copy.favoritesCount = 0
+            copy.isFavoritedByCurrentUser = rated.isFavoritedByCurrentUser
+            return copy
+        }
+
+        var merged: [UUID: RatedPOI] = [:]
+        for rated in sanitized {
+            merged[rated.id] = rated
+        }
+        for custom in customPOIs {
+            merged[custom.id] = custom
+        }
+
+        return Array(merged.values)
+            .sorted { $0.poi.name.localizedCaseInsensitiveCompare($1.poi.name) == .orderedAscending }
+    }
+
     private static func poiCheckIn(
         _ seed: Int,
         user: User,

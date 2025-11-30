@@ -156,8 +156,9 @@ final class ProfileViewModel: ObservableObject {
     }
 
     private func loadFeed(_ feed: PreviewData.ChengsiMock) {
-        let matchedFootprints: [Footprint] = feed.pois.map { RatedPOI in
-            Footprint(ratedPOI: RatedPOI, visits: RatedPOI.checkIns)
+        let ratedForProfile = PreviewData.profileRatedPOIs(for: feed.user, customPOIs: feed.pois)
+        let matchedFootprints: [Footprint] = ratedForProfile.map { rated in
+            Footprint(ratedPOI: rated, visits: rated.checkIns)
         }
 
         footprints = matchedFootprints

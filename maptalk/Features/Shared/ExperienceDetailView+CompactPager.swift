@@ -15,6 +15,7 @@ struct CompactRealCard: View {
     let displayNameOverride: String?
     let avatarCategory: POICategory?
     let suppressContent: Bool
+    let hideHeader: Bool
 
     @State private var isLightboxPresented = false
     @State private var lightboxSelection: UUID
@@ -25,7 +26,8 @@ struct CompactRealCard: View {
         style: Style = .standard,
         displayNameOverride: String? = nil,
         avatarCategory: POICategory? = nil,
-        suppressContent: Bool = false
+        suppressContent: Bool = false,
+        hideHeader: Bool = false
     ) {
         self.real = real
         self.user = user
@@ -33,17 +35,22 @@ struct CompactRealCard: View {
         self.displayNameOverride = displayNameOverride
         self.avatarCategory = avatarCategory
         self.suppressContent = suppressContent
+        self.hideHeader = hideHeader
         _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            avatarView
-                .alignmentGuide(.top) { $0[.top] }
-                .padding(.trailing, 10)
+            if showHeader {
+                avatarView
+                    .alignmentGuide(.top) { $0[.top] }
+                    .padding(.trailing, 10)
+            }
 
             VStack(alignment: .leading, spacing: 12) {
-                userNameRow
+                if showHeader {
+                    userNameRow
+                }
 
                 if suppressContent == false {
                     contentText
@@ -80,19 +87,26 @@ struct CompactRealCard: View {
         style == .collapsed ? 12 : 22
     }
 
-    private var headerTopPadding: CGFloat { 40 }
+    private var headerTopPadding: CGFloat {
+        hideHeader ? 14 : 40
+    }
 
     private var avatarSize: CGFloat {
         style == .collapsed ? 34 : 40
     }
 
     private var mediaHeight: CGFloat {
-        style == .collapsed ? 88 : 120
+        if style == .collapsed {
+            return hideHeader ? 112 : 96
+        }
+        return 120
     }
 
     private var mediaSpacing: CGFloat { 10 }
 
     private var standardTileSize: CGFloat { 88 }
+
+    private var showHeader: Bool { hideHeader == false }
 
     private var lightboxItems: [MediaDisplayItem] {
         real.attachments.map { attachment in
@@ -225,9 +239,10 @@ struct CompactRealCard: View {
 
     private var collapsedMediaStrip: some View {
         GeometryReader { proxy in
-            let totalSpacing = mediaSpacing * 2
-            let calculatedWidth = max((proxy.size.width - totalSpacing) / 3, 0)
-            let size = min(calculatedWidth, mediaHeight)
+            let visibleCount = max(min(collageSources.count, 3), 1)
+            let totalSpacing = mediaSpacing * CGFloat(visibleCount - 1)
+            let calculatedWidth = max((proxy.size.width - totalSpacing) / CGFloat(visibleCount), 0)
+            let size = min(calculatedWidth, mediaHeight).rounded(.down)
 
             HStack(spacing: mediaSpacing) {
                 ForEach(Array(collageSources.enumerated()), id: \.offset) { element in

@@ -58,6 +58,7 @@ struct ProfileHomeView: View {
                 pins: viewModel.mapPins,
                 reels: viewModel.reels,
                 footprints: viewModel.footprints,
+                profileUser: viewModel.identity.user,
                 region: viewModel.mapRegion,
                 userProvider: userProvider,
                 onDismiss: { isShowingMapDetail = false }
@@ -240,6 +241,9 @@ private struct ProfileMapPreview: View {
                 MapCircle(center: real.center, radius: real.radiusMeters)
                     .foregroundStyle(Theme.neonPrimary.opacity(0.18))
                     .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
+                Annotation("", coordinate: real.center) {
+                    RealMapThumbnail(real: real, user: PreviewData.user(for: real.userId), size: 38)
+                }
             }
             ForEach(pins) { pin in
                 Annotation("", coordinate: pin.coordinate) {
@@ -261,17 +265,20 @@ private struct ProfileMapDetailView: View {
     let pins: [ProfileViewModel.MapPin]
     let reels: [RealPost]
     let footprints: [ProfileViewModel.Footprint]
+    let profileUser: User
     let region: MKCoordinateRegion
     let userProvider: (UUID) -> User?
     let onDismiss: () -> Void
 
     @State private var cameraPosition: MapCameraPosition
     @State private var sheetState: MapSheetState = .collapsed
+    @State private var filter: MapListFilter = .all
 
     init(
         pins: [ProfileViewModel.MapPin],
         reels: [RealPost],
         footprints: [ProfileViewModel.Footprint],
+        profileUser: User,
         region: MKCoordinateRegion,
         userProvider: @escaping (UUID) -> User?,
         onDismiss: @escaping () -> Void
@@ -279,6 +286,7 @@ private struct ProfileMapDetailView: View {
         self.pins = pins
         self.reels = reels
         self.footprints = footprints
+        self.profileUser = profileUser
         self.region = region
         self.userProvider = userProvider
         self.onDismiss = onDismiss
@@ -290,12 +298,15 @@ private struct ProfileMapDetailView: View {
             let topInset = safeAreaTopInset()
             ZStack(alignment: .topLeading) {
                 Map(position: $cameraPosition, interactionModes: .all) {
-                    ForEach(reels) { real in
+                    ForEach(filteredReels) { real in
                         MapCircle(center: real.center, radius: real.radiusMeters)
                             .foregroundStyle(Theme.neonPrimary.opacity(0.18))
                             .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
+                        Annotation("", coordinate: real.center) {
+                            RealMapThumbnail(real: real, user: userProvider(real.userId), size: 44)
+                        }
                     }
-                    ForEach(pins) { pin in
+                    ForEach(filteredPins) { pin in
                         Annotation("", coordinate: pin.coordinate) {
                             ProfileMapMarker(category: pin.category)
                         }
@@ -318,7 +329,13 @@ private struct ProfileMapDetailView: View {
                 .padding(.leading, 18)
             }
             .overlay(alignment: .bottom) {
-                ProfileMapBottomSheet(entries: entries, userProvider: userProvider, sheetState: $sheetState)
+                ProfileMapBottomSheet(
+                    entries: entries,
+                    profileUser: profileUser,
+                    userProvider: userProvider,
+                    sheetState: $sheetState,
+                    filter: $filter
+                )
             }
         }
         .background(Color.black)
@@ -337,6 +354,24 @@ private struct ProfileMapDetailView: View {
         }
         return (reelEntries + poiEntries)
             .sorted { $0.timestamp > $1.timestamp }
+    }
+
+    private var filteredReels: [RealPost] {
+        switch filter {
+        case .all, .reel:
+            return reels
+        case .poi:
+            return []
+        }
+    }
+
+    private var filteredPins: [ProfileViewModel.MapPin] {
+        switch filter {
+        case .all, .poi:
+            return pins
+        case .reel:
+            return []
+        }
     }
 
     struct Entry: Identifiable {
@@ -365,12 +400,23 @@ private enum MapSheetState {
     case expanded
 }
 
+private enum MapListFilter: String, CaseIterable {
+    case all = "All"
+    case poi = "POI"
+    case reel = "Reel"
+}
+
 private struct ProfileMapBottomSheet: View {
     let entries: [ProfileMapDetailView.Entry]
+    let profileUser: User
     let userProvider: (UUID) -> User?
     @Binding var sheetState: MapSheetState
+    @Binding var filter: MapListFilter
     @GestureState private var dragOffset: CGFloat = 0
     @State private var headerHeight: CGFloat = 0
+    @State private var isFilterMenuPresented = false
+    @State private var filterButtonFrame: CGRect = .zero
+    @State private var dropdownSize: CGSize = .zero
 
     var body: some View {
         GeometryReader { proxy in
@@ -392,11 +438,9 @@ private struct ProfileMapBottomSheet: View {
                         .padding(.bottom, 8)
 
                     HStack {
-                        Text("Posts")
-                            .font(.headline)
-                            .foregroundStyle(.white)
+                        filterButton
                         Spacer()
-                        Text("\(entries.count)")
+                        Text("\(filteredEntries.count)")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.7))
                     }
@@ -424,8 +468,12 @@ private struct ProfileMapBottomSheet: View {
                 } else {
                     ScrollView(showsIndicators: false) {
                         VStack(spacing: 4) {
-                            ForEach(entries) { entry in
-                                ProfileMapListCard(entry: entry, userProvider: userProvider)
+                            ForEach(filteredEntries) { entry in
+                                ProfileMapListCard(
+                                    entry: entry,
+                                    profileUser: profileUser,
+                                    userProvider: userProvider
+                                )
                             }
                             .padding(.vertical, 4)
                         }
@@ -467,21 +515,157 @@ private struct ProfileMapBottomSheet: View {
         .onPreferenceChange(SheetHeaderHeightKey.self) { value in
             headerHeight = value
         }
+        .coordinateSpace(name: "SheetArea")
+        .overlay(alignment: .topLeading) {
+            if isFilterMenuPresented {
+                ZStack(alignment: .topLeading) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                isFilterMenuPresented = false
+                            }
+                        }
+                    filterDropdown
+                        .padding(.leading, filterButtonFrame.minX)
+                        .padding(.top, dropdownTopOffset)
+                }
+            }
+        }
+    }
+
+    private var filteredEntries: [ProfileMapDetailView.Entry] {
+        switch filter {
+        case .all:
+            return entries
+        case .poi:
+            return entries.filter {
+                if case .poi = $0.kind { return true }
+                return false
+            }
+        case .reel:
+            return entries.filter {
+                if case .real = $0.kind { return true }
+                return false
+            }
+        }
+    }
+
+    private var filterButton: some View {
+        Button {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                isFilterMenuPresented.toggle()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text("Posts • \(filter.rawValue)")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Image(systemName: isFilterMenuPresented ? "chevron.up" : "chevron.down")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: FilterButtonFrameKey.self,
+                    value: proxy.frame(in: .named("SheetArea"))
+                )
+            }
+        )
+        .onPreferenceChange(FilterButtonFrameKey.self) { frame in
+            filterButtonFrame = frame
+        }
+    }
+
+    private var filterDropdown: some View {
+        VStack(spacing: 0) {
+            ForEach(MapListFilter.allCases, id: \.self) { option in
+                Button {
+                    filter = option
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        isFilterMenuPresented = false
+                    }
+                } label: {
+                    HStack {
+                        Text(option.rawValue)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                        Spacer()
+                        if option == filter {
+                            Image(systemName: "checkmark")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white.opacity(0.9))
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if option != MapListFilter.allCases.last {
+                    Divider().background(Color.white.opacity(0.12))
+                }
+            }
+        }
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.35), radius: 10, y: 6)
+        .frame(width: dropdownWidth, alignment: .leading)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: FilterDropdownSizeKey.self,
+                    value: proxy.size
+                )
+            }
+        )
+        .onPreferenceChange(FilterDropdownSizeKey.self) { size in
+            if size != .zero {
+                dropdownSize = size
+            }
+        }
+    }
+
+    private var dropdownTopOffset: CGFloat {
+        let gap: CGFloat = 6
+        if sheetState == .collapsed {
+            let target = filterButtonFrame.minY - dropdownSize.height - gap
+            return max(target, 0)
+        }
+        return filterButtonFrame.maxY + gap
+    }
+
+    private var dropdownWidth: CGFloat {
+        let minWidth: CGFloat = 120
+        return max(minWidth, filterButtonFrame.width + 12)
     }
 }
 
 private struct ProfileMapListCard: View {
     let entry: ProfileMapDetailView.Entry
+    let profileUser: User
     let userProvider: (UUID) -> User?
 
     var body: some View {
         cardContent
             .background(cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
-            )
+            .overlay(Rectangle().stroke(Color.white.opacity(0.1), lineWidth: 1))
             .shadow(color: Color.black.opacity(0.25), radius: 12, y: 6)
     }
 
@@ -495,10 +679,15 @@ private struct ProfileMapListCard: View {
                 style: .collapsed,
                 displayNameOverride: nil,
                 avatarCategory: nil,
-                suppressContent: false
+                suppressContent: false,
+                hideHeader: true
             )
         case let .poi(rated):
-            ProfilePOICard(rated: rated)
+            ProfilePOICard(
+                rated: rated,
+                profileUser: profileUser,
+                userProvider: userProvider
+            )
         }
     }
 
@@ -544,60 +733,64 @@ private struct SheetHeaderHeightKey: PreferenceKey {
     }
 }
 
+private struct FilterButtonFrameKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next != .zero {
+            value = next
+        }
+    }
+}
+
+private struct FilterDropdownSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next != .zero {
+            value = next
+        }
+    }
+}
+
 private struct ProfilePOICard: View {
     let rated: RatedPOI
+    let profileUser: User
+    let userProvider: (UUID) -> User?
+
+    @State private var isStoryViewerPresented = false
+    @State private var storyStartIndex: Int = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
                 categoryBadge
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(rated.poi.name)
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
+                        .lineLimit(1)
                     Text(rated.poi.category.displayName)
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
                 }
                 Spacer()
-                Label("\(rated.favoritesCount)", systemImage: "heart.fill")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.white.opacity(0.8))
-            }
-
-            if let highlight = rated.highlight {
-                Text(highlight)
-                    .font(.subheadline)
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-            }
-            if let secondary = rated.secondary {
-                Text(secondary)
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-
-            if rated.tags.isEmpty == false {
-                HStack(spacing: 8) {
-                    ForEach(Array(rated.tags.prefix(3))) { tag in
-                        Text("\(tag.tag.emoji) \(tag.tag.displayName)")
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.white.opacity(0.12), in: Capsule())
-                    }
+                if hasStory {
+                    storyAvatar
                 }
             }
 
             HStack(spacing: 12) {
                 statLabel(icon: "shoeprints.fill", value: rated.checkIns.count)
                 statLabel(icon: "text.bubble.fill", value: rated.comments.count)
-                statLabel(icon: "star.fill", value: rated.endorsements.hype + rated.endorsements.solid)
-                Spacer()
+                statLabel(icon: "heart.fill", value: rated.favoritesCount)
             }
-            .padding(.top, 4)
+            .padding(.top, 2)
         }
-        .padding(20)
+        .padding(14)
     }
 
     private var categoryBadge: some View {
@@ -610,17 +803,162 @@ private struct ProfilePOICard: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .frame(width: 48, height: 48)
+                .frame(width: 38, height: 38)
                 .rotationEffect(.degrees(45))
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.white.opacity(0.4), lineWidth: 1)
-                .frame(width: 48, height: 48)
+                .frame(width: 38, height: 38)
                 .rotationEffect(.degrees(45))
             Image(systemName: rated.poi.category.symbolName)
-                .font(.headline.weight(.bold))
+                .font(.subheadline.weight(.bold))
                 .foregroundStyle(.white)
         }
-        .frame(width: 52, height: 52)
+        .frame(width: 42, height: 42)
+    }
+
+    private var storyAvatar: some View {
+        let size: CGFloat = 36
+        let ringWidth: CGFloat = 2
+
+        return Button {
+            storyStartIndex = initialContributorIndex
+            isStoryViewerPresented = true
+        } label: {
+            Group {
+                if let url = currentUser.avatarURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image.resizable().scaledToFill()
+                        case .empty:
+                            ProgressView()
+                        default:
+                            avatarFallback
+                        }
+                    }
+                } else {
+                    avatarFallback
+                }
+            }
+            .frame(width: size - (ringWidth * 2), height: size - (ringWidth * 2))
+            .clipShape(Circle())
+            .overlay {
+                Circle().stroke(Color.white.opacity(0.35), lineWidth: 1)
+            }
+            .padding(ringWidth)
+            .background(
+                Circle()
+                    .stroke(hasStory ? Color.gray.opacity(0.85) : Color.white.opacity(0.18), lineWidth: ringWidth)
+            )
+            .background(
+                Circle()
+                    .fill(Color.black.opacity(0.4))
+            )
+        }
+        .buttonStyle(.plain)
+        .opacity(hasStory ? 1 : 0.65)
+        .fullScreenCover(isPresented: $isStoryViewerPresented) {
+            ExperienceDetailView.POIStoryViewer(
+                contributors: storyContributors,
+                initialIndex: storyStartIndex,
+                accentColor: rated.poi.category.accentColor
+            ) {
+                isStoryViewerPresented = false
+            }
+            .preferredColorScheme(.dark)
+        }
+    }
+
+    private var currentUser: User {
+        userProvider(profileUser.id) ?? profileUser
+    }
+
+    private var initialContributorIndex: Int {
+        if let index = storyContributors.firstIndex(where: { $0.userId == profileUser.id }) {
+            return index
+        }
+        return 0
+    }
+
+    private var hasStory: Bool {
+        storyContributors.isEmpty == false
+    }
+
+    private var storyContributors: [ExperienceDetailView.POIStoryContributor] {
+        let mediaCheckIns = rated.checkIns.filter { checkIn in
+            checkIn.media.contains(where: isStoryEligible)
+        }
+        if mediaCheckIns.isEmpty == false {
+            let grouped = Dictionary(grouping: mediaCheckIns, by: { $0.userId })
+            let contributors: [ExperienceDetailView.POIStoryContributor] = grouped.compactMap { userId, entries in
+                let sortedEntries = entries.sorted { $0.createdAt < $1.createdAt }
+                let items: [ExperienceDetailView.POIStoryContributor.Item] = sortedEntries.flatMap { checkIn in
+                    checkIn.media.compactMap { media in
+                        guard let displayItem = mediaDisplayItem(media) else { return nil }
+                        return ExperienceDetailView.POIStoryContributor.Item(
+                            id: media.id,
+                            media: displayItem,
+                            timestamp: checkIn.createdAt
+                        )
+                    }
+                }
+                guard items.isEmpty == false else { return nil }
+                let mostRecent = sortedEntries.map(\.createdAt).max() ?? Date()
+                return ExperienceDetailView.POIStoryContributor(
+                    id: userId,
+                    userId: userId,
+                    user: userProvider(userId),
+                    items: items,
+                    mostRecent: mostRecent
+                )
+            }
+
+            return contributors.sorted { $0.mostRecent > $1.mostRecent }
+        }
+
+        let mediaItems: [ExperienceDetailView.POIStoryContributor.Item] = rated.media.compactMap { media in
+            guard let displayItem = mediaDisplayItem(media) else { return nil }
+            return ExperienceDetailView.POIStoryContributor.Item(
+                id: media.id,
+                media: displayItem,
+                timestamp: Date()
+            )
+        }
+        guard mediaItems.isEmpty == false else { return [] }
+
+        return [
+            ExperienceDetailView.POIStoryContributor(
+                id: profileUser.id,
+                userId: profileUser.id,
+                user: currentUser,
+                items: mediaItems,
+                mostRecent: Date()
+            )
+        ]
+    }
+
+    private func isStoryEligible(_ media: RatedPOI.Media) -> Bool {
+        switch media.kind {
+        case .photo, .video:
+            return true
+        }
+    }
+
+    private func mediaDisplayItem(_ media: RatedPOI.Media) -> ExperienceDetailView.MediaDisplayItem? {
+        switch media.kind {
+        case let .photo(url):
+            return ExperienceDetailView.MediaDisplayItem(id: media.id, content: .photo(url))
+        case let .video(url, poster):
+            return ExperienceDetailView.MediaDisplayItem(id: media.id, content: .video(url: url, poster: poster))
+        }
+    }
+
+    private var avatarFallback: some View {
+        Text(String(profileUser.handle.prefix(2)).uppercased())
+            .font(.caption.bold())
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.gray.opacity(0.45))
     }
 
     private func statLabel(icon: String, value: Int) -> some View {
@@ -669,5 +1007,87 @@ private struct RoundedCorners: Shape {
             cornerRadii: CGSize(width: radius, height: radius)
         )
         return Path(path.cgPath)
+    }
+}
+
+private struct RealMapThumbnail: View {
+    let real: RealPost
+    let user: User?
+    var size: CGFloat = 40
+
+    private var mediaURL: URL? {
+        for attachment in real.attachments {
+            switch attachment.kind {
+            case let .photo(url):
+                return url
+            case let .video(_, poster):
+                if let poster { return poster }
+            case .emoji:
+                continue
+            }
+        }
+        return nil
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.black.opacity(0.45))
+                .overlay {
+                    Circle().stroke(Color.white.opacity(0.2), lineWidth: 1)
+                }
+
+            if let url = mediaURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFill()
+                    case .empty:
+                        ProgressView()
+                    case .failure:
+                        avatarFallback
+                    @unknown default:
+                        avatarFallback
+                    }
+                }
+                .clipShape(Circle())
+            } else if let avatar = user?.avatarURL {
+                AsyncImage(url: avatar) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFill()
+                    case .empty:
+                        ProgressView()
+                    case .failure:
+                        avatarFallback
+                    @unknown default:
+                        avatarFallback
+                    }
+                }
+                .clipShape(Circle())
+            } else {
+                avatarFallback
+            }
+        }
+        .frame(width: size, height: size)
+        .overlay {
+            Circle()
+                .stroke(Theme.neonPrimary.opacity(0.7), lineWidth: 2)
+        }
+        .shadow(color: Color.black.opacity(0.45), radius: 6, y: 3)
+    }
+
+    private var avatarFallback: some View {
+        Text(initials)
+            .font(.caption.bold())
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.gray.opacity(0.4))
+            .clipShape(Circle())
+    }
+
+    private var initials: String {
+        guard let handle = user?.handle else { return "PO" }
+        return String(handle.prefix(2)).uppercased()
     }
 }
