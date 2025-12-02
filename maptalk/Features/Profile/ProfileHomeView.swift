@@ -12,8 +12,10 @@ struct ProfileHomeView: View {
             let topInset = safeAreaTop()
             let heroHeightHint = proxy.size.height * 0.42
             let horizontalPadding: CGFloat = 8
-            let availableWidth = proxy.size.width - (horizontalPadding * 2)
-            let mapHeight = min(availableWidth, proxy.size.height * 0.55)
+            let safeWidth = proxy.size.width.isFinite ? proxy.size.width : 0
+            let safeHeight = proxy.size.height.isFinite ? proxy.size.height : 0
+            let availableWidth = max(0, safeWidth - (horizontalPadding * 2))
+            let mapHeight = max(1, min(availableWidth, safeHeight * 0.55))
 
             ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea()
@@ -270,18 +272,30 @@ private struct ProfileMapPreview: View {
     }
 
     var body: some View {
+        let showDetails = ProfileMapAnnotationZoomHelper.isClose(distance: globeDistance)
+
         Map(position: $cameraPosition, interactionModes: []) {
             ForEach(reels) { real in
-                MapCircle(center: real.center, radius: real.radiusMeters)
-                    .foregroundStyle(Theme.neonPrimary.opacity(0.18))
-                    .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
+                if showDetails {
+                    MapCircle(center: real.center, radius: real.radiusMeters)
+                        .foregroundStyle(Theme.neonPrimary.opacity(0.18))
+                        .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
+                }
                 Annotation("", coordinate: real.center) {
-                    RealMapThumbnail(real: real, user: PreviewData.user(for: real.userId), size: 38)
+                    if showDetails {
+                        RealMapThumbnail(real: real, user: PreviewData.user(for: real.userId), size: 38)
+                    } else {
+                        ProfileMapReelHeartMarker()
+                    }
                 }
             }
             ForEach(pins) { pin in
                 Annotation("", coordinate: pin.coordinate) {
-                    ProfileMapMarker(category: pin.category)
+                    if showDetails {
+                        ProfileMapMarker(category: pin.category)
+                    } else {
+                        ProfileMapDotMarker(category: pin.category)
+                    }
                 }
             }
         }
@@ -307,7 +321,9 @@ private struct ProfileMapPreview: View {
             startPhase(.north, resetLongitude: true)
         }
         while !Task.isCancelled {
-            await stepSpin()
+            await MainActor.run {
+                stepSpin()
+            }
             do {
                 try await Task.sleep(nanoseconds: frameDelay)
             } catch {
@@ -449,6 +465,7 @@ private struct ProfileMapDetailView: View {
     @State private var lastCenter: CLLocationCoordinate2D
     @State private var sheetState: MapSheetState = .collapsed
     @State private var filter: MapListFilter = .all
+    @State private var isShowingDetailedAnnotations: Bool
     private let globeDistance: CLLocationDistance = 20_000_000
 
     init(
@@ -469,6 +486,7 @@ private struct ProfileMapDetailView: View {
         self.onDismiss = onDismiss
         _cameraPosition = State(initialValue: .region(region))
         _lastCenter = State(initialValue: region.center)
+        _isShowingDetailedAnnotations = State(initialValue: ProfileMapAnnotationZoomHelper.isClose(region: region))
     }
 
     var body: some View {
@@ -477,16 +495,26 @@ private struct ProfileMapDetailView: View {
             ZStack(alignment: .topLeading) {
                 Map(position: $cameraPosition, interactionModes: .all) {
                     ForEach(filteredReels) { real in
-                        MapCircle(center: real.center, radius: real.radiusMeters)
-                            .foregroundStyle(Theme.neonPrimary.opacity(0.18))
-                            .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
+                        if isShowingDetailedAnnotations {
+                            MapCircle(center: real.center, radius: real.radiusMeters)
+                                .foregroundStyle(Theme.neonPrimary.opacity(0.18))
+                                .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
+                        }
                         Annotation("", coordinate: real.center) {
-                            RealMapThumbnail(real: real, user: userProvider(real.userId), size: 44)
+                            if isShowingDetailedAnnotations {
+                                RealMapThumbnail(real: real, user: userProvider(real.userId), size: 44)
+                            } else {
+                                ProfileMapReelHeartMarker()
+                            }
                         }
                     }
                     ForEach(filteredPins) { pin in
                         Annotation("", coordinate: pin.coordinate) {
-                            ProfileMapMarker(category: pin.category)
+                            if isShowingDetailedAnnotations {
+                                ProfileMapMarker(category: pin.category)
+                            } else {
+                                ProfileMapDotMarker(category: pin.category)
+                            }
                         }
                     }
                 }
@@ -494,6 +522,10 @@ private struct ProfileMapDetailView: View {
                 .mapStyle(activeMapStyle)
                 .onMapCameraChange(frequency: .continuous) { context in
                     lastCenter = context.region.center
+                    let shouldShowDetails = ProfileMapAnnotationZoomHelper.isClose(region: context.region)
+                    if shouldShowDetails != isShowingDetailedAnnotations {
+                        isShowingDetailedAnnotations = shouldShowDetails
+                    }
                 }
 
                 Button {
@@ -1211,6 +1243,41 @@ private struct ProfilePOICard: View {
     }
 }
 
+private struct ProfileMapDotMarker: View {
+    let category: POICategory
+
+    var body: some View {
+        let size: CGFloat = 12
+        let dotColor = category.accentColor
+        Circle()
+            .fill(dotColor)
+            .frame(width: size, height: size)
+            .shadow(color: dotColor.opacity(0.45), radius: 4, y: 1)
+    }
+}
+
+private struct ProfileMapReelHeartMarker: View {
+    var body: some View {
+        let innerSize: CGFloat = 18
+        let glowSize: CGFloat = 26
+        let corePink = Color(red: 1.0, green: 0.35, blue: 0.62)
+        ZStack {
+            Circle()
+                .fill(corePink)
+                .frame(width: innerSize, height: innerSize)
+            Circle()
+                .stroke(corePink.opacity(0.65), lineWidth: 2.5)
+                .frame(width: glowSize, height: glowSize)
+                .blur(radius: 5)
+                .opacity(0.9)
+            Image(systemName: "heart.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .shadow(color: corePink.opacity(0.5), radius: 8, y: 3)
+    }
+}
+
 private struct ProfileMapMarker: View {
     let category: POICategory
 
@@ -1332,5 +1399,34 @@ private struct RealMapThumbnail: View {
     private var initials: String {
         guard let handle = user?.handle else { return "PO" }
         return String(handle.prefix(2)).uppercased()
+    }
+}
+
+private enum ProfileMapAnnotationZoomHelper {
+    private static let detailRevealMeters: CLLocationDistance = 18_000
+
+    static func isClose(distance: CLLocationDistance?) -> Bool {
+        guard let distance else { return false }
+        return distance <= detailRevealMeters
+    }
+
+    static func isClose(region: MKCoordinateRegion) -> Bool {
+        maxSpanMeters(for: region) <= detailRevealMeters
+    }
+
+    private static func maxSpanMeters(for region: MKCoordinateRegion) -> CLLocationDistance {
+        let center = region.center
+        let halfLat = region.span.latitudeDelta / 2
+        let halfLon = region.span.longitudeDelta / 2
+
+        let west = CLLocation(latitude: center.latitude, longitude: center.longitude - halfLon)
+        let east = CLLocation(latitude: center.latitude, longitude: center.longitude + halfLon)
+        let horizontal = west.distance(from: east)
+
+        let north = CLLocation(latitude: center.latitude + halfLat, longitude: center.longitude)
+        let south = CLLocation(latitude: center.latitude - halfLat, longitude: center.longitude)
+        let vertical = north.distance(from: south)
+
+        return max(horizontal, vertical)
     }
 }
