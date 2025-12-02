@@ -10,8 +10,10 @@ struct ProfileHomeView: View {
     var body: some View {
         GeometryReader { proxy in
             let topInset = safeAreaTop()
-            let heroHeightHint = proxy.size.height * 0.45
-            let mapHeight = min(220, proxy.size.height * 0.3)
+            let heroHeightHint = proxy.size.height * 0.42
+            let horizontalPadding: CGFloat = 8
+            let availableWidth = proxy.size.width - (horizontalPadding * 2)
+            let mapHeight = min(availableWidth, proxy.size.height * 0.55)
 
             ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea()
@@ -36,17 +38,18 @@ struct ProfileHomeView: View {
                         ProfileMapPreview(
                             pins: viewModel.mapPins,
                             reels: viewModel.reels,
-                            region: viewModel.mapRegion
+                            region: viewModel.mapRegion,
+                            isActive: isShowingMapDetail == false
                         )
                         .frame(maxWidth: .infinity)
                         .frame(height: mapHeight)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, horizontalPadding)
 
                     ProfileWideButton(title: "Message")
-                        .padding(.horizontal, 24)
+                        .padding(.horizontal, horizontalPadding)
                 }
                 .frame(maxWidth: .infinity, alignment: .top)
                 .padding(.bottom, 24)
@@ -152,7 +155,7 @@ private struct ProfileHeroHeader: View {
                             .foregroundStyle(.white.opacity(0.85))
                             .lineLimit(2)
                         HStack(spacing: 12) {
-                            ProfileStatChip(title: "Spots", value: summary.footprintCount)
+                            ProfileStatChip(title: "POI", value: summary.footprintCount)
                             ProfileStatChip(title: "Reels", value: summary.reelCount)
                         }
                     }
@@ -225,20 +228,39 @@ private struct ProfileMapPreview: View {
     let pins: [ProfileViewModel.MapPin]
     let reels: [RealPost]
     let region: MKCoordinateRegion
+    let isActive: Bool
 
     @State private var cameraPosition: MapCameraPosition
     @State private var spinLongitude: CLLocationDegrees
-    @State private var spinTimer: Timer?
+    @State private var spinPhase: SpinPhase = .north
+    @State private var ticksRemaining: Int = 0
+    @State private var phaseTicksTotal: Int = 0
 
     private let spinLatitude: CLLocationDegrees
     private let globeDistance: CLLocationDistance = 20_000_000
-    private let spinDuration: TimeInterval = 5
-    private let spinFrameInterval: TimeInterval = 1.0 / 30.0
+    private let spinDuration: TimeInterval = 20
+    private let spinFrameInterval: TimeInterval = 1.0 / 60.0
+    private let transitionDuration: TimeInterval = 3.5
+    private var spinFrameNanoseconds: UInt64 {
+        UInt64((spinFrameInterval * 1_000_000_000).rounded())
+    }
+    private var rotationTicks: Int {
+        Int((spinDuration / spinFrameInterval).rounded())
+    }
+    private var latitudeTransitionTicks: Int {
+        Int((transitionDuration / spinFrameInterval).rounded())
+    }
 
-    init(pins: [ProfileViewModel.MapPin], reels: [RealPost], region: MKCoordinateRegion) {
+    init(
+        pins: [ProfileViewModel.MapPin],
+        reels: [RealPost],
+        region: MKCoordinateRegion,
+        isActive: Bool
+    ) {
         self.pins = pins
         self.reels = reels
         self.region = region
+        self.isActive = isActive
         let latitude = Self.clampedLatitude(region.center.latitude)
         spinLatitude = latitude
         let startingLongitude = Self.wrappedLongitude(region.center.longitude)
@@ -263,6 +285,7 @@ private struct ProfileMapPreview: View {
                 }
             }
         }
+        .mapStyle(hybridMapStyle)
         .allowsHitTesting(false)
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
@@ -270,37 +293,43 @@ private struct ProfileMapPreview: View {
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.4), radius: 16, x: 0, y: 10)
-        .onAppear {
-            startGlobeSpin()
+        .task(id: isActive) {
+            guard isActive else { return }
+            await spinContinuously()
         }
-        .onDisappear {
-            stopGlobeSpin()
+        .animation(nil, value: cameraPosition)
+        .environment(\.colorScheme, .light)
+    }
+
+    private func spinContinuously() async {
+        let frameDelay = spinFrameNanoseconds
+        await MainActor.run {
+            startPhase(.north, resetLongitude: true)
+        }
+        while !Task.isCancelled {
+            await stepSpin()
+            do {
+                try await Task.sleep(nanoseconds: frameDelay)
+            } catch {
+                break
+            }
         }
     }
 
-    private func startGlobeSpin() {
-        guard spinTimer == nil else { return }
-        let timer = Timer(timeInterval: spinFrameInterval, repeats: true) { _ in
-            advanceSpin()
+    @MainActor
+    private func stepSpin() {
+        if ticksRemaining <= 0 {
+            let next = nextPhase(after: spinPhase)
+            startPhase(next, resetLongitude: false)
         }
-        timer.tolerance = spinFrameInterval * 0.25
-        RunLoop.main.add(timer, forMode: .common)
-        spinTimer = timer
-    }
-
-    private func stopGlobeSpin() {
-        spinTimer?.invalidate()
-        spinTimer = nil
-    }
-
-    private func advanceSpin() {
         let delta = spinDegreesPerTick
         let nextLongitude = Self.wrappedLongitude(spinLongitude + delta)
         spinLongitude = nextLongitude
-        let camera = Self.makeCamera(latitude: spinLatitude, longitude: nextLongitude, distance: globeDistance)
-        withAnimation(.linear(duration: spinFrameInterval)) {
+        let camera = Self.makeCamera(latitude: currentLatitude, longitude: nextLongitude, distance: globeDistance)
+        withTransaction(Transaction(animation: nil)) {
             cameraPosition = .camera(camera)
         }
+        ticksRemaining -= 1
     }
 
     private var spinDegreesPerTick: CLLocationDegrees {
@@ -320,6 +349,37 @@ private struct ProfileMapPreview: View {
         max(min(latitude, 70), -70)
     }
 
+    private var currentLatitude: CLLocationDegrees {
+        // Bias orbits toward the equator; north/south ranges overlap more for smoother swaps
+        let northMagnitude = min(max(abs(spinLatitude), 20), 40)
+        let southMagnitude = min(max(abs(spinLatitude), 15), 35)
+        switch spinPhase {
+        case .north:
+            return northMagnitude
+        case .south:
+            return -southMagnitude
+        case .transitionToSouth:
+            let total = max(phaseTicksTotal, 1)
+            let progress = easedProgress(1 - (Double(ticksRemaining) / Double(total)))
+            let start = northMagnitude
+            let end = -southMagnitude
+            return start + (end - start) * progress
+        case .transitionToNorth:
+            let total = max(phaseTicksTotal, 1)
+            let progress = easedProgress(1 - (Double(ticksRemaining) / Double(total)))
+            let start = -southMagnitude
+            let end = northMagnitude
+            return start + (end - start) * progress
+        }
+    }
+
+    private var hybridMapStyle: MapStyle {
+        if #available(iOS 17.0, *) {
+            return .hybrid(elevation: .realistic)
+        }
+        return .hybrid
+    }
+
     private static func wrappedLongitude(_ longitude: CLLocationDegrees) -> CLLocationDegrees {
         var value = longitude
         if value > 180 {
@@ -328,6 +388,50 @@ private struct ProfileMapPreview: View {
             value += 360
         }
         return value
+    }
+
+    @MainActor
+    private func startPhase(_ phase: SpinPhase, resetLongitude: Bool) {
+        spinPhase = phase
+        switch phase {
+        case .north, .south:
+            ticksRemaining = rotationTicks
+            phaseTicksTotal = rotationTicks
+        case .transitionToSouth, .transitionToNorth:
+            ticksRemaining = latitudeTransitionTicks
+            phaseTicksTotal = latitudeTransitionTicks
+        }
+        if resetLongitude {
+            let startLongitude = Self.wrappedLongitude(region.center.longitude)
+            spinLongitude = startLongitude
+        }
+        let camera = Self.makeCamera(latitude: currentLatitude, longitude: spinLongitude, distance: globeDistance)
+        cameraPosition = .camera(camera)
+    }
+
+    private func nextPhase(after phase: SpinPhase) -> SpinPhase {
+        switch phase {
+        case .north:
+            return .transitionToSouth
+        case .transitionToSouth:
+            return .south
+        case .south:
+            return .transitionToNorth
+        case .transitionToNorth:
+            return .north
+        }
+    }
+
+    private func easedProgress(_ linear: Double) -> Double {
+        // Smoothstep easing to avoid robotic motion
+        return linear * linear * (3 - 2 * linear)
+    }
+
+    private enum SpinPhase {
+        case north
+        case transitionToSouth
+        case south
+        case transitionToNorth
     }
 }
 
@@ -341,7 +445,7 @@ private struct ProfileMapDetailView: View {
     let onDismiss: () -> Void
 
     @State private var cameraPosition: MapCameraPosition
-    @State private var isGlobeView: Bool = true
+    @State private var isGlobeView: Bool = false
     @State private var lastCenter: CLLocationCoordinate2D
     @State private var sheetState: MapSheetState = .collapsed
     @State private var filter: MapListFilter = .all
@@ -363,13 +467,7 @@ private struct ProfileMapDetailView: View {
         self.region = region
         self.userProvider = userProvider
         self.onDismiss = onDismiss
-        let initialCamera = MapCamera(
-            centerCoordinate: region.center,
-            distance: globeDistance,
-            heading: 0,
-            pitch: 0
-        )
-        _cameraPosition = State(initialValue: .camera(initialCamera))
+        _cameraPosition = State(initialValue: .region(region))
         _lastCenter = State(initialValue: region.center)
     }
 
@@ -409,7 +507,7 @@ private struct ProfileMapDetailView: View {
                         .clipShape(Circle())
                         .shadow(color: Color.black.opacity(0.4), radius: 8)
                 }
-                .padding(.top, topInset + 12)
+                .padding(.top, topInset - 25)
                 .padding(.leading, 18)
             }
             .overlay(alignment: .bottom) {
@@ -423,7 +521,7 @@ private struct ProfileMapDetailView: View {
             }
             .overlay(alignment: .topTrailing) {
                 globeToggle
-                    .padding(.top, topInset + 12)
+                    .padding(.top, topInset - 25)
                     .padding(.trailing, 18)
             }
         }
