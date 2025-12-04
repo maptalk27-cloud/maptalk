@@ -275,25 +275,28 @@ private struct ProfileMapPreview: View {
         let showDetails = ProfileMapAnnotationZoomHelper.isClose(distance: globeDistance)
 
         Map(position: $cameraPosition, interactionModes: []) {
-            ForEach(reels) { real in
-                if showDetails {
+            if showDetails {
+                ForEach(reels) { real in
                     MapCircle(center: real.center, radius: real.radiusMeters)
                         .foregroundStyle(Theme.neonPrimary.opacity(0.18))
                         .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
-                }
-                Annotation("", coordinate: real.center) {
-                    if showDetails {
+                    Annotation("", coordinate: real.center) {
                         RealMapThumbnail(real: real, user: PreviewData.user(for: real.userId), size: 38)
-                    } else {
-                        ProfileMapReelHeartMarker()
                     }
                 }
-            }
-            ForEach(pins) { pin in
-                Annotation("", coordinate: pin.coordinate) {
-                    if showDetails {
+                ForEach(pins) { pin in
+                    Annotation("", coordinate: pin.coordinate) {
                         ProfileMapMarker(category: pin.category)
-                    } else {
+                    }
+                }
+            } else {
+                ForEach(reels) { real in
+                    Annotation("", coordinate: real.center) {
+                        ProfileCollapsedReelMarker(real: real)
+                    }
+                }
+                ForEach(pins) { pin in
+                    Annotation("", coordinate: pin.coordinate) {
                         ProfileMapDotMarker(category: pin.category)
                     }
                 }
@@ -1247,34 +1250,152 @@ private struct ProfileMapDotMarker: View {
     let category: POICategory
 
     var body: some View {
-        let size: CGFloat = 12
-        let dotColor = category.accentColor
+        let size: CGFloat = 9
+        let dotColor = category.accentColor.opacity(0.9)
         Circle()
             .fill(dotColor)
             .frame(width: size, height: size)
-            .shadow(color: dotColor.opacity(0.45), radius: 4, y: 1)
+            .overlay {
+                Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.6)
+            }
+            .shadow(color: dotColor.opacity(0.55), radius: 4, y: 1.5)
+    }
+}
+
+private struct ProfileMapClusterMarker: View {
+    let poiCount: Int
+    let reelCount: Int
+
+    var body: some View {
+        VStack(spacing: 6) {
+            if reelCount > 0 {
+                clusterChip(
+                    icon: "heart.fill",
+                    color: Color.pink,
+                    count: reelCount
+                )
+            }
+            if poiCount > 0 {
+                clusterChip(
+                    icon: "circle.fill",
+                    color: Color.white.opacity(0.9),
+                    count: poiCount
+                )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(.ultraThinMaterial)
+        )
+        .overlay {
+            Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.35), radius: 8, y: 3)
+    }
+
+    private func clusterChip(icon: String, color: Color, count: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.caption.bold())
+                .foregroundStyle(color)
+            Text("\(count)")
+                .font(.caption.bold())
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.55))
+        )
     }
 }
 
 private struct ProfileMapReelHeartMarker: View {
     var body: some View {
-        let innerSize: CGFloat = 18
-        let glowSize: CGFloat = 26
+        let innerSize: CGFloat = 21
+        let glowSize: CGFloat = 25
         let corePink = Color(red: 1.0, green: 0.35, blue: 0.62)
         ZStack {
             Circle()
                 .fill(corePink)
                 .frame(width: innerSize, height: innerSize)
             Circle()
-                .stroke(corePink.opacity(0.65), lineWidth: 2.5)
+                .stroke(corePink.opacity(0.65), lineWidth: 3)
                 .frame(width: glowSize, height: glowSize)
                 .blur(radius: 5)
                 .opacity(0.9)
             Image(systemName: "heart.fill")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
         }
         .shadow(color: corePink.opacity(0.5), radius: 8, y: 3)
+    }
+}
+
+private struct ProfileCollapsedReelMarker: View {
+    let real: RealPost
+
+    private var thumbnailURL: URL? {
+        for attachment in real.attachments {
+            switch attachment.kind {
+            case let .photo(url):
+                return url
+            case let .video(_, poster):
+                if let poster { return poster }
+            case .emoji:
+                continue
+            }
+        }
+        return nil
+    }
+
+    var body: some View {
+        let circleSize: CGFloat = 26
+        let lineHeight: CGFloat = 20
+        let totalHeight = circleSize + lineHeight
+
+        VStack(spacing: 0) {
+            if let url = thumbnailURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image.resizable().scaledToFill()
+                    case .empty:
+                        ProgressView().scaleEffect(0.6)
+                    default:
+                        Color.gray.opacity(0.35)
+                    }
+                }
+                .frame(width: circleSize, height: circleSize)
+                .clipShape(Circle())
+                .overlay {
+                    Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.4)
+                }
+                .shadow(color: Color.black.opacity(0.35), radius: 4, y: 2)
+            } else {
+                Circle()
+                    .fill(Color.gray.opacity(0.35))
+                    .frame(width: circleSize, height: circleSize)
+                    .overlay {
+                        Image(systemName: "heart.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                    .overlay {
+                        Circle().stroke(Color.white.opacity(0.6), lineWidth: 1.2)
+                    }
+            }
+
+            Rectangle()
+                .fill(Color.white.opacity(0.65))
+                .frame(width: 2, height: lineHeight)
+                .cornerRadius(1)
+        }
+        // Anchor the bottom tip of the line at the map coordinate (push the stack up by half its height)
+        .offset(y: -(totalHeight / 2))
     }
 }
 
@@ -1283,16 +1404,17 @@ private struct ProfileMapMarker: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(markerGradient)
-                .frame(width: 40, height: 40)
+                .frame(width: 20, height: 20)
                 .rotationEffect(.degrees(45))
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.35), lineWidth: 1)
-                .frame(width: 40, height: 40)
+                .shadow(color: markerGlow.opacity(0.45), radius: 6, y: 2)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color.white.opacity(0.4), lineWidth: 0.8)
+                .frame(width: 20, height: 20)
                 .rotationEffect(.degrees(45))
             Image(systemName: category.symbolName)
-                .font(.subheadline.weight(.bold))
+                .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.white)
         }
     }
@@ -1303,6 +1425,10 @@ private struct ProfileMapMarker: View {
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+    }
+
+    private var markerGlow: Color {
+        category.markerGradientColors.last ?? category.accentColor
     }
 }
 
@@ -1403,7 +1529,7 @@ private struct RealMapThumbnail: View {
 }
 
 private enum ProfileMapAnnotationZoomHelper {
-    private static let detailRevealMeters: CLLocationDistance = 18_000
+    private static let detailRevealMeters: CLLocationDistance = 500_0000
 
     static func isClose(distance: CLLocationDistance?) -> Bool {
         guard let distance else { return false }

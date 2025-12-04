@@ -73,21 +73,21 @@ enum PreviewData {
         let neonPier = POI(
             id: uuid(7001),
             name: "Neon Pier Park",
-            coordinate: .init(latitude: 47.6101, longitude: -122.3459),
+            coordinate: .init(latitude: 48.118, longitude: -123.43),
             category: .nightlife
         )
 
         let harborStrata = POI(
             id: uuid(7002),
             name: "Harbor Strata Steps",
-            coordinate: .init(latitude: 47.6082, longitude: -122.3291),
+            coordinate: .init(latitude: 47.658, longitude: -117.426),
             category: .viewpoint
         )
 
         let chineMarket = POI(
             id: uuid(7003),
             name: "Chine Market Loft",
-            coordinate: .init(latitude: 47.6153, longitude: -122.3304),
+            coordinate: .init(latitude: 46.602, longitude: -120.505),
             category: .market
         )
 
@@ -208,7 +208,7 @@ enum PreviewData {
                 RatedPOI.CheckIn(
                     id: uuid(9205),
                     userId: currentUser.id,
-                    createdAt: referenceDate.addingTimeInterval(-38 * 60 * 60),
+                    createdAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 62),
                     endorsement: .hype,
                     media: [],
                     tag: .entertainment
@@ -232,7 +232,7 @@ enum PreviewData {
                 RatedPOI.CheckIn(
                     id: uuid(9206),
                     userId: currentUser.id,
-                    createdAt: referenceDate.addingTimeInterval(-48 * 60 * 60),
+                    createdAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 68),
                     endorsement: .solid,
                     media: [],
                     tag: .explore
@@ -256,7 +256,7 @@ enum PreviewData {
                 RatedPOI.CheckIn(
                     id: uuid(9207),
                     userId: currentUser.id,
-                    createdAt: referenceDate.addingTimeInterval(-52 * 60 * 60),
+                    createdAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 74),
                     endorsement: .hype,
                     media: [],
                     tag: .express
@@ -272,7 +272,7 @@ enum PreviewData {
         let droneCountdownReal = RealPost(
             id: uuid(101),
             userId: currentUser.id,
-            center: .init(latitude: 47.61, longitude: -122.33),
+            center: .init(latitude: 47.252, longitude: -122.444),
             radiusMeters: 600,
             message: "Drone light show countdown on Pier 62.",
             attachments: [
@@ -322,14 +322,14 @@ enum PreviewData {
                 )
             ],
             visibility: .friendsOnly,
-            createdAt: referenceDate,
-            expiresAt: referenceDate.addingTimeInterval(24 * 3600)
+            createdAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 50),
+            expiresAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 48)
         )
 
         let stargazingReal = RealPost(
             id: uuid(106),
             userId: currentUser.id,
-            center: .init(latitude: 47.625, longitude: -122.35),
+            center: .init(latitude: 48.512, longitude: -122.612),
             radiusMeters: 700,
             message: "Stargazing circle sharing telescopes in Gas Works.",
             attachments: [
@@ -351,8 +351,8 @@ enum PreviewData {
                 )
             ],
             visibility: .friendsOnly,
-            createdAt: referenceDate.addingTimeInterval(-18 * 3600),
-            expiresAt: referenceDate.addingTimeInterval(20 * 3600)
+            createdAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 55),
+            expiresAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 53)
         )
 
         let moscowReal = RealPost(
@@ -379,7 +379,7 @@ enum PreviewData {
         let laGlobalReal = RealPost(
             id: uuid(116),
             userId: currentUser.id,
-            center: .init(latitude: 34.0522, longitude: -118.2437),
+            center: .init(latitude: 34.0922, longitude: -118.2437),
             radiusMeters: 700,
             message: "Alley rooftop in DTLA beaming synth loops at sunset.",
             attachments: [
@@ -400,7 +400,7 @@ enum PreviewData {
         let londonGlobalReal = RealPost(
             id: uuid(117),
             userId: currentUser.id,
-            center: .init(latitude: 51.5074, longitude: -0.1278),
+            center: .init(latitude: 51.5474, longitude: -0.1278),
             radiusMeters: 640,
             message: "River Thames ferry deck turned tea bar. Fog lasers!",
             attachments: [
@@ -422,7 +422,7 @@ enum PreviewData {
         let bangkokGlobalReal = RealPost(
             id: uuid(118),
             userId: currentUser.id,
-            center: .init(latitude: 13.7563, longitude: 100.5018),
+            center: .init(latitude: 13.8063, longitude: 100.5018),
             radiusMeters: 580,
             message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
             attachments: [
@@ -445,7 +445,7 @@ enum PreviewData {
         let recentReal = RealPost(
             id: uuid(9101),
             userId: currentUser.id,
-            center: .init(latitude: 47.6135, longitude: -122.3315),
+            center: .init(latitude: 46.065, longitude: -118.343),
             radiusMeters: 520,
             message: "Caught the midnight ferry glow with a film rig.",
             attachments: [
@@ -469,7 +469,7 @@ enum PreviewData {
         let oldReal = RealPost(
             id: uuid(9104),
             userId: currentUser.id,
-            center: .init(latitude: 47.616, longitude: -122.328),
+            center: .init(latitude: 47.596, longitude: -120.661),
             radiusMeters: 640,
             message: "Rewinding the old neon run from last weekend.",
             attachments: [
@@ -493,7 +493,7 @@ enum PreviewData {
         let laReal = RealPost(
             id: uuid(9107),
             userId: currentUser.id,
-            center: .init(latitude: 34.0522, longitude: -118.2437),
+            center: .init(latitude: 34.0122, longitude: -118.2437),
             radiusMeters: 700,
             message: "Alley rooftop in DTLA beaming synth loops at sunset.",
             attachments: [
@@ -510,7 +510,7 @@ enum PreviewData {
         let londonReal = RealPost(
             id: uuid(9110),
             userId: currentUser.id,
-            center: .init(latitude: 51.5074, longitude: -0.1278),
+            center: .init(latitude: 51.4674, longitude: -0.1278),
             radiusMeters: 640,
             message: "River Thames ferry deck turned tea bar. Fog lasers!",
             attachments: [
@@ -528,7 +528,7 @@ enum PreviewData {
         let bangkokReal = RealPost(
             id: uuid(9114),
             userId: currentUser.id,
-            center: .init(latitude: 13.7563, longitude: 100.5018),
+            center: .init(latitude: 13.7063, longitude: 100.5018),
             radiusMeters: 620,
             message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
             attachments: [
@@ -567,56 +567,56 @@ enum PreviewData {
         let waterfront = POI(
             id: UUID(uuidString: "BBBBBBBB-1111-2222-3333-444444444444") ?? UUID(),
             name: "Kirkland Waterfront",
-            coordinate: .init(latitude: 47.676, longitude: -122.209),
+            coordinate: .init(latitude: 48.754, longitude: -122.478),
             category: .viewpoint
         )
 
         let cafe = POI(
             id: UUID(uuidString: "BBBBBBBB-5555-6666-7777-888888888888") ?? UUID(),
             name: "Bellevue Roastery",
-            coordinate: .init(latitude: 47.6159, longitude: -122.1912),
+            coordinate: .init(latitude: 47.037, longitude: -122.9),
             category: .coffee
         )
 
         let nightMarket = POI(
             id: UUID(uuidString: "BBBBBBBB-9999-AAAA-BBBB-CCCCCCCCCCCC") ?? UUID(),
             name: "Capitol Hill Night Market",
-            coordinate: .init(latitude: 47.6153, longitude: -122.3228),
+            coordinate: .init(latitude: 45.638, longitude: -122.661),
             category: .nightlife
         )
 
         let artMuseum = POI(
             id: UUID(uuidString: "BBBBBBBB-DDDD-EEEE-FFFF-111111111111") ?? UUID(),
             name: "Bellevue Art Museum",
-            coordinate: .init(latitude: 47.615, longitude: -122.203),
+            coordinate: .init(latitude: 46.852, longitude: -121.76),
             category: .art
         )
 
         let restaurant = POI(
             id: UUID(uuidString: "BBBBBBBB-1212-3434-5656-787878787878") ?? UUID(),
             name: "Waterfront Bistro",
-            coordinate: .init(latitude: 47.6075, longitude: -122.3405),
+            coordinate: .init(latitude: 46.28, longitude: -119.277),
             category: .restaurant
         )
 
         let gasWorks = POI(
             id: UUID(uuidString: "BBBBBBBB-ABAB-CDCD-EFEF-999999999999") ?? UUID(),
             name: "Downtown Park Vista",
-            coordinate: .init(latitude: 47.6103, longitude: -122.2015),
+            coordinate: .init(latitude: 47.423, longitude: -120.309),
             category: .viewpoint
         )
 
         let capitolCafe = POI(
             id: UUID(uuidString: "BBBBBBBB-A1A1-B2B2-C3C3-D4D4D4D4D4D4") ?? UUID(),
             name: "BelRed Test Kitchen",
-            coordinate: .init(latitude: 47.6207, longitude: -122.1415),
+            coordinate: .init(latitude: 48.117, longitude: -122.76),
             category: .restaurant
         )
 
         let redmondMeadow = POI(
             id: UUID(uuidString: "BBBBBBBB-AAAA-FFFF-EEEE-010101010101") ?? UUID(),
             name: "Redmond Meadow Commons",
-            coordinate: .init(latitude: 47.6802, longitude: -122.1201),
+            coordinate: .init(latitude: 47.673, longitude: -117.239),
             category: .viewpoint
         )
 
@@ -1262,7 +1262,7 @@ enum PreviewData {
             .init(
                 id: uuid(101),
                 userId: currentUser.id,
-                center: .init(latitude: 47.61, longitude: -122.33),
+                center: .init(latitude: 47.72, longitude: -117.0),
                 radiusMeters: 600,
                 message: "Drone light show countdown on Pier 62.",
                 attachments: [
@@ -1318,7 +1318,7 @@ enum PreviewData {
             .init(
                 id: uuid(102),
                 userId: aurora.id,
-                center: .init(latitude: 47.62, longitude: -122.21),
+                center: .init(latitude: 47.13, longitude: -119.278),
                 radiusMeters: 600,
                 message: "Projection art lighting up the old station.",
                 attachments: [
@@ -1370,7 +1370,7 @@ enum PreviewData {
             .init(
                 id: uuid(103),
                 userId: night.id,
-                center: .init(latitude: 47.6185, longitude: -122.342),
+                center: .init(latitude: 47.751, longitude: -120.74),
                 radiusMeters: 600,
                 message: "Pop-up street dance class just kicked off.",
                 attachments: [
@@ -1405,7 +1405,7 @@ enum PreviewData {
             .init(
                 id: uuid(104),
                 userId: skyline.id,
-                center: .init(latitude: 47.6062, longitude: -122.3321),
+                center: .init(latitude: 45.7, longitude: -122.65),
                 radiusMeters: 450,
                 message: "Speakeasy pouring neon cocktails all night.",
                 attachments: [
@@ -1440,7 +1440,7 @@ enum PreviewData {
             .init(
                 id: uuid(105),
                 userId: aurora.id,
-                center: .init(latitude: 47.5952, longitude: -122.3316),
+                center: .init(latitude: 48.15, longitude: -123.35),
                 radiusMeters: 520,
                 message: "Local illustrators projecting live sketching.",
                 attachments: [
@@ -1470,7 +1470,7 @@ enum PreviewData {
             .init(
                 id: uuid(106),
                 userId: currentUser.id,
-                center: .init(latitude: 47.625, longitude: -122.35),
+                center: .init(latitude: 48.512, longitude: -122.612),
                 radiusMeters: 700,
                 message: "Stargazing circle sharing telescopes in Gas Works.",
                 attachments: [
@@ -1682,7 +1682,7 @@ enum PreviewData {
             .init(
                 id: uuid(113),
                 userId: aurora.id,
-                center: .init(latitude: 47.6036, longitude: -122.3294),
+                center: .init(latitude: 47.36, longitude: -122.03),
                 radiusMeters: 480,
                 message: "Neon Alley pop-up tonight: analog synths + incense + zines. Bring earplugs.",
                 attachments: [],
@@ -1697,7 +1697,7 @@ enum PreviewData {
             .init(
                 id: uuid(114),
                 userId: bund.id,
-                center: .init(latitude: 47.6219, longitude: -122.3517),
+                center: .init(latitude: 46.974, longitude: -123.815),
                 radiusMeters: 520,
                 message: "Skybridge fog rolling in like dry ice. Perfect moment to record footstep Foley.",
                 attachments: [],
@@ -1710,7 +1710,7 @@ enum PreviewData {
             .init(
                 id: uuid(115),
                 userId: skyline.id,
-                center: .init(latitude: 47.5952, longitude: -122.3316),
+                center: .init(latitude: 46.274, longitude: -119.12),
                 radiusMeters: 450,
                 message: "Quiet watch at the pier. City hum + ferry horns syncing at 68 BPM.",
                 attachments: [],
@@ -1725,7 +1725,7 @@ enum PreviewData {
             .init(
                 id: uuid(112),
                 userId: currentUser.id,
-                center: .init(latitude: 55.7558, longitude: 37.6173),
+                center: .init(latitude: 55.7958, longitude: 37.6173),
                 radiusMeters: 620,
                 message: nil,
                 attachments: [
@@ -1756,7 +1756,7 @@ enum PreviewData {
             .init(
                 id: uuid(116),
                 userId: currentUser.id,
-                center: .init(latitude: 34.0522, longitude: -118.2437),
+                center: .init(latitude: 34.0522, longitude: -118.1937),
                 radiusMeters: 700,
                 message: "Alley rooftop in DTLA beaming synth loops at sunset.",
                 attachments: [
@@ -1776,7 +1776,7 @@ enum PreviewData {
             .init(
                 id: uuid(117),
                 userId: currentUser.id,
-                center: .init(latitude: 51.5074, longitude: -0.1278),
+                center: .init(latitude: 51.5074, longitude: -0.1878),
                 radiusMeters: 640,
                 message: "River Thames ferry deck turned tea bar. Fog lasers!",
                 attachments: [
@@ -1797,7 +1797,7 @@ enum PreviewData {
             .init(
                 id: uuid(118),
                 userId: currentUser.id,
-                center: .init(latitude: 13.7563, longitude: 100.5018),
+                center: .init(latitude: 13.7563, longitude: 100.5618),
                 radiusMeters: 580,
                 message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
                 attachments: [
