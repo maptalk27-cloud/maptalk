@@ -1143,7 +1143,6 @@ private struct ProfilePOICard: View {
             ) {
                 isStoryViewerPresented = false
             }
-            .preferredColorScheme(.dark)
         }
     }
 
@@ -1251,14 +1250,14 @@ private struct ProfileMapDotMarker: View {
 
     var body: some View {
         let size: CGFloat = 9
-        let dotColor = category.accentColor.opacity(0.9)
+        let dotColor = (category.markerGradientColors.first ?? category.accentColor).opacity(0.95)
         Circle()
             .fill(dotColor)
             .frame(width: size, height: size)
             .overlay {
                 Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.6)
             }
-            .shadow(color: dotColor.opacity(0.55), radius: 4, y: 1.5)
+            .shadow(color: dotColor.opacity(0.6), radius: 4, y: 1.5)
     }
 }
 
