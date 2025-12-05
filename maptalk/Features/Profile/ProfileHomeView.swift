@@ -545,9 +545,13 @@ private struct ProfileMapDetailView: View {
                 .onMapCameraChange(frequency: .continuous) { context in
                     lastCenter = context.region.center
                     currentRegion = context.region
-                    let shouldShowDetails = ProfileMapAnnotationZoomHelper.isClose(region: context.region)
-                    if shouldShowDetails != isShowingDetailedAnnotations {
-                        isShowingDetailedAnnotations = shouldShowDetails
+                    let nextState = ProfileMapAnnotationZoomHelper.nextDetailState(
+                        current: isShowingDetailedAnnotations,
+                        distance: context.camera.distance,
+                        region: context.region
+                    )
+                    if nextState != isShowingDetailedAnnotations {
+                        isShowingDetailedAnnotations = nextState
                     }
                 }
 
@@ -773,11 +777,12 @@ private struct ProfileMapDetailView: View {
                 currentRegion: currentRegion,
                 targetRegion: target,
                 cause: cause,
-                cameraPosition: $cameraPosition
-            ) { updated in
-                currentRegion = updated
-                lastCenter = updated.center
-            }
+                cameraPosition: $cameraPosition,
+                onRegionUpdate: { updated in
+                    currentRegion = updated
+                    lastCenter = updated.center
+                }
+            )
         } else {
             cameraPosition = .region(target)
             currentRegion = target
@@ -1707,6 +1712,8 @@ private struct RealMapThumbnail: View {
 
 private enum ProfileMapAnnotationZoomHelper {
     private static let detailRevealMeters: CLLocationDistance = 500_0000
+    private static let enterMultiplier: Double = 0.82
+    private static let exitMultiplier: Double = 1.18
 
     static func isClose(distance: CLLocationDistance?) -> Bool {
         guard let distance else { return false }
@@ -1715,6 +1722,20 @@ private enum ProfileMapAnnotationZoomHelper {
 
     static func isClose(region: MKCoordinateRegion) -> Bool {
         maxSpanMeters(for: region) <= detailRevealMeters
+    }
+
+    static func nextDetailState(
+        current: Bool,
+        distance: CLLocationDistance?,
+        region: MKCoordinateRegion
+    ) -> Bool {
+        let span = maxSpanMeters(for: region)
+        let reference = distance ?? span
+        if current {
+            return reference <= detailRevealMeters * exitMultiplier
+        } else {
+            return reference <= detailRevealMeters * enterMultiplier
+        }
     }
 
     private static func maxSpanMeters(for region: MKCoordinateRegion) -> CLLocationDistance {
