@@ -463,12 +463,18 @@ private struct ProfileMapDetailView: View {
     let userProvider: (UUID) -> User?
     let onDismiss: () -> Void
 
+    @State private var flightController = MapFlightController()
     @State private var cameraPosition: MapCameraPosition
     @State private var isGlobeView: Bool = false
     @State private var lastCenter: CLLocationCoordinate2D
+    @State private var currentRegion: MKCoordinateRegion
     @State private var sheetState: MapSheetState = .collapsed
     @State private var filter: MapListFilter = .all
     @State private var isShowingDetailedAnnotations: Bool
+    @State private var isExperiencePresented = false
+    @State private var experienceDetent: PresentationDetent = .fraction(0.25)
+    @State private var isListSelection: Bool = false
+    @State private var selectedEntryId: UUID?
     private let globeDistance: CLLocationDistance = 20_000_000
 
     init(
@@ -489,6 +495,7 @@ private struct ProfileMapDetailView: View {
         self.onDismiss = onDismiss
         _cameraPosition = State(initialValue: .region(region))
         _lastCenter = State(initialValue: region.center)
+        _currentRegion = State(initialValue: region)
         _isShowingDetailedAnnotations = State(initialValue: ProfileMapAnnotationZoomHelper.isClose(region: region))
     }
 
@@ -504,20 +511,32 @@ private struct ProfileMapDetailView: View {
                                 .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
                         }
                         Annotation("", coordinate: real.center) {
-                            if isShowingDetailedAnnotations {
-                                RealMapThumbnail(real: real, user: userProvider(real.userId), size: 44)
-                            } else {
-                                ProfileMapReelHeartMarker()
+                            Button {
+                                isListSelection = false
+                                presentReal(real)
+                            } label: {
+                                if isShowingDetailedAnnotations {
+                                    RealMapThumbnail(real: real, user: userProvider(real.userId), size: 44)
+                                } else {
+                                    ProfileMapReelHeartMarker()
+                                }
                             }
+                            .buttonStyle(.plain)
                         }
                     }
                     ForEach(filteredPins) { pin in
                         Annotation("", coordinate: pin.coordinate) {
-                            if isShowingDetailedAnnotations {
-                                ProfileMapMarker(category: pin.category)
-                            } else {
-                                ProfileMapDotMarker(category: pin.category)
+                            Button {
+                                isListSelection = false
+                                presentPin(pin)
+                            } label: {
+                                if isShowingDetailedAnnotations {
+                                    ProfileMapMarker(category: pin.category)
+                                } else {
+                                    ProfileMapDotMarker(category: pin.category)
+                                }
                             }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -525,6 +544,7 @@ private struct ProfileMapDetailView: View {
                 .mapStyle(activeMapStyle)
                 .onMapCameraChange(frequency: .continuous) { context in
                     lastCenter = context.region.center
+                    currentRegion = context.region
                     let shouldShowDetails = ProfileMapAnnotationZoomHelper.isClose(region: context.region)
                     if shouldShowDetails != isShowingDetailedAnnotations {
                         isShowingDetailedAnnotations = shouldShowDetails
@@ -551,9 +571,13 @@ private struct ProfileMapDetailView: View {
                     profileUser: profileUser,
                     userProvider: userProvider,
                     sheetState: $sheetState,
-                    filter: $filter
-                )
-            }
+                    filter: $filter,
+                                onSelectEntry: { entry in
+                                    isListSelection = true
+                                    presentEntry(entry)
+                                }
+                            )
+                        }
             .overlay(alignment: .topTrailing) {
                 globeToggle
                     .padding(.top, topInset - 25)
@@ -561,6 +585,18 @@ private struct ProfileMapDetailView: View {
             }
         }
         .background(Color.black)
+        .sheet(isPresented: $isExperiencePresented, onDismiss: {
+            experienceDetent = .fraction(0.25)
+            isListSelection = false
+            selectedEntryId = nil
+        }) {
+            experienceSheetContent
+                .presentationDetents(detentsForSelection, selection: $experienceDetent)
+                .presentationBackground(.thinMaterial)
+                .presentationSizing(.fitted)
+                .presentationCompactAdaptation(.none)
+                .applyBackgroundInteractionIfAvailable()
+        }
     }
 
     private var entries: [Entry] {
@@ -576,6 +612,30 @@ private struct ProfileMapDetailView: View {
         }
         return (reelEntries + poiEntries)
             .sorted { $0.timestamp > $1.timestamp }
+    }
+
+    private var detentsForSelection: Set<PresentationDetent> {
+        if isListSelection {
+            return [.large]
+        }
+        return [.fraction(0.25), .large]
+    }
+
+    private var sequenceItems: [ExperienceDetailView.SequencePager.Item] {
+        entries.map { entry in
+            switch entry.kind {
+            case let .real(real):
+                return ExperienceDetailView.SequencePager.Item(
+                    id: entry.id,
+                    mode: .real(real, userProvider(real.userId))
+                )
+            case let .poi(rated):
+                return ExperienceDetailView.SequencePager.Item(
+                    id: entry.id,
+                    mode: .poi(rated)
+                )
+            }
+        }
     }
 
     private var filteredReels: [RealPost] {
@@ -647,7 +707,7 @@ private struct ProfileMapDetailView: View {
             )
         } else {
             cameraPosition = .region(
-                MKCoordinateRegion(center: center, span: region.span)
+                MKCoordinateRegion(center: center, span: currentRegion.span)
             )
         }
     }
@@ -661,6 +721,118 @@ private struct ProfileMapDetailView: View {
         let id: UUID
         let timestamp: Date
         let kind: Kind
+    }
+
+    private func presentReal(_ real: RealPost) {
+        guard let entry = entry(for: real) else { return }
+        presentEntry(entry)
+    }
+
+    private func presentPin(_ pin: ProfileViewModel.MapPin) {
+        guard let footprint = footprint(for: pin),
+              let entry = entry(for: footprint) else { return }
+        presentEntry(entry)
+    }
+
+    private func presentEntry(_ entry: Entry) {
+        guard sequenceItems.isEmpty == false else { return }
+        selectedEntryId = entry.id
+        experienceDetent = isListSelection ? .large : .fraction(0.25)
+        isExperiencePresented = true
+        if isListSelection {
+            flyToEntry(entry, cause: cause(for: entry), animated: false)
+        }
+    }
+
+    private func entry(for real: RealPost) -> Entry? {
+        entries.first { candidate in
+            if case let .real(current) = candidate.kind {
+                return current.id == real.id
+            }
+            return false
+        }
+    }
+
+    private func entry(for footprint: ProfileViewModel.Footprint) -> Entry? {
+        entries.first { candidate in
+            if case let .poi(rated) = candidate.kind {
+                return rated.id == footprint.id
+            }
+            return false
+        }
+    }
+
+    private func entry(for id: UUID) -> Entry? {
+        entries.first { $0.id == id }
+    }
+
+    private func flyToEntry(_ entry: Entry, cause: RegionChangeCause = .other, animated: Bool = true) {
+        guard let target = targetRegion(for: entry) else { return }
+        if animated {
+            flightController.handleRegionChange(
+                currentRegion: currentRegion,
+                targetRegion: target,
+                cause: cause,
+                cameraPosition: $cameraPosition
+            ) { updated in
+                currentRegion = updated
+                lastCenter = updated.center
+            }
+        } else {
+            cameraPosition = .region(target)
+            currentRegion = target
+            lastCenter = target.center
+        }
+    }
+
+    private func targetRegion(for entry: Entry) -> MKCoordinateRegion? {
+        let span = currentRegion.span
+        switch entry.kind {
+        case let .real(real):
+            return MKCoordinateRegion(center: real.center, span: span)
+        case let .poi(rated):
+            return MKCoordinateRegion(center: rated.poi.coordinate, span: span)
+        }
+    }
+
+    private func cause(for entry: Entry) -> RegionChangeCause {
+        switch entry.kind {
+        case .real:
+            return .real
+        case .poi:
+            return .poi
+        }
+    }
+
+    private func footprint(for pin: ProfileViewModel.MapPin) -> ProfileViewModel.Footprint? {
+        footprints.first { $0.id == pin.id }
+    }
+
+    @ViewBuilder
+    private var experienceSheetContent: some View {
+        let items = sequenceItems
+        if items.isEmpty {
+            EmptyView()
+        } else {
+            let pager = ExperienceDetailView.SequencePager(items: items)
+            let selectionBinding = Binding<UUID>(
+                get: { selectedEntryId ?? items.first!.id },
+                set: { newValue in
+                    selectedEntryId = newValue
+                    if let entry = entry(for: newValue) {
+                        let shouldAnimate = isListSelection ? false : (experienceDetent != .large)
+                        flyToEntry(entry, cause: cause(for: entry), animated: shouldAnimate)
+                    }
+                }
+            )
+
+            ExperienceDetailView(
+                sequencePager: pager,
+                selection: selectionBinding,
+                isExpanded: experienceDetent == .large,
+                userProvider: userProvider
+            )
+        }
     }
 
     private func safeAreaTopInset() -> CGFloat {
@@ -690,6 +862,7 @@ private struct ProfileMapBottomSheet: View {
     let userProvider: (UUID) -> User?
     @Binding var sheetState: MapSheetState
     @Binding var filter: MapListFilter
+    let onSelectEntry: (ProfileMapDetailView.Entry) -> Void
     @GestureState private var dragOffset: CGFloat = 0
     @State private var headerHeight: CGFloat = 0
     @State private var isFilterMenuPresented = false
@@ -747,11 +920,16 @@ private struct ProfileMapBottomSheet: View {
                     ScrollView(showsIndicators: false) {
                         VStack(spacing: 4) {
                             ForEach(filteredEntries) { entry in
-                                ProfileMapListCard(
-                                    entry: entry,
-                                    profileUser: profileUser,
-                                    userProvider: userProvider
-                                )
+                                Button {
+                                    onSelectEntry(entry)
+                                } label: {
+                                    ProfileMapListCard(
+                                        entry: entry,
+                                        profileUser: profileUser,
+                                        userProvider: userProvider
+                                    )
+                                }
+                                .buttonStyle(.plain)
                             }
                             .padding(.vertical, 4)
                         }
@@ -1553,5 +1731,16 @@ private enum ProfileMapAnnotationZoomHelper {
         let vertical = north.distance(from: south)
 
         return max(horizontal, vertical)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func applyBackgroundInteractionIfAvailable() -> some View {
+        if #available(iOS 17.0, *) {
+            presentationBackgroundInteraction(.enabled)
+        } else {
+            self
+        }
     }
 }
