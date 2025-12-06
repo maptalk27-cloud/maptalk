@@ -114,13 +114,15 @@ final class ProfileViewModel: ObservableObject {
 
     private func loadSnapshot() {
         let user = context.user
+        let isSilentLumen = user.handle == "silent.lumen"
         if case .me = context {
             let chengsiFeed = PreviewData.chengsi
             loadFeed(chengsiFeed)
             return
         }
 
-        let ratedPOIs = PreviewData.sampleRatedPOIs
+        let ratedPOIs = PreviewData.sampleRatedPOIs +
+            (isSilentLumen ? PreviewData.silentLumenRatedPOIs(user: user) : [])
         let matchedFootprints: [Footprint] = ratedPOIs.compactMap { rated in
             let visits = rated.checkIns.filter { $0.userId == user.id }
             guard visits.isEmpty == false else { return nil }
@@ -130,7 +132,10 @@ final class ProfileViewModel: ObservableObject {
         footprints = matchedFootprints
             .sorted { ($0.latestVisit ?? .distantPast) > ($1.latestVisit ?? .distantPast) }
 
-        let personalReals = PreviewData.sampleReals
+        let personalReals = (
+            PreviewData.sampleReals +
+            (isSilentLumen ? PreviewData.silentLumenReals(user: user) : [])
+        )
             .filter { $0.userId == user.id }
             .sorted { $0.createdAt > $1.createdAt }
         reels = personalReals

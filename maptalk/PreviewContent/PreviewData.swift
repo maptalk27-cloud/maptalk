@@ -631,7 +631,7 @@ enum PreviewData {
             RatedPOI.Media(kind: .photo(URL(string: url)!))
         }
 
-        return [
+        var items: [RatedPOI] = [
             RatedPOI(
                 poi: waterfront,
                 highlight: nil,
@@ -1243,6 +1243,8 @@ enum PreviewData {
                 favoritesCount: 9
             )
         ]
+
+        return items
     }()
 
     static var samplePOIs: [POI] {
@@ -1829,6 +1831,155 @@ enum PreviewData {
             return currentUser
         }
         return sampleFriends.first { $0.id == id }
+    }
+
+    static func silentLumenRatedPOIs(referenceDate: Date = Date(), user: User? = nil) -> [RatedPOI] {
+        let target = user ?? sampleFriends.first { $0.handle == "silent.lumen" }
+        guard let target else { return [] }
+        return generatedSilentLumenPOIs(referenceDate: referenceDate, user: target)
+    }
+
+    static func silentLumenReals(referenceDate: Date = Date(), user: User? = nil) -> [RealPost] {
+        let target = user ?? sampleFriends.first { $0.handle == "silent.lumen" }
+        guard let target else { return [] }
+        return generatedSilentLumenReals(referenceDate: referenceDate, user: target)
+    }
+
+    private static func generatedSilentLumenPOIs(referenceDate: Date, user: User) -> [RatedPOI] {
+        let centers: [(String, CLLocationCoordinate2D, Int)] = [
+            ("Suzhou", .init(latitude: 31.298, longitude: 120.583), 35),
+            ("Hangzhou", .init(latitude: 30.274, longitude: 120.155), 40),
+            ("Shaanxi", .init(latitude: 34.341, longitude: 108.939), 25)
+        ]
+        let categories = POICategory.allCases
+        let tags = VisitTag.allCases
+
+        var results: [RatedPOI] = []
+        for (cityOffset, tuple) in centers.enumerated() {
+            let (city, base, count) = tuple
+            for idx in 0..<count {
+                let global = cityOffset * 200 + idx
+                let random = pseudoRandom01(index: global, salt: 77)
+                let isRecent = random < 0.8
+                let createdAt = silentLumenDate(isRecent: isRecent, index: global, referenceDate: referenceDate)
+                let coordinate = jitteredCoordinate(base: base, index: idx, spread: 0.8)
+                let category = categories[(idx + cityOffset) % categories.count]
+                let tag = tags[(idx + cityOffset) % tags.count]
+                let poi = POI(
+                    id: uuid(8000 + global),
+                    name: "Silent \(city) POI \(idx + 1)",
+                    coordinate: coordinate,
+                    category: category
+                )
+                let checkIn = RatedPOI.CheckIn(
+                    id: uuid(9000 + global),
+                    userId: user.id,
+                    createdAt: createdAt,
+                    endorsement: .solid,
+                    media: [],
+                    tag: tag
+                )
+                let endorsements = RatedPOI.EndorsementSummary(hype: 1, solid: 2, meh: 0, questionable: 0)
+                let tagsSummary = [
+                    RatedPOI.TagStat(tag: tag, count: 3),
+                    RatedPOI.TagStat(tag: .explore, count: 1)
+                ]
+                let rated = RatedPOI(
+                    poi: poi,
+                    highlight: "Silent.lumen drop \(city.lowercased()) spot \(idx + 1).",
+                    secondary: "Quick log near \(city).",
+                    media: [],
+                    checkIns: [checkIn],
+                    comments: [],
+                    endorsements: endorsements,
+                    tags: tagsSummary,
+                    isFavoritedByCurrentUser: idx.isMultiple(of: 4),
+                    favoritesCount: 5 + (idx % 30)
+                )
+                results.append(rated)
+            }
+        }
+        return results
+    }
+
+    private static func generatedSilentLumenReals(referenceDate: Date, user: User) -> [RealPost] {
+        let centers: [(String, CLLocationCoordinate2D, Int)] = [
+            ("Hangzhou", .init(latitude: 30.274, longitude: 120.155), 16),
+            ("Suzhou", .init(latitude: 31.298, longitude: 120.583), 12),
+            ("Shaanxi", .init(latitude: 34.341, longitude: 108.939), 12)
+        ]
+
+        var results: [RealPost] = []
+        var seed = 12_000
+        for (cityOffset, tuple) in centers.enumerated() {
+            let (city, base, count) = tuple
+            for idx in 0..<count {
+                let global = seed + idx + cityOffset * 100
+                let random = pseudoRandom01(index: global, salt: 133)
+                let isRecent = random < 0.2
+                let created = silentLumenDate(isRecent: isRecent, index: global, referenceDate: referenceDate)
+                let coordinate = jitteredCoordinate(base: base, index: idx, spread: 0.6)
+                let real = RealPost(
+                    id: uuid(global),
+                    userId: user.id,
+                    center: coordinate,
+                    radiusMeters: 420,
+                    message: "Silent.lumen \(city) reel \(idx + 1)",
+                    attachments: [
+                        RealPost.Attachment(id: uuid(global + 5000), kind: .photo(URL(string: "https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=900&q=60")!))
+                    ],
+                    likes: [],
+                    comments: [],
+                    visibility: .friendsOnly,
+                    createdAt: created,
+                    expiresAt: created.addingTimeInterval(30 * 3600)
+                )
+                results.append(real)
+            }
+            seed += 200
+        }
+        return results
+    }
+
+    private static func jitteredCoordinate(base: CLLocationCoordinate2D, index: Int, spread: Double) -> CLLocationCoordinate2D {
+        let salt = pseudoRandomSalt(for: base)
+        let angle = 2 * .pi * pseudoRandom01(index: index, salt: salt &+ 1)
+        let radius = spread * (0.2 + 0.9 * pseudoRandom01(index: index, salt: salt &+ 2))
+        return CLLocationCoordinate2D(
+            latitude: base.latitude + sin(angle) * radius,
+            longitude: base.longitude + cos(angle) * radius
+        )
+    }
+
+    private static func pseudoRandom01(index: Int, salt: Int) -> Double {
+        var x = UInt64(bitPattern: Int64(index &* 1103515245 &+ salt &+ 12345))
+        x ^= x >> 11
+        x &*= 0x9E3779B97F4A7C15
+        x ^= x >> 9
+        return Double(x & 0xFFFF_FFFF) / Double(UInt32.max)
+    }
+
+    private static func pseudoRandomSalt(for coordinate: CLLocationCoordinate2D) -> Int {
+        let latPart = Int((coordinate.latitude * 10_000).rounded())
+        let lonPart = Int((coordinate.longitude * 10_000).rounded())
+        return latPart ^ lonPart
+    }
+
+    private static func silentLumenDate(isRecent: Bool, index: Int, referenceDate: Date) -> Date {
+        let dayOffset: Double
+        if isRecent {
+            // Within this month: scatter between ~1-28 days.
+            let scatter = pseudoRandom01(index: index, salt: 211)
+            dayOffset = 1.0 + scatter * 27.0
+        } else {
+            // About a month ago: scatter between ~32-50 days.
+            let scatter = pseudoRandom01(index: index, salt: 373)
+            dayOffset = 32.0 + scatter * 18.0
+        }
+
+        let minutesScatter = pseudoRandom01(index: index, salt: 587) * 12.0 * 60.0 // up to 12 hours
+        let totalMinutes = dayOffset * 24.0 * 60.0 + minutesScatter
+        return referenceDate.addingTimeInterval(-totalMinutes * 60.0)
     }
 
     static func profileRatedPOIs(for user: User, customPOIs: [RatedPOI]) -> [RatedPOI] {

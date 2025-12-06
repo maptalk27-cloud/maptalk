@@ -475,6 +475,7 @@ private struct ProfileMapDetailView: View {
     @State private var experienceDetent: PresentationDetent = .fraction(0.25)
     @State private var isListSelection: Bool = false
     @State private var selectedEntryId: UUID?
+    @State private var lastCameraDistance: CLLocationDistance?
     private let globeDistance: CLLocationDistance = 20_000_000
 
     init(
@@ -504,8 +505,19 @@ private struct ProfileMapDetailView: View {
             let topInset = safeAreaTopInset()
             ZStack(alignment: .topLeading) {
                 Map(position: $cameraPosition, interactionModes: .all) {
-                    ForEach(filteredReels) { real in
-                        if isShowingDetailedAnnotations {
+                    let now = Date()
+                    let reelsForDisplay = filteredReels.sorted { lhs, rhs in
+                        let lhsMode = reelDisplayMode(for: lhs, now: now)
+                        let rhsMode = reelDisplayMode(for: rhs, now: now)
+                        if lhsMode.priority != rhsMode.priority {
+                            return lhsMode.priority < rhsMode.priority
+                        }
+                        return lhs.createdAt > rhs.createdAt
+                    }
+
+                    ForEach(reelsForDisplay) { real in
+                        let mode = reelDisplayMode(for: real, now: now)
+                        if mode == .thumbnail {
                             MapCircle(center: real.center, radius: real.radiusMeters)
                                 .foregroundStyle(Theme.neonPrimary.opacity(0.18))
                                 .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
@@ -515,10 +527,13 @@ private struct ProfileMapDetailView: View {
                                 isListSelection = false
                                 presentReal(real)
                             } label: {
-                                if isShowingDetailedAnnotations {
+                                switch mode {
+                                case .thumbnail:
                                     RealMapThumbnail(real: real, user: userProvider(real.userId), size: 44)
-                                } else {
+                                case .heart:
                                     ProfileMapReelHeartMarker()
+                                case .dot:
+                                    ProfileMapReelDotMarker()
                                 }
                             }
                             .buttonStyle(.plain)
@@ -545,6 +560,7 @@ private struct ProfileMapDetailView: View {
                 .onMapCameraChange(frequency: .continuous) { context in
                     lastCenter = context.region.center
                     currentRegion = context.region
+                    lastCameraDistance = context.camera.distance
                     let nextState = ProfileMapAnnotationZoomHelper.nextDetailState(
                         current: isShowingDetailedAnnotations,
                         distance: context.camera.distance,
@@ -838,6 +854,52 @@ private struct ProfileMapDetailView: View {
                 userProvider: userProvider
             )
         }
+    }
+
+    private func shouldShowDetail(for real: RealPost, now: Date) -> Bool {
+        reelDisplayMode(for: real, now: now) == .thumbnail
+    }
+
+    private func reelDisplayMode(for real: RealPost, now: Date) -> ReelDisplayMode {
+        let age = now.timeIntervalSince(real.createdAt)
+        let reference = referenceDistance()
+
+        if isShowingDetailedAnnotations == false {
+            if reference <= ProfileMapAnnotationZoomHelper.detailRevealMeters {
+                return .heart
+            }
+            return .dot
+        }
+
+        let isRecent = age <= 30 * 24 * 3600
+        if isRecent {
+            return .thumbnail
+        }
+
+        if ProfileMapAnnotationZoomHelper.isClose(
+            distance: reference,
+            region: currentRegion,
+            threshold: ProfileMapAnnotationZoomHelper.oldReelRevealMeters
+        ) {
+            return .thumbnail
+        }
+
+        if ProfileMapAnnotationZoomHelper.isClose(
+            distance: reference,
+            region: currentRegion,
+            threshold: ProfileMapAnnotationZoomHelper.detailRevealMeters
+        ) {
+            return .heart
+        }
+
+        return .dot
+    }
+
+    private func referenceDistance() -> CLLocationDistance {
+        if let lastCameraDistance {
+            return lastCameraDistance
+        }
+        return ProfileMapAnnotationZoomHelper.spanMeters(for: currentRegion)
     }
 
     private func safeAreaTopInset() -> CGFloat {
@@ -1438,9 +1500,35 @@ private struct ProfileMapDotMarker: View {
             .fill(dotColor)
             .frame(width: size, height: size)
             .overlay {
-                Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.6)
+                Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.0)
             }
-            .shadow(color: dotColor.opacity(0.6), radius: 4, y: 1.5)
+    }
+}
+
+private struct ProfileMapReelDotMarker: View {
+    var body: some View {
+        let size: CGFloat = 9
+        let dotColor = Color(red: 1.0, green: 0.35, blue: 0.62).opacity(0.95)
+        Circle()
+            .fill(dotColor)
+            .frame(width: size, height: size)
+            .overlay {
+                Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.0)
+            }
+    }
+}
+
+private enum ReelDisplayMode {
+    case dot
+    case heart
+    case thumbnail
+
+    var priority: Int {
+        switch self {
+        case .dot: return 0
+        case .heart: return 1
+        case .thumbnail: return 2
+        }
     }
 }
 
@@ -1498,22 +1586,18 @@ private struct ProfileMapClusterMarker: View {
 private struct ProfileMapReelHeartMarker: View {
     var body: some View {
         let innerSize: CGFloat = 21
-        let glowSize: CGFloat = 25
         let corePink = Color(red: 1.0, green: 0.35, blue: 0.62)
         ZStack {
             Circle()
-                .fill(corePink)
+                .stroke(Color.white.opacity(0.95), lineWidth: 2)
                 .frame(width: innerSize, height: innerSize)
             Circle()
-                .stroke(corePink.opacity(0.65), lineWidth: 3)
-                .frame(width: glowSize, height: glowSize)
-                .blur(radius: 5)
-                .opacity(0.9)
+                .fill(corePink)
+                .frame(width: innerSize, height: innerSize)
             Image(systemName: "heart.fill")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
         }
-        .shadow(color: corePink.opacity(0.5), radius: 8, y: 3)
     }
 }
 
@@ -1711,9 +1795,8 @@ private struct RealMapThumbnail: View {
 }
 
 private enum ProfileMapAnnotationZoomHelper {
-    private static let detailRevealMeters: CLLocationDistance = 500_0000
-    private static let enterMultiplier: Double = 0.82
-    private static let exitMultiplier: Double = 1.18
+    static let detailRevealMeters: CLLocationDistance = 500_0000
+    static let oldReelRevealMeters: CLLocationDistance = 80_000
 
     static func isClose(distance: CLLocationDistance?) -> Bool {
         guard let distance else { return false }
@@ -1724,6 +1807,20 @@ private enum ProfileMapAnnotationZoomHelper {
         maxSpanMeters(for: region) <= detailRevealMeters
     }
 
+    static func isClose(
+        distance: CLLocationDistance?,
+        region: MKCoordinateRegion,
+        threshold: CLLocationDistance
+    ) -> Bool {
+        let span = maxSpanMeters(for: region)
+        let reference = distance ?? span
+        return reference <= threshold
+    }
+
+    static func spanMeters(for region: MKCoordinateRegion) -> CLLocationDistance {
+        maxSpanMeters(for: region)
+    }
+
     static func nextDetailState(
         current: Bool,
         distance: CLLocationDistance?,
@@ -1731,11 +1828,7 @@ private enum ProfileMapAnnotationZoomHelper {
     ) -> Bool {
         let span = maxSpanMeters(for: region)
         let reference = distance ?? span
-        if current {
-            return reference <= detailRevealMeters * exitMultiplier
-        } else {
-            return reference <= detailRevealMeters * enterMultiplier
-        }
+        return reference <= detailRevealMeters
     }
 
     private static func maxSpanMeters(for region: MKCoordinateRegion) -> CLLocationDistance {
