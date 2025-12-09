@@ -63,7 +63,7 @@ struct ProfileHomeView: View {
                                 region: viewModel.mapRegion,
                                 userProvider: userProvider,
                                 onOpenDetail: { segment in
-                                    timelineDetailStartSegmentId = segment.id
+                                    timelineDetailStartSegmentId = segment?.id
                                     isShowingMapDetail = true
                                 }
                             )
@@ -541,7 +541,7 @@ private struct ProfileTimelinePreview: View {
     let reels: [RealPost]
     let region: MKCoordinateRegion
     let userProvider: (UUID) -> User?
-    let onOpenDetail: ((TimelineSegment) -> Void)?
+    let onOpenDetail: ((TimelineSegment?) -> Void)?
 
     @State private var cameraPosition: MapCameraPosition
     @State private var currentRegion: MKCoordinateRegion
@@ -565,7 +565,7 @@ private struct ProfileTimelinePreview: View {
         reels: [RealPost],
         region: MKCoordinateRegion,
         userProvider: @escaping (UUID) -> User?,
-        onOpenDetail: ((TimelineSegment) -> Void)? = nil
+        onOpenDetail: ((TimelineSegment?) -> Void)? = nil
     ) {
         self.pins = pins
         self.footprints = footprints
@@ -600,12 +600,12 @@ private struct ProfileTimelinePreview: View {
                 markUserInteraction()
             }
             .contentShape(Rectangle())
-            .onTapGesture {
-                markUserInteraction()
-                if let segment = activeTimelineSegment {
-                    onOpenDetail?(segment)
+            .highPriorityGesture(
+                TapGesture().onEnded {
+                    markUserInteraction()
+                    onOpenDetail?(activeTimelineSegment)
                 }
-            }
+            )
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
