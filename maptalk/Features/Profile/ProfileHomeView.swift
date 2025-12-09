@@ -1,3 +1,4 @@
+import Combine
 import MapKit
 import SwiftUI
 import UIKit
@@ -39,6 +40,7 @@ struct ProfileHomeView: View {
                     } label: {
                         ProfileMapPreview(
                             pins: viewModel.mapPins,
+                            footprints: viewModel.footprints,
                             reels: viewModel.reels,
                             region: viewModel.mapRegion,
                             isActive: isShowingMapDetail == false
@@ -228,6 +230,7 @@ private struct ProfileStatChip: View {
 
 private struct ProfileMapPreview: View {
     let pins: [ProfileViewModel.MapPin]
+    let footprints: [ProfileViewModel.Footprint]
     let reels: [RealPost]
     let region: MKCoordinateRegion
     let isActive: Bool
@@ -237,12 +240,54 @@ private struct ProfileMapPreview: View {
     @State private var spinPhase: SpinPhase = .north
     @State private var ticksRemaining: Int = 0
     @State private var phaseTicksTotal: Int = 0
+    @StateObject private var cityResolver = TimelineCityResolver()
 
     private let spinLatitude: CLLocationDegrees
     private let globeDistance: CLLocationDistance = 20_000_000
     private let spinDuration: TimeInterval = 20
     private let spinFrameInterval: TimeInterval = 1.0 / 60.0
     private let transitionDuration: TimeInterval = 3.5
+    private var previewTimelineSegments: [TimelineSegment] {
+        let reelEvents = reels.map { real in
+            TimelineEvent(
+                id: real.id,
+                date: real.createdAt,
+                coordinate: real.center,
+                kind: .reel(real, PreviewData.user(for: real.userId))
+            )
+        }
+
+        let footprintEvents: [TimelineEvent] = footprints.compactMap { footprint in
+            guard let visitDate = footprint.latestVisit else { return nil }
+            return TimelineEvent(
+                id: footprint.id,
+                date: visitDate,
+                coordinate: footprint.coordinate,
+                kind: .poi(footprint.ratedPOI)
+            )
+        }
+
+        let events = (reelEvents + footprintEvents).sorted { $0.date < $1.date }
+        var segments: [TimelineSegment] = []
+        for event in events {
+            let label = cityResolver.label(for: event.coordinate, preferred: event.labelHint)
+            if var last = segments.last, last.label == label {
+                last.events.append(event)
+                last.end = max(last.end, event.date)
+                segments[segments.count - 1] = last
+            } else {
+                segments.append(
+                    TimelineSegment(
+                        label: label,
+                        start: event.date,
+                        end: event.date,
+                        events: [event]
+                    )
+                )
+            }
+        }
+        return segments
+    }
     private var spinFrameNanoseconds: UInt64 {
         UInt64((spinFrameInterval * 1_000_000_000).rounded())
     }
@@ -255,11 +300,13 @@ private struct ProfileMapPreview: View {
 
     init(
         pins: [ProfileViewModel.MapPin],
+        footprints: [ProfileViewModel.Footprint],
         reels: [RealPost],
         region: MKCoordinateRegion,
         isActive: Bool
     ) {
         self.pins = pins
+        self.footprints = footprints
         self.reels = reels
         self.region = region
         self.isActive = isActive
@@ -274,48 +321,56 @@ private struct ProfileMapPreview: View {
     var body: some View {
         let showDetails = ProfileMapAnnotationZoomHelper.isClose(distance: globeDistance)
 
-        Map(position: $cameraPosition, interactionModes: []) {
-            if showDetails {
-                ForEach(reels) { real in
-                    MapCircle(center: real.center, radius: real.radiusMeters)
-                        .foregroundStyle(Theme.neonPrimary.opacity(0.18))
-                        .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
-                    Annotation("", coordinate: real.center) {
-                        RealMapThumbnail(real: real, user: PreviewData.user(for: real.userId), size: 38)
+        VStack(spacing: 10) {
+            Map(position: $cameraPosition, interactionModes: []) {
+                if showDetails {
+                    ForEach(reels) { real in
+                        MapCircle(center: real.center, radius: real.radiusMeters)
+                            .foregroundStyle(Theme.neonPrimary.opacity(0.18))
+                            .stroke(Theme.neonPrimary.opacity(0.85), lineWidth: 1.5)
+                        Annotation("", coordinate: real.center) {
+                            RealMapThumbnail(real: real, user: PreviewData.user(for: real.userId), size: 38)
+                        }
                     }
-                }
-                ForEach(pins) { pin in
-                    Annotation("", coordinate: pin.coordinate) {
-                        ProfileMapMarker(category: pin.category)
+                    ForEach(pins) { pin in
+                        Annotation("", coordinate: pin.coordinate) {
+                            ProfileMapMarker(category: pin.category)
+                        }
                     }
-                }
-            } else {
-                ForEach(reels) { real in
-                    Annotation("", coordinate: real.center) {
-                        ProfileCollapsedReelMarker(real: real)
+                } else {
+                    ForEach(reels) { real in
+                        Annotation("", coordinate: real.center) {
+                            ProfileCollapsedReelMarker(real: real)
+                        }
                     }
-                }
-                ForEach(pins) { pin in
-                    Annotation("", coordinate: pin.coordinate) {
-                        ProfileMapDotMarker(category: pin.category)
+                    ForEach(pins) { pin in
+                        Annotation("", coordinate: pin.coordinate) {
+                            ProfileMapDotMarker(category: pin.category)
+                        }
                     }
                 }
             }
+            .mapStyle(hybridMapStyle)
+            .allowsHitTesting(false)
+            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.4), radius: 16, x: 0, y: 10)
+            .task(id: isActive) {
+                guard isActive else { return }
+                await spinContinuously()
+            }
+            .animation(nil, value: cameraPosition)
+            .environment(\.colorScheme, .light)
+
+            if previewTimelineSegments.isEmpty == false {
+                PreviewTimelineAxis(segments: previewTimelineSegments)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 180)
+            }
         }
-        .mapStyle(hybridMapStyle)
-        .allowsHitTesting(false)
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.4), radius: 16, x: 0, y: 10)
-        .task(id: isActive) {
-            guard isActive else { return }
-            await spinContinuously()
-        }
-        .animation(nil, value: cameraPosition)
-        .environment(\.colorScheme, .light)
     }
 
     private func spinContinuously() async {
@@ -465,7 +520,9 @@ private struct ProfileMapDetailView: View {
 
     @State private var flightController = MapFlightController()
     @State private var cameraPosition: MapCameraPosition
-    @State private var isGlobeView: Bool = false
+    @State private var displayMode: MapDisplayMode = .all
+    @StateObject private var cityResolver = TimelineCityResolver()
+    @State private var selectedTimelineSegmentId: String?
     @State private var lastCenter: CLLocationCoordinate2D
     @State private var currentRegion: MKCoordinateRegion
     @State private var sheetState: MapSheetState = .collapsed
@@ -476,7 +533,9 @@ private struct ProfileMapDetailView: View {
     @State private var isListSelection: Bool = false
     @State private var selectedEntryId: UUID?
     @State private var lastCameraDistance: CLLocationDistance?
-    private let globeDistance: CLLocationDistance = 20_000_000
+    private let timelinePaddingFactor: Double = 1.65
+    private let timelineMinSpanMeters: Double = 1_200
+    private let timelineZoomOutExtra: Double = 1.25
 
     init(
         pins: [ProfileViewModel.MapPin],
@@ -506,7 +565,7 @@ private struct ProfileMapDetailView: View {
             ZStack(alignment: .topLeading) {
                 Map(position: $cameraPosition, interactionModes: .all) {
                     let now = Date()
-                    let reelsForDisplay = filteredReels.sorted { lhs, rhs in
+                    let reelsForDisplay = activeReels.sorted { lhs, rhs in
                         let lhsMode = reelDisplayMode(for: lhs, now: now)
                         let rhsMode = reelDisplayMode(for: rhs, now: now)
                         if lhsMode.priority != rhsMode.priority {
@@ -539,7 +598,7 @@ private struct ProfileMapDetailView: View {
                             .buttonStyle(.plain)
                         }
                     }
-                    ForEach(filteredPins) { pin in
+                    ForEach(activePins) { pin in
                         Annotation("", coordinate: pin.coordinate) {
                             Button {
                                 isListSelection = false
@@ -556,7 +615,7 @@ private struct ProfileMapDetailView: View {
                     }
                 }
                 .ignoresSafeArea()
-                .mapStyle(activeMapStyle)
+                .mapStyle(.standard)
                 .onMapCameraChange(frequency: .continuous) { context in
                     lastCenter = context.region.center
                     currentRegion = context.region
@@ -586,20 +645,24 @@ private struct ProfileMapDetailView: View {
                 .padding(.leading, 18)
             }
             .overlay(alignment: .bottom) {
-                ProfileMapBottomSheet(
-                    entries: entries,
-                    profileUser: profileUser,
-                    userProvider: userProvider,
-                    sheetState: $sheetState,
-                    filter: $filter,
-                                onSelectEntry: { entry in
-                                    isListSelection = true
-                                    presentEntry(entry)
-                                }
-                            )
+                if displayMode == .all {
+                    ProfileMapBottomSheet(
+                        entries: entries,
+                        profileUser: profileUser,
+                        userProvider: userProvider,
+                        sheetState: $sheetState,
+                        filter: $filter,
+                        onSelectEntry: { entry in
+                            isListSelection = true
+                            presentEntry(entry)
                         }
+                    )
+                } else {
+                    timelineOverlay
+                }
+            }
             .overlay(alignment: .topTrailing) {
-                globeToggle
+                modeToggle
                     .padding(.top, topInset - 25)
                     .padding(.trailing, 18)
             }
@@ -676,60 +739,173 @@ private struct ProfileMapDetailView: View {
         }
     }
 
-    private var activeMapStyle: MapStyle {
-        if isGlobeView {
-            return globeStyle
+    private var activeTimelineSegment: TimelineSegment? {
+        if let id = selectedTimelineSegmentId {
+            return timelineSegments.first { $0.id == id }
         }
-        return .standard
+        return timelineSegments.last
     }
 
-    private var globeStyle: MapStyle {
-        if #available(iOS 17.0, *) {
-            return .hybrid(elevation: .realistic)
-        }
-        return .standard
-    }
-
-    private var globeToggle: some View {
-        Button {
-            toggleMapMode()
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: isGlobeView ? "globe.americas.fill" : "map.fill")
-                    .font(.subheadline.weight(.bold))
-                Text(isGlobeView ? "Globe" : "Map")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+    private var activeReels: [RealPost] {
+        switch displayMode {
+        case .all:
+            return filteredReels
+        case .timeline:
+            guard let segment = activeTimelineSegment else { return [] }
+            return segment.events.compactMap { event in
+                if case let .reel(real, _) = event.kind {
+                    return reelsById[real.id] ?? real
+                }
+                return nil
             }
         }
-        .buttonStyle(.plain)
     }
 
-    private func toggleMapMode() {
-        isGlobeView.toggle()
-        let center = lastCenter
-        if isGlobeView {
-            cameraPosition = .camera(
-                MapCamera(
-                    centerCoordinate: center,
-                    distance: globeDistance,
-                    heading: 0,
-                    pitch: 0
+    private var activePins: [ProfileViewModel.MapPin] {
+        switch displayMode {
+        case .all:
+            return filteredPins
+        case .timeline:
+            guard let segment = activeTimelineSegment else { return [] }
+            return segment.events.compactMap { event in
+                if case let .poi(rated) = event.kind {
+                    return mapPinsById[rated.id]
+                }
+                return nil
+            }
+        }
+    }
+
+    private var reelsById: [UUID: RealPost] {
+        Dictionary(uniqueKeysWithValues: reels.map { ($0.id, $0) })
+    }
+
+    private var mapPinsById: [UUID: ProfileViewModel.MapPin] {
+        Dictionary(uniqueKeysWithValues: pins.map { ($0.id, $0) })
+    }
+
+    private var timelineSegments: [TimelineSegment] {
+        let reelEvents = reels.map { real in
+            TimelineEvent(
+                id: real.id,
+                date: real.createdAt,
+                coordinate: real.center,
+                kind: .reel(real, userProvider(real.userId))
+            )
+        }
+
+        let footprintEvents: [TimelineEvent] = footprints.compactMap { footprint in
+            guard let visitDate = footprint.latestVisit else { return nil }
+            return TimelineEvent(
+                id: footprint.id,
+                date: visitDate,
+                coordinate: footprint.coordinate,
+                kind: .poi(footprint.ratedPOI)
+            )
+        }
+
+        let events = (reelEvents + footprintEvents).sorted { $0.date < $1.date }
+        var segments: [TimelineSegment] = []
+        for event in events {
+            let label = cityResolver.label(for: event.coordinate, preferred: event.labelHint)
+            if var last = segments.last, last.label == label {
+                last.events.append(event)
+                last.end = max(last.end, event.date)
+                segments[segments.count - 1] = last
+            } else {
+                segments.append(
+                    TimelineSegment(
+                        label: label,
+                        start: event.date,
+                        end: event.date,
+                        events: [event]
+                    )
                 )
-            )
-        } else {
-            cameraPosition = .region(
-                MKCoordinateRegion(center: center, span: currentRegion.span)
-            )
+            }
         }
+        return segments
+    }
+
+    private var modeToggle: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    displayMode = .all
+                    selectedTimelineSegmentId = nil
+                }
+            } label: {
+                Text("All")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(displayMode == .all ? Color.black : Color.white.opacity(0.85))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .frame(minWidth: 70)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(displayMode == .all ? Color.white : Color.white.opacity(0.12))
+                    )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    displayMode = .timeline
+                    if selectedTimelineSegmentId == nil {
+                        selectedTimelineSegmentId = timelineSegments.last?.id
+                    }
+                }
+            } label: {
+                Text("Timeline")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(displayMode == .timeline ? Color.black : Color.white.opacity(0.85))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .frame(minWidth: 90)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(displayMode == .timeline ? Color.white : Color.white.opacity(0.12))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(6)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+        }
+    }
+
+    private var timelineOverlay: some View {
+        VStack(spacing: 10) {
+            Capsule()
+                .fill(Color.white.opacity(0.4))
+                .frame(width: 44, height: 5)
+                .padding(.top, 8)
+
+            PreviewTimelineAxis(
+                segments: timelineSegments,
+                selectedId: selectedTimelineSegmentId
+            ) { segment in
+                selectedTimelineSegmentId = segment.id
+                flyToTimelineSegment(segment)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 220)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 18)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color.black.opacity(0.9))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
     }
 
     struct Entry: Identifiable {
@@ -762,6 +938,26 @@ private struct ProfileMapDetailView: View {
         if isListSelection {
             flyToEntry(entry, cause: cause(for: entry), animated: false)
         }
+    }
+
+    private func flyToTimelineSegment(_ segment: TimelineSegment) {
+        let relatedEvents = timelineSegments
+            .filter { $0.label == segment.label }
+            .flatMap(\.events)
+        guard let target = boundingTarget(for: relatedEvents, padding: timelinePaddingFactor) else { return }
+
+        let camera = MapCamera(
+            centerCoordinate: target.region.center,
+            distance: target.distance,
+            heading: 0,
+            pitch: 0
+        )
+
+        withAnimation(.easeInOut(duration: 0.45)) {
+            cameraPosition = .camera(camera)
+        }
+        currentRegion = target.region
+        lastCenter = target.region.center
     }
 
     private func entry(for real: RealPost) -> Entry? {
@@ -827,6 +1023,61 @@ private struct ProfileMapDetailView: View {
 
     private func footprint(for pin: ProfileViewModel.MapPin) -> ProfileViewModel.Footprint? {
         footprints.first { $0.id == pin.id }
+    }
+
+    private func boundingTarget(for events: [TimelineEvent], padding: Double) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
+        guard events.isEmpty == false else { return nil }
+
+        var mapRect = MKMapRect.null
+        for event in events {
+            let point = MKMapPoint(event.coordinate)
+            let radiusMeters: CLLocationDistance
+            if case let .reel(real, _) = event.kind {
+                radiusMeters = max(real.radiusMeters, 0)
+            } else {
+                radiusMeters = 0
+            }
+            let pointsRadius = radiusMeters * MKMapPointsPerMeterAtLatitude(event.coordinate.latitude)
+            let eventRect = MKMapRect(
+                origin: MKMapPoint(x: point.x - pointsRadius, y: point.y - pointsRadius),
+                size: MKMapSize(width: pointsRadius * 2, height: pointsRadius * 2)
+            )
+            mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
+        }
+
+        // Ensure a minimum footprint so single points don't produce a zero-size rect.
+        let centerPoint = MKMapPoint(x: mapRect.midX, y: mapRect.midY)
+        let centerCoordinate = centerPoint.coordinate
+        let pointsPerMeter = MKMapPointsPerMeterAtLatitude(centerCoordinate.latitude)
+        let minSpanPoints = timelineMinSpanMeters * pointsPerMeter
+        if mapRect.width < minSpanPoints || mapRect.height < minSpanPoints {
+            let targetWidth = max(mapRect.width, minSpanPoints)
+            let targetHeight = max(mapRect.height, minSpanPoints)
+            mapRect = MKMapRect(
+                x: centerPoint.x - targetWidth / 2,
+                y: centerPoint.y - targetHeight / 2,
+                width: targetWidth,
+                height: targetHeight
+            )
+        }
+
+        // Apply the existing padding factor plus a slight zoom-out buffer.
+        let scale = max(padding * timelineZoomOutExtra, 1)
+        let extraWidth = mapRect.width * (scale - 1) / 2
+        let extraHeight = mapRect.height * (scale - 1) / 2
+        mapRect = mapRect.insetBy(dx: -extraWidth, dy: -extraHeight)
+
+        let screenSize = UIScreen.main.bounds.size
+        let fallbackSize = screenSize == .zero ? CGSize(width: 430, height: 932) : screenSize
+        let mapView = MKMapView(frame: CGRect(origin: .zero, size: fallbackSize))
+        let edgePadding = UIEdgeInsets(top: 60, left: 48, bottom: 220, right: 48)
+        let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
+        let fittedRegion = MKCoordinateRegion(fittedRect)
+
+        let spanMeters = ProfileMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
+        let distance = max(spanMeters, timelineMinSpanMeters) * 1.5
+
+        return (fittedRegion, distance)
     }
 
     @ViewBuilder
@@ -915,6 +1166,11 @@ private struct ProfileMapDetailView: View {
 private enum MapSheetState {
     case collapsed
     case expanded
+}
+
+private enum MapDisplayMode {
+    case all
+    case timeline
 }
 
 private enum MapListFilter: String, CaseIterable {
@@ -1791,6 +2047,224 @@ private struct RealMapThumbnail: View {
     private var initials: String {
         guard let handle = user?.handle else { return "PO" }
         return String(handle.prefix(2)).uppercased()
+    }
+}
+
+// MARK: - Timeline helpers for preview card
+
+private enum TimelineEventKind {
+    case reel(RealPost, User?)
+    case poi(RatedPOI)
+
+    var priority: Int {
+        switch self {
+        case .reel: return 1
+        case .poi: return 0
+        }
+    }
+}
+
+private struct TimelineEvent: Identifiable {
+    let id: UUID
+    let date: Date
+    let coordinate: CLLocationCoordinate2D
+    let kind: TimelineEventKind
+
+    var labelHint: String? {
+        switch kind {
+        case let .reel(real, _):
+            return PreviewData.locationLabel(for: real.id)
+        case let .poi(rated):
+            return PreviewData.locationLabel(for: rated.poi.id)
+        }
+    }
+}
+
+private struct TimelineSegment: Identifiable {
+    // Deterministic ID so SwiftUI keeps image loading state stable while the map spins.
+    var id: String { "\(label)-\(Int(start.timeIntervalSince1970))" }
+    let label: String
+    var start: Date
+    var end: Date
+    var events: [TimelineEvent]
+}
+
+private struct PreviewTimelineAxis: View {
+    let segments: [TimelineSegment]
+    var selectedId: String?
+    var onSelect: ((TimelineSegment) -> Void)?
+
+    init(
+        segments: [TimelineSegment],
+        selectedId: String? = nil,
+        onSelect: ((TimelineSegment) -> Void)? = nil
+    ) {
+        self.segments = segments
+        self.selectedId = selectedId
+        self.onSelect = onSelect
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                ForEach(Array(segments.enumerated()), id: \.1.id) { index, segment in
+                    let isLast = index == segments.count - 1
+                    let isSelected = segment.id == selectedId
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(spacing: 4) {
+                            Circle()
+                                .fill(isSelected ? Color.white : Color.pink)
+                                .frame(width: 12, height: 12)
+                                .overlay {
+                                    Circle().stroke(Color.white.opacity(0.9), lineWidth: 2)
+                                }
+                            Rectangle()
+                                .fill(Color.white.opacity(isLast ? 0 : 0.2))
+                                .frame(width: 2, height: isLast ? 0 : 32)
+                        }
+                        .frame(width: 18)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(segment.label)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(isSelected ? Color.white : Color.white)
+                            Text(dateRangeText(for: segment))
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.7))
+                            avatarStack(for: segment)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white.opacity(isSelected ? 0.08 : 0))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.white.opacity(isSelected ? 0.25 : 0.1), lineWidth: 1)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onSelect?(segment)
+                    }
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func avatarStack(for segment: TimelineSegment) -> some View {
+        // Favor reels so their thumbnails surface even when POI visits dominate.
+        let events = segment.events.sorted { lhs, rhs in
+            if lhs.kind.priority != rhs.kind.priority {
+                return lhs.kind.priority > rhs.kind.priority
+            }
+            return lhs.date > rhs.date
+        }
+        return HStack(spacing: -10) {
+            ForEach(events) { event in
+                avatar(for: event)
+                    .frame(width: 34, height: 34)
+            }
+        }
+    }
+
+private func avatar(for event: TimelineEvent) -> some View {
+    switch event.kind {
+    case let .reel(real, user):
+        return AnyView(
+            RealMapThumbnail(real: real, user: user, size: 34)
+            )
+        case let .poi(poi):
+            return AnyView(
+                ProfileMapMarker(category: poi.poi.category)
+                    .frame(width: 30, height: 33)
+            )
+    }
+}
+
+private func dateRangeText(for segment: TimelineSegment) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM d"
+    if Calendar.current.isDate(segment.start, inSameDayAs: segment.end) {
+        return formatter.string(from: segment.start)
+        }
+        return "\(formatter.string(from: segment.start)) - \(formatter.string(from: segment.end))"
+    }
+}
+
+@MainActor
+private final class TimelineCityResolver: ObservableObject {
+    private var labels: [String: String] = [:]
+
+    func label(for coordinate: CLLocationCoordinate2D, preferred: String? = nil) -> String {
+        let key = Self.cacheKey(for: coordinate)
+        if let cached = labels[key] {
+            return cached
+        }
+        if let preferred, preferred.isEmpty == false {
+            return preferred
+        }
+        return Self.fallbackLabel(for: coordinate)
+    }
+
+    private static func cacheKey(for coordinate: CLLocationCoordinate2D) -> String {
+        String(format: "%.3f,%.3f", coordinate.latitude, coordinate.longitude)
+    }
+
+    private static func fallbackLabel(for coordinate: CLLocationCoordinate2D) -> String {
+        let candidates: [(String, CLLocationCoordinate2D)] = [
+            ("Xi'an, Shaanxi, China", .init(latitude: 34.341, longitude: 108.939)),
+            ("Hangzhou, Zhejiang, China", .init(latitude: 30.274, longitude: 120.155)),
+            ("Suzhou, Jiangsu, China", .init(latitude: 31.298, longitude: 120.583)),
+            ("Seattle, Washington, USA", .init(latitude: 47.6062, longitude: -122.3321))
+        ]
+
+        let current = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        var best: (String, CLLocationDistance)? = nil
+        for candidate in candidates {
+            let dist = current.distance(from: CLLocation(latitude: candidate.1.latitude, longitude: candidate.1.longitude))
+            if best == nil || dist < best!.1 {
+                best = (candidate.0, dist)
+            }
+        }
+
+        if let best, best.1 < 600_000 {
+            return best.0
+        }
+        return String(format: "Lat %.3f, Lon %.3f", coordinate.latitude, coordinate.longitude)
+    }
+}
+
+private struct DiamondShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let midX = rect.midX
+        let midY = rect.midY
+        path.move(to: CGPoint(x: midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: midY))
+        path.addLine(to: CGPoint(x: midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: midY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+private func poiPreview(for rated: RatedPOI, size: CGFloat) -> some View {
+    let shape = DiamondShape()
+    let fillColor = (rated.poi.category.markerGradientColors.first ?? rated.poi.category.accentColor).opacity(0.9)
+
+    return ZStack {
+        fillColor
+        ProfileMapMarker(category: rated.poi.category)
+            .frame(width: size, height: size * 1.1)
+    }
+    .frame(width: size, height: size)
+    .clipShape(shape)
+    .overlay {
+        shape.stroke(Color.white.opacity(0.85), lineWidth: 1)
     }
 }
 

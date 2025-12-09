@@ -54,6 +54,7 @@ enum PreviewData {
     private static let generatedFriends: [User] = (0..<120).map { generatedFriend(index: $0) }
 
     static let sampleFriends: [User] = primaryFriends + generatedFriends
+    private static var locationLabels: [UUID: String] = [:]
 
     struct ChengsiMock {
         let user: User
@@ -76,6 +77,7 @@ enum PreviewData {
             coordinate: .init(latitude: 48.118, longitude: -123.43),
             category: .nightlife
         )
+        registerLocationLabel("Port Angeles, Washington, USA", for: neonPier.id)
 
         let harborStrata = POI(
             id: uuid(7002),
@@ -83,6 +85,7 @@ enum PreviewData {
             coordinate: .init(latitude: 47.658, longitude: -117.426),
             category: .viewpoint
         )
+        registerLocationLabel("Spokane, Washington, USA", for: harborStrata.id)
 
         let chineMarket = POI(
             id: uuid(7003),
@@ -90,6 +93,7 @@ enum PreviewData {
             coordinate: .init(latitude: 46.602, longitude: -120.505),
             category: .market
         )
+        registerLocationLabel("Yakima, Washington, USA", for: chineMarket.id)
 
         let laRooftop = POI(
             id: uuid(7004),
@@ -97,6 +101,7 @@ enum PreviewData {
             coordinate: .init(latitude: 34.0522, longitude: -118.2437),
             category: .nightlife
         )
+        registerLocationLabel("Los Angeles, California, USA", for: laRooftop.id)
 
         let londonFerry = POI(
             id: uuid(7005),
@@ -104,6 +109,7 @@ enum PreviewData {
             coordinate: .init(latitude: 51.5074, longitude: -0.1278),
             category: .viewpoint
         )
+        registerLocationLabel("London, England, UK", for: londonFerry.id)
 
         let bangkokAlley = POI(
             id: uuid(7006),
@@ -111,6 +117,7 @@ enum PreviewData {
             coordinate: .init(latitude: 13.7563, longitude: 100.5018),
             category: .nightlife
         )
+        registerLocationLabel("Bangkok, Thailand", for: bangkokAlley.id)
 
         let recentFootprint = RatedPOI(
             poi: neonPier,
@@ -325,6 +332,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 50),
             expiresAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 48)
         )
+        registerLocationLabel("Tacoma, Washington, USA", for: droneCountdownReal.id)
 
         let stargazingReal = RealPost(
             id: uuid(106),
@@ -354,6 +362,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 55),
             expiresAt: referenceDate.addingTimeInterval(-60 * 60 * 24 * 53)
         )
+        registerLocationLabel("Anacortes, Washington, USA", for: stargazingReal.id)
 
         let moscowReal = RealPost(
             id: uuid(112),
@@ -375,6 +384,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-18 * 3600),
             expiresAt: referenceDate.addingTimeInterval(30 * 3600)
         )
+        registerLocationLabel("Moscow, Russia", for: moscowReal.id)
 
         let laGlobalReal = RealPost(
             id: uuid(116),
@@ -396,6 +406,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-36 * 3600),
             expiresAt: referenceDate.addingTimeInterval(26 * 3600)
         )
+        registerLocationLabel("Los Angeles, California, USA", for: laGlobalReal.id)
 
         let londonGlobalReal = RealPost(
             id: uuid(117),
@@ -418,6 +429,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-48 * 3600),
             expiresAt: referenceDate.addingTimeInterval(34 * 3600)
         )
+        registerLocationLabel("London, England, UK", for: londonGlobalReal.id)
 
         let bangkokGlobalReal = RealPost(
             id: uuid(118),
@@ -441,6 +453,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-52 * 3600),
             expiresAt: referenceDate.addingTimeInterval(30 * 3600)
         )
+        registerLocationLabel("Bangkok, Thailand", for: bangkokGlobalReal.id)
 
         let recentReal = RealPost(
             id: uuid(9101),
@@ -465,6 +478,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-60 * 35),
             expiresAt: referenceDate.addingTimeInterval(14 * 3600)
         )
+        registerLocationLabel("Walla Walla, Washington, USA", for: recentReal.id)
 
         let oldReal = RealPost(
             id: uuid(9104),
@@ -489,6 +503,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-28 * 60 * 60),
             expiresAt: referenceDate.addingTimeInterval(-4 * 3600)
         )
+        registerLocationLabel("Leavenworth, Washington, USA", for: oldReal.id)
 
         let laReal = RealPost(
             id: uuid(9107),
@@ -506,6 +521,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-36 * 60 * 60),
             expiresAt: referenceDate.addingTimeInterval(26 * 3600)
         )
+        registerLocationLabel("Los Angeles, California, USA", for: laReal.id)
 
         let londonReal = RealPost(
             id: uuid(9110),
@@ -524,6 +540,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-48 * 60 * 60),
             expiresAt: referenceDate.addingTimeInterval(34 * 3600)
         )
+        registerLocationLabel("London, England, UK", for: londonReal.id)
 
         let bangkokReal = RealPost(
             id: uuid(9114),
@@ -544,6 +561,7 @@ enum PreviewData {
             createdAt: referenceDate.addingTimeInterval(-52 * 60 * 60),
             expiresAt: referenceDate.addingTimeInterval(30 * 3600)
         )
+        registerLocationLabel("Bangkok, Thailand", for: bangkokReal.id)
 
         return ChengsiMock(
             user: currentUser,
@@ -570,6 +588,7 @@ enum PreviewData {
             coordinate: .init(latitude: 48.754, longitude: -122.478),
             category: .viewpoint
         )
+        registerLocationLabel("Bellingham, Washington, USA", for: waterfront.id)
 
         let cafe = POI(
             id: UUID(uuidString: "BBBBBBBB-5555-6666-7777-888888888888") ?? UUID(),
@@ -577,6 +596,7 @@ enum PreviewData {
             coordinate: .init(latitude: 47.037, longitude: -122.9),
             category: .coffee
         )
+        registerLocationLabel("Olympia, Washington, USA", for: cafe.id)
 
         let nightMarket = POI(
             id: UUID(uuidString: "BBBBBBBB-9999-AAAA-BBBB-CCCCCCCCCCCC") ?? UUID(),
@@ -584,6 +604,7 @@ enum PreviewData {
             coordinate: .init(latitude: 45.638, longitude: -122.661),
             category: .nightlife
         )
+        registerLocationLabel("Vancouver, Washington, USA", for: nightMarket.id)
 
         let artMuseum = POI(
             id: UUID(uuidString: "BBBBBBBB-DDDD-EEEE-FFFF-111111111111") ?? UUID(),
@@ -591,6 +612,7 @@ enum PreviewData {
             coordinate: .init(latitude: 46.852, longitude: -121.76),
             category: .art
         )
+        registerLocationLabel("Mount Rainier, Washington, USA", for: artMuseum.id)
 
         let restaurant = POI(
             id: UUID(uuidString: "BBBBBBBB-1212-3434-5656-787878787878") ?? UUID(),
@@ -598,6 +620,7 @@ enum PreviewData {
             coordinate: .init(latitude: 46.28, longitude: -119.277),
             category: .restaurant
         )
+        registerLocationLabel("Kennewick, Washington, USA", for: restaurant.id)
 
         let gasWorks = POI(
             id: UUID(uuidString: "BBBBBBBB-ABAB-CDCD-EFEF-999999999999") ?? UUID(),
@@ -605,6 +628,7 @@ enum PreviewData {
             coordinate: .init(latitude: 47.423, longitude: -120.309),
             category: .viewpoint
         )
+        registerLocationLabel("Wenatchee, Washington, USA", for: gasWorks.id)
 
         let capitolCafe = POI(
             id: UUID(uuidString: "BBBBBBBB-A1A1-B2B2-C3C3-D4D4D4D4D4D4") ?? UUID(),
@@ -612,6 +636,7 @@ enum PreviewData {
             coordinate: .init(latitude: 48.117, longitude: -122.76),
             category: .restaurant
         )
+        registerLocationLabel("Port Townsend, Washington, USA", for: capitolCafe.id)
 
         let redmondMeadow = POI(
             id: UUID(uuidString: "BBBBBBBB-AAAA-FFFF-EEEE-010101010101") ?? UUID(),
@@ -619,6 +644,7 @@ enum PreviewData {
             coordinate: .init(latitude: 47.673, longitude: -117.239),
             category: .viewpoint
         )
+        registerLocationLabel("Spokane, Washington, USA", for: redmondMeadow.id)
 
         let redmondArcade = POI(
             id: UUID(uuidString: "BBBBBBBB-CECE-FAFA-BCBC-020202020202") ?? UUID(),
@@ -626,6 +652,7 @@ enum PreviewData {
             coordinate: .init(latitude: 47.6748, longitude: -122.1228),
             category: .nightlife
         )
+        registerLocationLabel("Redmond, Washington, USA", for: redmondArcade.id)
 
         func mediaPhoto(_ url: String) -> RatedPOI.Media {
             RatedPOI.Media(kind: .photo(URL(string: url)!))
@@ -1833,6 +1860,29 @@ enum PreviewData {
         return sampleFriends.first { $0.id == id }
     }
 
+    static func locationLabel(for id: UUID) -> String? {
+        locationLabels[id]
+    }
+
+    private static func registerLocationLabel(_ label: String, for id: UUID) {
+        locationLabels[id] = label
+    }
+
+    private static func cityLabel(for city: String) -> String {
+        switch city {
+        case "Hangzhou":
+            return "Hangzhou, Zhejiang, China"
+        case "Suzhou":
+            return "Suzhou, Jiangsu, China"
+        case "Seattle":
+            return "Seattle, Washington, USA"
+        case "Shaanxi":
+            return "Xi'an, Shaanxi, China"
+        default:
+            return city
+        }
+    }
+
     static func silentLumenRatedPOIs(referenceDate: Date = Date(), user: User? = nil) -> [RatedPOI] {
         let target = user ?? sampleFriends.first { $0.handle == "silent.lumen" }
         guard let target else { return [] }
@@ -1846,35 +1896,44 @@ enum PreviewData {
     }
 
     private static func generatedSilentLumenPOIs(referenceDate: Date, user: User) -> [RatedPOI] {
-        let centers: [(String, CLLocationCoordinate2D, Int)] = [
-            ("Suzhou", .init(latitude: 31.298, longitude: 120.583), 35),
-            ("Hangzhou", .init(latitude: 30.274, longitude: 120.155), 40),
-            ("Shaanxi", .init(latitude: 34.341, longitude: 108.939), 25)
+        let segments: [(String, CLLocationCoordinate2D, Int, Double, Double)] = [
+            ("Shaanxi", .init(latitude: 34.341, longitude: 108.939), 25, 365, 270),
+            ("Hangzhou", .init(latitude: 30.274, longitude: 120.155), 30, 269, 180),
+            ("Suzhou", .init(latitude: 31.298, longitude: 120.583), 20, 179, 95),
+            ("Seattle", .init(latitude: 47.6062, longitude: -122.3321), 10, 94, 70),
+            ("Suzhou", .init(latitude: 31.298, longitude: 120.583), 15, 69, 0)
         ]
         let categories = POICategory.allCases
         let tags = VisitTag.allCases
 
         var results: [RatedPOI] = []
-        for (cityOffset, tuple) in centers.enumerated() {
-            let (city, base, count) = tuple
+        var globalIndex = 0
+        for segment in segments {
+            let (city, base, count, startDaysAgo, endDaysAgo) = segment
+            let locationLabel = cityLabel(for: city)
             for idx in 0..<count {
-                let global = cityOffset * 200 + idx
-                let random = pseudoRandom01(index: global, salt: 77)
-                let isRecent = random < 0.8
-                let createdAt = silentLumenDate(isRecent: isRecent, index: global, referenceDate: referenceDate)
-                let coordinate = jitteredCoordinate(base: base, index: idx, spread: 0.8)
-                let category = categories[(idx + cityOffset) % categories.count]
-                let tag = tags[(idx + cityOffset) % tags.count]
+                let category = categories[globalIndex % categories.count]
+                let tag = tags[globalIndex % tags.count]
+                let coordinate = jitteredCoordinate(base: base, index: globalIndex, spread: 0.35)
+                let visitDate = silentLumenPOIDate(
+                    index: idx,
+                    count: count,
+                    startDaysAgo: startDaysAgo,
+                    endDaysAgo: endDaysAgo,
+                    referenceDate: referenceDate
+                )
+
                 let poi = POI(
-                    id: uuid(8000 + global),
-                    name: "Silent \(city) POI \(idx + 1)",
+                    id: uuid(8000 + globalIndex),
+                    name: "Silent \(city) POI \(globalIndex + 1)",
                     coordinate: coordinate,
                     category: category
                 )
+                registerLocationLabel(locationLabel, for: poi.id)
                 let checkIn = RatedPOI.CheckIn(
-                    id: uuid(9000 + global),
+                    id: uuid(9000 + globalIndex),
                     userId: user.id,
-                    createdAt: createdAt,
+                    createdAt: visitDate,
                     endorsement: .solid,
                     media: [],
                     tag: tag
@@ -1886,17 +1945,18 @@ enum PreviewData {
                 ]
                 let rated = RatedPOI(
                     poi: poi,
-                    highlight: "Silent.lumen drop \(city.lowercased()) spot \(idx + 1).",
+                    highlight: "Silent.lumen drop \(city.lowercased()) spot \(globalIndex + 1).",
                     secondary: "Quick log near \(city).",
                     media: [],
                     checkIns: [checkIn],
                     comments: [],
                     endorsements: endorsements,
                     tags: tagsSummary,
-                    isFavoritedByCurrentUser: idx.isMultiple(of: 4),
-                    favoritesCount: 5 + (idx % 30)
+                    isFavoritedByCurrentUser: globalIndex.isMultiple(of: 4),
+                    favoritesCount: 5 + (globalIndex % 30)
                 )
                 results.append(rated)
+                globalIndex += 1
             }
         }
         return results
@@ -1913,6 +1973,7 @@ enum PreviewData {
         var seed = 12_000
         for (cityOffset, tuple) in centers.enumerated() {
             let (city, base, count) = tuple
+            let locationLabel = cityLabel(for: city)
             for idx in 0..<count {
                 let global = seed + idx + cityOffset * 100
                 let random = pseudoRandom01(index: global, salt: 133)
@@ -1934,6 +1995,7 @@ enum PreviewData {
                     createdAt: created,
                     expiresAt: created.addingTimeInterval(30 * 3600)
                 )
+                registerLocationLabel(locationLabel, for: real.id)
                 results.append(real)
             }
             seed += 200
@@ -1980,6 +2042,20 @@ enum PreviewData {
         let minutesScatter = pseudoRandom01(index: index, salt: 587) * 12.0 * 60.0 // up to 12 hours
         let totalMinutes = dayOffset * 24.0 * 60.0 + minutesScatter
         return referenceDate.addingTimeInterval(-totalMinutes * 60.0)
+    }
+
+    private static func silentLumenPOIDate(
+        index: Int,
+        count: Int,
+        startDaysAgo: Double,
+        endDaysAgo: Double,
+        referenceDate: Date
+    ) -> Date {
+        let t = count > 1 ? Double(index) / Double(count - 1) : 0
+        let daysAgo = startDaysAgo - (startDaysAgo - endDaysAgo) * t
+        let jitterHours = pseudoRandom01(index: index, salt: 733) * 18.0
+        let totalSeconds = (daysAgo * 24.0 + jitterHours) * 3600.0
+        return referenceDate.addingTimeInterval(-totalSeconds)
     }
 
     static func profileRatedPOIs(for user: User, customPOIs: [RatedPOI]) -> [RatedPOI] {
