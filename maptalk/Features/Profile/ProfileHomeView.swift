@@ -267,7 +267,7 @@ private struct ProfileMapPreview: View {
             )
         }
 
-        let events = (reelEvents + footprintEvents).sorted { $0.date < $1.date }
+        let events = (reelEvents + footprintEvents).sorted { $0.date > $1.date }
         var segments: [TimelineSegment] = []
         for event in events {
             let label = cityResolver.label(for: event.coordinate, preferred: event.labelHint)
@@ -533,9 +533,13 @@ private struct ProfileMapDetailView: View {
     @State private var isListSelection: Bool = false
     @State private var selectedEntryId: UUID?
     @State private var lastCameraDistance: CLLocationDistance?
+    @State private var timelineEffectStyle: TimelineVisualEffect?
+    @State private var timelineEffectProgress: Double = 0
+    private let timelineAnimationStyle: TimelineAnimationStyle = .smooth
     private let timelinePaddingFactor: Double = 1.65
     private let timelineMinSpanMeters: Double = 1_200
     private let timelineZoomOutExtra: Double = 1.25
+    private let timelineTeleportThreshold: CLLocationDistance = 2_200_000
 
     init(
         pins: [ProfileViewModel.MapPin],
@@ -612,15 +616,18 @@ private struct ProfileMapDetailView: View {
                             }
                             .buttonStyle(.plain)
                         }
-                    }
                 }
-                .ignoresSafeArea()
-                .mapStyle(.standard)
-                .onMapCameraChange(frequency: .continuous) { context in
-                    lastCenter = context.region.center
-                    currentRegion = context.region
-                    lastCameraDistance = context.camera.distance
-                    let nextState = ProfileMapAnnotationZoomHelper.nextDetailState(
+            }
+            .ignoresSafeArea()
+            .mapStyle(.standard)
+            .saturation(mapSaturationEffect)
+            .blur(radius: mapBlurEffect)
+            .overlay(timelineEffectOverlay)
+            .onMapCameraChange(frequency: .continuous) { context in
+                lastCenter = context.region.center
+                currentRegion = context.region
+                lastCameraDistance = context.camera.distance
+                let nextState = ProfileMapAnnotationZoomHelper.nextDetailState(
                         current: isShowingDetailedAnnotations,
                         distance: context.camera.distance,
                         region: context.region
@@ -743,7 +750,7 @@ private struct ProfileMapDetailView: View {
         if let id = selectedTimelineSegmentId {
             return timelineSegments.first { $0.id == id }
         }
-        return timelineSegments.last
+        return timelineSegments.first
     }
 
     private var activeReels: [RealPost] {
@@ -804,7 +811,7 @@ private struct ProfileMapDetailView: View {
             )
         }
 
-        let events = (reelEvents + footprintEvents).sorted { $0.date < $1.date }
+        let events = (reelEvents + footprintEvents).sorted { $0.date > $1.date }
         var segments: [TimelineSegment] = []
         for event in events {
             let label = cityResolver.label(for: event.coordinate, preferred: event.labelHint)
@@ -851,7 +858,7 @@ private struct ProfileMapDetailView: View {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     displayMode = .timeline
                     if selectedTimelineSegmentId == nil {
-                        selectedTimelineSegmentId = timelineSegments.last?.id
+                        selectedTimelineSegmentId = timelineSegments.first?.id
                     }
                 }
             } label: {
@@ -946,6 +953,20 @@ private struct ProfileMapDetailView: View {
             .flatMap(\.events)
         guard let target = boundingTarget(for: relatedEvents, padding: timelinePaddingFactor) else { return }
 
+        if let baseRegion = Optional(currentRegion),
+           baseRegion.center.distance(to: target.region.center) > timelineTeleportThreshold {
+            timelineEffectStyle = nil
+            timelineEffectProgress = 0
+            withTransaction(Transaction(animation: nil)) {
+                cameraPosition = .region(target.region)
+            }
+            currentRegion = target.region
+            lastCenter = target.region.center
+            return
+        }
+
+        triggerVisualEffect(for: timelineAnimationStyle)
+
         let camera = MapCamera(
             centerCoordinate: target.region.center,
             distance: target.distance,
@@ -953,11 +974,109 @@ private struct ProfileMapDetailView: View {
             pitch: 0
         )
 
-        withAnimation(.easeInOut(duration: 0.45)) {
+        let animation = timelineAnimationStyle.animation
+        withTransaction(Transaction(animation: animation)) {
             cameraPosition = .camera(camera)
         }
         currentRegion = target.region
         lastCenter = target.region.center
+    }
+
+    @MainActor
+    private func triggerVisualEffect(for style: TimelineAnimationStyle) {
+        let effect = style.visualEffect
+        timelineEffectStyle = effect
+
+        guard effect != nil else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                timelineEffectProgress = 0
+            }
+            return
+        }
+
+        withAnimation(.easeInOut(duration: 0.18)) {
+            timelineEffectProgress = 1
+        }
+        let hold: Double = 0.22
+        DispatchQueue.main.asyncAfter(deadline: .now() + hold) {
+            withAnimation(.easeOut(duration: 0.3)) {
+                timelineEffectProgress = 0
+            }
+        }
+    }
+
+    private var currentVisualEffect: TimelineVisualEffect? {
+        guard timelineEffectProgress > 0 else { return nil }
+        return timelineEffectStyle
+    }
+
+    private var mapBlurEffect: CGFloat {
+        guard let effect = currentVisualEffect else { return 0 }
+        let progress = timelineEffectProgress
+        switch effect {
+        case .materialBlur:
+            return CGFloat(10 * progress)
+        case .dimmed:
+            return CGFloat(6 * progress)
+        }
+    }
+
+    private var mapSaturationEffect: Double {
+        guard let effect = currentVisualEffect else { return 1 }
+        switch effect {
+        case .materialBlur:
+            return 1 - (0.25 * timelineEffectProgress)
+        case .dimmed:
+            return 1 - (0.45 * timelineEffectProgress)
+        }
+    }
+
+    private var timelineEffectOverlayOpacity: Double {
+        max(0, min(1, timelineEffectProgress))
+    }
+
+    private var timelineEffectOverlay: some View {
+        Group {
+            switch currentVisualEffect {
+            case .materialBlur:
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.15),
+                                Color.white.opacity(0.06),
+                                Color.black.opacity(0.18)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            case .dimmed:
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.3),
+                        Color.black.opacity(0.1)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .overlay(
+                    RadialGradient(
+                        colors: [Theme.neonPrimary.opacity(0.18), .clear],
+                        center: .center,
+                        startRadius: 40,
+                        endRadius: 300
+                    )
+                    .blendMode(.screen)
+                )
+            case nil:
+                Color.clear
+            }
+        }
+        .allowsHitTesting(false)
+        .opacity(timelineEffectOverlayOpacity)
+        .animation(.easeInOut(duration: 0.2), value: timelineEffectProgress)
     }
 
     private func entry(for real: RealPost) -> Entry? {
@@ -1067,7 +1186,9 @@ private struct ProfileMapDetailView: View {
         let extraHeight = mapRect.height * (scale - 1) / 2
         mapRect = mapRect.insetBy(dx: -extraWidth, dy: -extraHeight)
 
-        let screenSize = UIScreen.main.bounds.size
+        let screenSize = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.size }
+            .first ?? .zero
         let fallbackSize = screenSize == .zero ? CGSize(width: 430, height: 932) : screenSize
         let mapView = MKMapView(frame: CGRect(origin: .zero, size: fallbackSize))
         let edgePadding = UIEdgeInsets(top: 60, left: 48, bottom: 220, right: 48)
@@ -2087,6 +2208,50 @@ private struct TimelineSegment: Identifiable {
     var start: Date
     var end: Date
     var events: [TimelineEvent]
+}
+
+private enum TimelineAnimationStyle: String, CaseIterable {
+    case none = "No Animation"
+    case smooth = "Smooth"
+    case bouncy = "Bouncy"
+    case snappy = "Snappy"
+    case materialBlur = "Material Blur"
+    case dimmed = "Dim & Desaturate"
+
+    var title: String { rawValue }
+
+    var animation: Animation? {
+        switch self {
+        case .none:
+            return nil
+        case .smooth:
+            return .smooth(duration: 0.45)
+        case .bouncy:
+            return .bouncy(duration: 0.6, extraBounce: 0.24)
+        case .snappy:
+            return .snappy(duration: 0.35, extraBounce: 0.14)
+        case .materialBlur:
+            return .smooth(duration: 0.5)
+        case .dimmed:
+            return .smooth(duration: 0.45)
+        }
+    }
+
+    var visualEffect: TimelineVisualEffect? {
+        switch self {
+        case .materialBlur:
+            return .materialBlur
+        case .dimmed:
+            return .dimmed
+        case .none, .smooth, .bouncy, .snappy:
+            return nil
+        }
+    }
+}
+
+private enum TimelineVisualEffect {
+    case materialBlur
+    case dimmed
 }
 
 private struct PreviewTimelineAxis: View {
