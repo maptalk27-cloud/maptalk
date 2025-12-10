@@ -472,17 +472,6 @@ private enum ActiveExperience: Identifiable {
     }
 }
 
-private extension View {
-    @ViewBuilder
-    func applyBackgroundInteractionIfAvailable() -> some View {
-        if #available(iOS 17.0, *) {
-            presentationBackgroundInteraction(.enabled)
-        } else {
-            self
-        }
-    }
-}
-
 private enum ControlsLayout {
     static let baseInset: CGFloat = 0.2
     static let baseSafeAreaMultiplier: CGFloat = 0.2
