@@ -95,8 +95,9 @@ struct ProfileTimelinePreview: View {
                 flyToSegment(segment)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 200)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
         .task(id: timelineSegments.map(\.id)) {
             await autoScrollTimeline()
         }

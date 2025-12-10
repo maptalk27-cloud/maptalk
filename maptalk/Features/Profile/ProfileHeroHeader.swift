@@ -37,6 +37,18 @@ struct ProfileHeroHeader: View {
                     }
                     Spacer()
                     Button {
+                        // placeholder for DM action
+                    } label: {
+                        Image(systemName: "paperplane.fill")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+                            .background(
+                                Circle()
+                                    .fill(Color.white.opacity(0.12))
+                            )
+                    }
+                    Button {
                         // placeholder for share action
                     } label: {
                         Image(systemName: "square.and.arrow.up")
@@ -75,7 +87,7 @@ struct ProfileHeroHeader: View {
             }
             .padding(.horizontal, 18)
             .padding(.top, topInset + 6)
-            .padding(.bottom, 18)
+            .padding(.bottom, 15)
         }
         .frame(
             maxWidth: .infinity,
@@ -87,7 +99,7 @@ struct ProfileHeroHeader: View {
     }
 
     private var heroHeight: CGFloat {
-        let minimumContent = topInset + 180
+        let minimumContent = topInset + 170
         return max(minimumContent, heightHint)
     }
 }

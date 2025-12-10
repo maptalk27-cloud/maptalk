@@ -13,11 +13,8 @@ struct ProfileHomeView: View {
             let topInset = safeAreaTop()
             let heroHeightHint = proxy.size.height * 0.42
             let horizontalPadding: CGFloat = 8
-            let safeWidth = proxy.size.width.isFinite ? proxy.size.width : 0
-            let safeHeight = proxy.size.height.isFinite ? proxy.size.height : 0
-            let availableWidth = max(0, safeWidth - (horizontalPadding * 2))
-            let heightFactor: CGFloat = viewModel.identity.isCurrentUser ? 0.55 : 0.65
-            let mapHeight = max(1, min(availableWidth, safeHeight * heightFactor))
+            let mapHeightSelf: CGFloat = 420
+            let mapHeightOther: CGFloat = 460
 
             ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea()
@@ -49,7 +46,7 @@ struct ProfileHomeView: View {
                                     isActive: isShowingMapDetail == false
                                 )
                                 .frame(maxWidth: .infinity)
-                                .frame(height: mapHeight)
+                                .frame(height: mapHeightSelf)
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
@@ -67,16 +64,13 @@ struct ProfileHomeView: View {
                                 }
                             )
                             .frame(maxWidth: .infinity)
-                            .frame(height: mapHeight)
+                            .frame(maxHeight: .infinity, alignment: .top)
                             .padding(.horizontal, horizontalPadding)
+                            .ignoresSafeArea(edges: .bottom)
                         }
                     }
-
-                    ProfileWideButton(title: "Message")
-                        .padding(.horizontal, horizontalPadding)
                 }
                 .frame(maxWidth: .infinity, alignment: .top)
-                .padding(.bottom, 24)
             }
             .ignoresSafeArea(edges: [.top, .bottom])
         }
@@ -117,4 +111,3 @@ struct ProfileHomeView: View {
     }
 
 }
-
