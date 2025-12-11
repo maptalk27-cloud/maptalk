@@ -22,10 +22,9 @@ struct ProfileTimelinePreview: View {
     @State private var autoPauseReasons: Set<AutoPauseReason> = []
     @State private var autoLastTick: Date = Date()
     @State private var lastAutoPlayEnabled: Bool
+    @State private var mapSize: CGSize = .zero
 
-    private let paddingFactor: Double = 1.5
-    private let minSpanMeters: Double = 1_200
-    private let zoomOutExtra: Double = 1.2
+    private let minSpanMeters: Double = 12_000
     private let teleportThreshold: CLLocationDistance = 1_000_000
     private let quickHopThreshold: CLLocationDistance = 500_000
     private let autoAdvanceDuration: TimeInterval = 6
@@ -89,6 +88,17 @@ struct ProfileTimelinePreview: View {
                     .stroke(Color.white.opacity(0.12), lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.35), radius: 14, y: 8)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear {
+                            mapSize = proxy.size
+                        }
+                        .onChange(of: proxy.size) { _, newValue in
+                            mapSize = newValue
+                        }
+                }
+            )
             .onAppear {
                 if selectedTimelineSegmentId == nil {
                     selectedTimelineSegmentId = timelineSegments.first?.id
@@ -319,29 +329,15 @@ struct ProfileTimelinePreview: View {
     }
 
     private func flyToSegment(_ segment: TimelineSegment, animated: Bool = true) {
-        guard let target = boundingTarget(for: segment.events) else { return }
+        let target = boundingTarget(for: segment.events) ?? (region, max(ProfileMapAnnotationZoomHelper.spanMeters(for: region), minSpanMeters))
         let camera = MapCamera(
             centerCoordinate: target.region.center,
             distance: target.distance,
             heading: 0,
             pitch: 0
         )
-        let travelDistance = currentRegion.center.distance(to: target.region.center)
-        if travelDistance > teleportThreshold {
-            withTransaction(Transaction(animation: nil)) {
-                cameraPosition = .region(target.region)
-            }
-            currentRegion = target.region
-            return
-        }
         if animated {
-            let duration: Double
-            if travelDistance > quickHopThreshold {
-                duration = 0.2
-            } else {
-                duration = 0.45
-            }
-            withAnimation(.smooth(duration: duration)) {
+            withAnimation(.smooth(duration: 0.35)) {
                 cameraPosition = .camera(camera)
             }
         } else {
@@ -353,54 +349,35 @@ struct ProfileTimelinePreview: View {
     private func boundingTarget(for events: [TimelineEvent]) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
         guard events.isEmpty == false else { return nil }
 
+        if events.count == 1, let coordinate = events.first?.coordinate {
+            let region = MKCoordinateRegion(
+                center: coordinate,
+                latitudinalMeters: minSpanMeters,
+                longitudinalMeters: minSpanMeters
+            )
+            return (region, minSpanMeters)
+        }
+
         var mapRect = MKMapRect.null
         for event in events {
             let point = MKMapPoint(event.coordinate)
-            let radiusMeters: CLLocationDistance
-            if case let .reel(real, _) = event.kind {
-                radiusMeters = max(real.radiusMeters, 0)
-            } else {
-                radiusMeters = 0
-            }
-            let pointsRadius = radiusMeters * MKMapPointsPerMeterAtLatitude(event.coordinate.latitude)
-            let eventRect = MKMapRect(
-                origin: MKMapPoint(x: point.x - pointsRadius, y: point.y - pointsRadius),
-                size: MKMapSize(width: pointsRadius * 2, height: pointsRadius * 2)
-            )
+            let eventRect = MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0))
             mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
         }
-
-        let centerPoint = MKMapPoint(x: mapRect.midX, y: mapRect.midY)
-        let centerCoordinate = centerPoint.coordinate
-        let pointsPerMeter = MKMapPointsPerMeterAtLatitude(centerCoordinate.latitude)
-        let minSpanPoints = minSpanMeters * pointsPerMeter
-        if mapRect.width < minSpanPoints || mapRect.height < minSpanPoints {
-            let targetWidth = max(mapRect.width, minSpanPoints)
-            let targetHeight = max(mapRect.height, minSpanPoints)
-            mapRect = MKMapRect(
-                x: centerPoint.x - targetWidth / 2,
-                y: centerPoint.y - targetHeight / 2,
-                width: targetWidth,
-                height: targetHeight
-            )
-        }
-
-        let scale = max(paddingFactor * zoomOutExtra, 1)
-        let extraWidth = mapRect.width * (scale - 1) / 2
-        let extraHeight = mapRect.height * (scale - 1) / 2
-        mapRect = mapRect.insetBy(dx: -extraWidth, dy: -extraHeight)
 
         let screenSize = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.screen.bounds.size }
             .first ?? .zero
         let fallbackSize = screenSize == .zero ? CGSize(width: 430, height: 932) : screenSize
-        let mapView = MKMapView(frame: CGRect(origin: .zero, size: fallbackSize))
-        let edgePadding = UIEdgeInsets(top: 40, left: 36, bottom: 140, right: 36)
+        let targetSize = mapSize == .zero ? fallbackSize : mapSize
+        let mapView = MKMapView(frame: CGRect(origin: .zero, size: targetSize))
+        let edgePadding = UIEdgeInsets(top: 36, left: 40, bottom: 36, right: 40)
         let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
         let fittedRegion = MKCoordinateRegion(fittedRect)
 
         let spanMeters = ProfileMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
-        let distance = max(spanMeters, minSpanMeters) * 1.2
+        let multiplier: Double = events.count == 2 ? 2.0 : 1.2
+        let distance = max(spanMeters * multiplier, minSpanMeters)
 
         return (fittedRegion, distance)
     }
