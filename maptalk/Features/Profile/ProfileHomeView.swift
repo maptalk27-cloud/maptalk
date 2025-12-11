@@ -40,16 +40,15 @@ struct ProfileHomeView: View {
                                 isShowingMapDetail = true
                             } label: {
                                 ProfileMapPreview(
-                                    pins: viewModel.mapPins,
-                                    footprints: viewModel.footprints,
-                                    reels: viewModel.reels,
-                                    region: viewModel.mapRegion,
-                                    isActive: isShowingMapDetail == false
-                                )
-                                .frame(maxWidth: .infinity)
-                                .frame(height: mapHeightSelf)
-                                .contentShape(Rectangle())
-                            }
+                                pins: viewModel.mapPins,
+                                footprints: viewModel.footprints,
+                                reels: viewModel.reels,
+                                region: viewModel.mapRegion
+                            )
+                            .frame(maxWidth: .infinity)
+                            .frame(height: mapHeightSelf)
+                            .contentShape(Rectangle())
+                        }
                             .buttonStyle(.plain)
                             .padding(.horizontal, horizontalPadding)
                         } else {
@@ -69,7 +68,8 @@ struct ProfileHomeView: View {
                                     selectedPreviewTimelineSegmentId = chosen
                                     timelineDetailStartSegmentId = chosen
                                     isShowingMapDetail = true
-                                }
+                                },
+                                autoPlayEnabled: isShowingMapDetail == false
                             )
                             .frame(maxWidth: .infinity)
                             .frame(maxHeight: .infinity, alignment: .top)

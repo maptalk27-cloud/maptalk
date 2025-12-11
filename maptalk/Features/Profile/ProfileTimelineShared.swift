@@ -91,16 +91,24 @@ enum TimelineVisualEffect {
 struct PreviewTimelineAxis: View {
     let segments: [TimelineSegment]
     var selectedId: String?
+    var selectedProgress: Double?
     var onSelect: ((TimelineSegment) -> Void)?
+    var onScrollStateChange: ((Bool) -> Void)?
+
+    @State private var isDragging: Bool = false
 
     init(
         segments: [TimelineSegment],
         selectedId: String? = nil,
-        onSelect: ((TimelineSegment) -> Void)? = nil
+        selectedProgress: Double? = nil,
+        onSelect: ((TimelineSegment) -> Void)? = nil,
+        onScrollStateChange: ((Bool) -> Void)? = nil
     ) {
         self.segments = segments
         self.selectedId = selectedId
+        self.selectedProgress = selectedProgress
         self.onSelect = onSelect
+        self.onScrollStateChange = onScrollStateChange
     }
 
     var body: some View {
@@ -138,12 +146,7 @@ struct PreviewTimelineAxis: View {
                         .padding(.horizontal, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(Color.white.opacity(isSelected ? 0.08 : 0))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                        .stroke(Color.white.opacity(isSelected ? 0.12 : 0.06), lineWidth: 1)
-                                )
+                            timelineRowBackground(isSelected: isSelected, progress: selectedProgress)
                         )
                         .padding(.horizontal, -6)
                         .contentShape(Rectangle())
@@ -156,7 +159,7 @@ struct PreviewTimelineAxis: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 6)
             }
-            .onChange(of: selectedId) { _, id in
+            .onChange(of: selectedId, initial: false) { _, id in
                 guard let id else { return }
                 withAnimation(.easeInOut(duration: 0.3)) {
                     proxy.scrollTo(id, anchor: .center)
@@ -166,6 +169,18 @@ struct PreviewTimelineAxis: View {
                 guard let id = selectedId else { return }
                 proxy.scrollTo(id, anchor: .center)
             }
+            .simultaneousGesture(
+                DragGesture()
+                    .onChanged { _ in
+                        guard isDragging == false else { return }
+                        isDragging = true
+                        onScrollStateChange?(true)
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                        onScrollStateChange?(false)
+                    }
+            )
         }
     }
 
@@ -188,6 +203,50 @@ struct PreviewTimelineAxis: View {
                     }
                 }
             }
+        }
+    }
+
+    private func timelineRowBackground(isSelected: Bool, progress: Double?) -> some View {
+        let base = RoundedRectangle(cornerRadius: 14, style: .continuous)
+        let clamped = min(max(progress ?? 0, 0), 1)
+        return ZStack(alignment: .leading) {
+            base
+                .fill(isSelected ? Color.white.opacity(0.08) : Color.white.opacity(0))
+
+            if isSelected {
+                GeometryReader { geometry in
+                    let width = geometry.size.width * clamped
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.32),
+                                    Theme.neonPrimary.opacity(0.18)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(width, 0))
+                }
+                .allowsHitTesting(false)
+
+                base
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.16),
+                                Color.white.opacity(0.03)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .allowsHitTesting(false)
+            }
+
+            base
+                .stroke(Color.white.opacity(isSelected ? 0.12 : 0.06), lineWidth: 1)
         }
     }
 }
@@ -215,6 +274,36 @@ private func avatar(for event: TimelineEvent) -> some View {
             ProfileMapMarker(category: poi.poi.category)
                 .frame(width: 30, height: 33)
         )
+    }
+}
+
+private struct TimelineRowProgressBar: View {
+    let progress: Double
+
+    var body: some View {
+        let accent = Theme.neonPrimary
+        GeometryReader { geometry in
+            let clamped = min(max(progress, 0), 1)
+            let width = geometry.size.width * clamped
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.ultraThinMaterial.opacity(0.75))
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [accent.opacity(0.95), accent.opacity(0.7)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: width)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.white.opacity(0.24), lineWidth: 0.7)
+            )
+        }
+        .frame(height: 8)
     }
 }
 

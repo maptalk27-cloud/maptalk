@@ -10,22 +10,26 @@ struct ProfileTimelinePreview: View {
     let onSelectSegment: ((TimelineSegment?) -> Void)?
     let userProvider: (UUID) -> User?
     let onOpenDetail: ((TimelineSegment?) -> Void)?
+    let autoPlayEnabled: Bool
 
     @State private var cameraPosition: MapCameraPosition
     @State private var currentRegion: MKCoordinateRegion
     @State private var selectedTimelineSegmentId: String?
     @StateObject private var cityResolver = TimelineCityResolver()
-    @State private var autoScrollNonce: UUID = .init()
-    @State private var isUserInteracting: Bool = false
-    @State private var interactionResetTask: Task<Void, Never>?
+    @State private var autoAdvanceTask: Task<Void, Never>?
+    @State private var autoAdvanceProgress: Double = 0
+    @State private var autoAdvanceElapsed: TimeInterval = 0
+    @State private var autoPauseReasons: Set<AutoPauseReason> = []
+    @State private var autoLastTick: Date = Date()
+    @State private var lastAutoPlayEnabled: Bool
 
     private let paddingFactor: Double = 1.5
     private let minSpanMeters: Double = 1_200
     private let zoomOutExtra: Double = 1.2
-    private let autoScrollInterval: UInt64 = 4_500_000_000
     private let teleportThreshold: CLLocationDistance = 1_000_000
     private let quickHopThreshold: CLLocationDistance = 500_000
-    private let interactionCooldown: TimeInterval = 6
+    private let autoAdvanceDuration: TimeInterval = 6
+    private let autoAdvanceTick: UInt64 = 50_000_000
 
     init(
         pins: [ProfileViewModel.MapPin],
@@ -35,7 +39,8 @@ struct ProfileTimelinePreview: View {
         selectedSegmentId: Binding<String?>? = nil,
         onSelectSegment: ((TimelineSegment?) -> Void)? = nil,
         userProvider: @escaping (UUID) -> User?,
-        onOpenDetail: ((TimelineSegment?) -> Void)? = nil
+        onOpenDetail: ((TimelineSegment?) -> Void)? = nil,
+        autoPlayEnabled: Bool = true
     ) {
         self.pins = pins
         self.footprints = footprints
@@ -45,9 +50,11 @@ struct ProfileTimelinePreview: View {
         self.onSelectSegment = onSelectSegment
         self.userProvider = userProvider
         self.onOpenDetail = onOpenDetail
+        self.autoPlayEnabled = autoPlayEnabled
         _cameraPosition = State(initialValue: .region(region))
         _currentRegion = State(initialValue: region)
         _selectedTimelineSegmentId = State(initialValue: selectedSegmentId?.wrappedValue)
+        _lastAutoPlayEnabled = State(initialValue: autoPlayEnabled)
     }
 
     var body: some View {
@@ -69,13 +76,10 @@ struct ProfileTimelinePreview: View {
                 }
             }
             .mapStyle(.standard)
-            .onMapCameraChange(frequency: .continuous) { _ in
-                markUserInteraction()
-            }
             .contentShape(Rectangle())
             .highPriorityGesture(
                 TapGesture().onEnded {
-                    markUserInteraction()
+                    pauseAutoAdvance(reason: .detail)
                     onOpenDetail?(activeTimelineSegment)
                 }
             )
@@ -93,33 +97,56 @@ struct ProfileTimelinePreview: View {
                         flyToSegment(first, animated: false)
                     }
                 }
+                updateAutoPlayEnabledState()
+                startAutoAdvanceLoopIfNeeded()
+            }
+            .onDisappear {
+                autoAdvanceTask?.cancel()
+                autoAdvanceTask = nil
             }
 
             PreviewTimelineAxis(
                 segments: timelineSegments,
-                selectedId: selectedTimelineSegmentId
-            ) { segment in
-                selectedTimelineSegmentId = segment.id
-                onSelectSegment?(segment)
-                flyToSegment(segment)
-            }
+                selectedId: selectedTimelineSegmentId,
+                selectedProgress: autoAdvanceProgress,
+                onSelect: { segment in
+                    selectedTimelineSegmentId = segment.id
+                    onSelectSegment?(segment)
+                    flyToSegment(segment)
+                    resetAutoAdvanceProgress()
+                    startAutoAdvanceLoopIfNeeded()
+                },
+                onScrollStateChange: { isScrolling in
+                    if isScrolling {
+                        pauseAutoAdvance(reason: .userScroll)
+                    } else {
+                        resumeAutoAdvance(reason: .userScroll)
+                    }
+                }
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxHeight: .infinity, alignment: .top)
-        .onChange(of: selectedSegmentId?.wrappedValue) { _, newValue in
+        .onChange(of: selectedSegmentId?.wrappedValue, initial: false) { _, newValue in
             guard let newValue, newValue != selectedTimelineSegmentId else { return }
             selectedTimelineSegmentId = newValue
             if let segment = timelineSegments.first(where: { $0.id == newValue }) {
                 flyToSegment(segment)
             }
+            resetAutoAdvanceProgress()
         }
-        .onChange(of: selectedTimelineSegmentId) { _, newValue in
+        .onChange(of: selectedTimelineSegmentId, initial: false) { _, newValue in
             onSelectSegment?(activeTimelineSegment)
             selectedSegmentId?.wrappedValue = newValue
+            resetAutoAdvanceProgress()
         }
-        .task(id: timelineSegments.map(\.id)) {
-            await autoScrollTimeline()
+        .onChange(of: autoPlayEnabled, initial: false) { oldValue, newValue in
+            handleAutoPlayChange(from: oldValue, to: newValue)
+        }
+        .onChange(of: timelineSegments.map(\.id), initial: false) { _, _ in
+            resetAutoAdvanceProgress()
+            startAutoAdvanceLoopIfNeeded()
         }
     }
 
@@ -172,50 +199,100 @@ struct ProfileTimelinePreview: View {
         return segments
     }
 
-    private func autoScrollTimeline() async {
-        guard timelineSegments.count > 1 else { return }
-        autoScrollNonce = UUID()
-        let nonce = autoScrollNonce
-        while !Task.isCancelled && nonce == autoScrollNonce {
-            do {
-                try await Task.sleep(nanoseconds: autoScrollInterval)
-            } catch {
-                break
-            }
-            let segments = timelineSegments
-            guard segments.count > 1 else { continue }
-            if isUserInteracting {
-                continue
-            }
-            if Date().timeIntervalSince(lastInteractionDate) < interactionCooldown {
-                continue
-            }
-            let next = nextSegment(after: selectedTimelineSegmentId, in: segments)
-            await MainActor.run {
-                selectedTimelineSegmentId = next.id
-                onSelectSegment?(next)
-                flyToSegment(next)
+    private func startAutoAdvanceLoopIfNeeded() {
+        guard autoAdvanceTask == nil else { return }
+        autoAdvanceTask = Task { @MainActor in
+            autoAdvanceElapsed = 0
+            autoAdvanceProgress = 0
+            autoLastTick = Date()
+
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: autoAdvanceTick)
+                } catch {
+                    break
+                }
+
+                guard autoPauseReasons.isEmpty else {
+                    autoLastTick = Date()
+                    continue
+                }
+                guard timelineSegments.count > 1 else {
+                    autoAdvanceProgress = 0
+                    autoAdvanceElapsed = 0
+                    autoLastTick = Date()
+                    continue
+                }
+
+                let now = Date()
+                autoAdvanceElapsed += now.timeIntervalSince(autoLastTick)
+                autoLastTick = now
+
+                autoAdvanceProgress = min(1, autoAdvanceElapsed / autoAdvanceDuration)
+
+                if autoAdvanceProgress >= 1 {
+                    autoAdvanceProgress = 0
+                    autoAdvanceElapsed = 0
+                    autoLastTick = Date()
+                    advanceToNextSegment()
+                }
             }
         }
     }
 
-    @State private var lastInteractionDate: Date = .distantPast
+    private func resetAutoAdvanceProgress() {
+        autoAdvanceElapsed = 0
+        autoAdvanceProgress = 0
+        autoLastTick = Date()
+    }
 
-    private func markUserInteraction() {
-        lastInteractionDate = Date()
-        isUserInteracting = true
-        interactionResetTask?.cancel()
-        interactionResetTask = Task { [interactionCooldown] in
-            try? await Task.sleep(nanoseconds: UInt64(interactionCooldown * 1_000_000_000))
-            await MainActor.run {
-                isUserInteracting = false
-            }
+    private func pauseAutoAdvance(reason: AutoPauseReason) {
+        autoPauseReasons.insert(reason)
+    }
+
+    private func resumeAutoAdvance(reason: AutoPauseReason) {
+        autoPauseReasons.remove(reason)
+        if autoPauseReasons.isEmpty {
+            startAutoAdvanceLoopIfNeeded()
         }
     }
 
-    private func nextSegment(after id: String?, in segments: [TimelineSegment]) -> TimelineSegment {
+    private func updateAutoPlayEnabledState() {
+        if autoPlayEnabled == false {
+            pauseAutoAdvance(reason: .external)
+            pauseAutoAdvance(reason: .detail)
+        }
+        lastAutoPlayEnabled = autoPlayEnabled
+    }
+
+    private func handleAutoPlayChange(from old: Bool?, to new: Bool) {
+        let previous = old ?? lastAutoPlayEnabled
+        lastAutoPlayEnabled = new
+
+        if previous == new { return }
+
+        if new == false {
+            pauseAutoAdvance(reason: .external)
+            pauseAutoAdvance(reason: .detail)
+            return
+        }
+
+        autoPauseReasons.remove(.detail)
+        autoPauseReasons.remove(.external)
+        resetAutoAdvanceProgress()
+        startAutoAdvanceLoopIfNeeded()
+    }
+
+    private func advanceToNextSegment() {
+        guard let next = nextSegment(after: selectedTimelineSegmentId, in: timelineSegments) else { return }
+        selectedTimelineSegmentId = next.id
+        onSelectSegment?(next)
+        flyToSegment(next)
+    }
+
+    private func nextSegment(after id: String?, in segments: [TimelineSegment]) -> TimelineSegment? {
         guard let id, let index = segments.firstIndex(where: { $0.id == id }) else {
-            return segments.first!
+            return segments.first
         }
         let nextIndex = (index + 1) % segments.count
         return segments[nextIndex]
@@ -327,4 +404,10 @@ struct ProfileTimelinePreview: View {
 
         return (fittedRegion, distance)
     }
+}
+
+private enum AutoPauseReason: Hashable {
+    case userScroll
+    case detail
+    case external
 }
