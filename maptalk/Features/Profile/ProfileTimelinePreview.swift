@@ -6,6 +6,7 @@ struct ProfileTimelinePreview: View {
     let footprints: [ProfileViewModel.Footprint]
     let reels: [RealPost]
     let region: MKCoordinateRegion
+    let selectedSegmentId: Binding<String?>?
     let onSelectSegment: ((TimelineSegment?) -> Void)?
     let userProvider: (UUID) -> User?
     let onOpenDetail: ((TimelineSegment?) -> Void)?
@@ -31,6 +32,7 @@ struct ProfileTimelinePreview: View {
         footprints: [ProfileViewModel.Footprint],
         reels: [RealPost],
         region: MKCoordinateRegion,
+        selectedSegmentId: Binding<String?>? = nil,
         onSelectSegment: ((TimelineSegment?) -> Void)? = nil,
         userProvider: @escaping (UUID) -> User?,
         onOpenDetail: ((TimelineSegment?) -> Void)? = nil
@@ -39,11 +41,13 @@ struct ProfileTimelinePreview: View {
         self.footprints = footprints
         self.reels = reels
         self.region = region
+        self.selectedSegmentId = selectedSegmentId
         self.onSelectSegment = onSelectSegment
         self.userProvider = userProvider
         self.onOpenDetail = onOpenDetail
         _cameraPosition = State(initialValue: .region(region))
         _currentRegion = State(initialValue: region)
+        _selectedTimelineSegmentId = State(initialValue: selectedSegmentId?.wrappedValue)
     }
 
     var body: some View {
@@ -103,6 +107,17 @@ struct ProfileTimelinePreview: View {
             .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(maxHeight: .infinity, alignment: .top)
+        .onChange(of: selectedSegmentId?.wrappedValue) { _, newValue in
+            guard let newValue, newValue != selectedTimelineSegmentId else { return }
+            selectedTimelineSegmentId = newValue
+            if let segment = timelineSegments.first(where: { $0.id == newValue }) {
+                flyToSegment(segment)
+            }
+        }
+        .onChange(of: selectedTimelineSegmentId) { _, newValue in
+            onSelectSegment?(activeTimelineSegment)
+            selectedSegmentId?.wrappedValue = newValue
+        }
         .task(id: timelineSegments.map(\.id)) {
             await autoScrollTimeline()
         }

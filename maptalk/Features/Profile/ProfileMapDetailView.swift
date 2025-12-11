@@ -10,6 +10,9 @@ struct ProfileMapDetailView: View {
     let region: MKCoordinateRegion
     let userProvider: (UUID) -> User?
     let onDismiss: () -> Void
+    let onSelectSegment: ((String?) -> Void)?
+    let onDismissWithSegment: ((String?) -> Void)?
+    let selectedSegmentId: Binding<String?>?
 
     @State private var flightController = MapFlightController()
     @State private var cameraPosition: MapCameraPosition
@@ -43,6 +46,9 @@ struct ProfileMapDetailView: View {
         region: MKCoordinateRegion,
         userProvider: @escaping (UUID) -> User?,
         onDismiss: @escaping () -> Void,
+        selectedSegmentId: Binding<String?>? = nil,
+        onSelectSegment: ((String?) -> Void)? = nil,
+        onDismissWithSegment: ((String?) -> Void)? = nil,
         initialDisplayMode: MapDisplayMode = .timeline,
         initialTimelineSegmentId: String? = nil
     ) {
@@ -53,12 +59,15 @@ struct ProfileMapDetailView: View {
         self.region = region
         self.userProvider = userProvider
         self.onDismiss = onDismiss
+        self.selectedSegmentId = selectedSegmentId
+        self.onSelectSegment = onSelectSegment
+        self.onDismissWithSegment = onDismissWithSegment
         _cameraPosition = State(initialValue: .region(region))
         _lastCenter = State(initialValue: region.center)
         _currentRegion = State(initialValue: region)
         _isShowingDetailedAnnotations = State(initialValue: ProfileMapAnnotationZoomHelper.isClose(region: region))
         _displayMode = State(initialValue: initialDisplayMode)
-        _selectedTimelineSegmentId = State(initialValue: initialTimelineSegmentId)
+        _selectedTimelineSegmentId = State(initialValue: initialTimelineSegmentId ?? selectedSegmentId?.wrappedValue)
     }
 
     var body: some View {
@@ -136,6 +145,7 @@ struct ProfileMapDetailView: View {
                 }
 
                 Button {
+                    onDismissWithSegment?(selectedTimelineSegmentId ?? timelineSegments.first?.id)
                     onDismiss()
                 } label: {
                     Image(systemName: "xmark")
@@ -175,6 +185,13 @@ struct ProfileMapDetailView: View {
         .background(Color.black)
         .onAppear {
             applyInitialTimelineFocusIfNeeded()
+        }
+        .onChange(of: selectedSegmentId?.wrappedValue) { _, newValue in
+            guard let newValue, newValue != selectedTimelineSegmentId else { return }
+            setSelectedTimelineSegment(newValue)
+        }
+        .onDisappear {
+            onDismissWithSegment?(selectedTimelineSegmentId ?? timelineSegments.first?.id)
         }
         .sheet(isPresented: $isExperiencePresented, onDismiss: {
             experienceDetent = .fraction(0.25)
@@ -339,7 +356,7 @@ struct ProfileMapDetailView: View {
             Button {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     displayMode = .all
-                    selectedTimelineSegmentId = nil
+                    setSelectedTimelineSegment(nil)
                 }
             } label: {
                 Text("All")
@@ -359,7 +376,7 @@ struct ProfileMapDetailView: View {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     displayMode = .timeline
                     if selectedTimelineSegmentId == nil {
-                        selectedTimelineSegmentId = timelineSegments.first?.id
+                        setSelectedTimelineSegment(timelineSegments.first?.id)
                     }
                 }
             } label: {
@@ -396,7 +413,7 @@ struct ProfileMapDetailView: View {
                 segments: timelineSegments,
                 selectedId: selectedTimelineSegmentId ?? timelineSegments.first?.id
             ) { segment in
-                selectedTimelineSegmentId = segment.id
+                setSelectedTimelineSegment(segment.id)
                 flyToTimelineSegment(segment)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -608,7 +625,7 @@ struct ProfileMapDetailView: View {
               didApplyInitialTimelineFocus == false,
               let segment = initialTimelineSegment else { return }
         if selectedTimelineSegmentId == nil {
-            selectedTimelineSegmentId = segment.id
+            setSelectedTimelineSegment(segment.id)
         }
         flyToTimelineSegment(segment, animated: false)
         didApplyInitialTimelineFocus = true
@@ -620,6 +637,12 @@ struct ProfileMapDetailView: View {
             return segment
         }
         return timelineSegments.first
+    }
+
+    private func setSelectedTimelineSegment(_ id: String?) {
+        selectedTimelineSegmentId = id
+        onSelectSegment?(id)
+        selectedSegmentId?.wrappedValue = id
     }
 
     private func flyToEntry(_ entry: Entry, cause: RegionChangeCause = .other, animated: Bool = true) {

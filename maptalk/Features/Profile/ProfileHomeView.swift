@@ -8,6 +8,7 @@ struct ProfileHomeView: View {
     @State private var isShowingMapDetail = false
     @State private var timelineDetailStartSegmentId: String?
     @State private var selectedPreviewTimelineSegmentId: String?
+    @State private var sharedTimelineSegmentId: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -57,12 +58,16 @@ struct ProfileHomeView: View {
                                 footprints: viewModel.footprints,
                                 reels: viewModel.reels,
                                 region: viewModel.mapRegion,
+                                selectedSegmentId: $sharedTimelineSegmentId,
                                 onSelectSegment: { segment in
+                                    sharedTimelineSegmentId = segment?.id
                                     selectedPreviewTimelineSegmentId = segment?.id
                                 },
                                 userProvider: userProvider,
                                 onOpenDetail: { segment in
-                                    timelineDetailStartSegmentId = selectedPreviewTimelineSegmentId ?? segment?.id
+                                    let chosen = sharedTimelineSegmentId ?? segment?.id
+                                    selectedPreviewTimelineSegmentId = chosen
+                                    timelineDetailStartSegmentId = chosen
                                     isShowingMapDetail = true
                                 }
                             )
@@ -87,6 +92,16 @@ struct ProfileHomeView: View {
                 userProvider: userProvider,
                 onDismiss: {
                     isShowingMapDetail = false
+                    timelineDetailStartSegmentId = nil
+                },
+                selectedSegmentId: $sharedTimelineSegmentId,
+                onSelectSegment: { segmentId in
+                    sharedTimelineSegmentId = segmentId
+                    selectedPreviewTimelineSegmentId = segmentId
+                },
+                onDismissWithSegment: { segmentId in
+                    sharedTimelineSegmentId = segmentId
+                    selectedPreviewTimelineSegmentId = segmentId
                     timelineDetailStartSegmentId = nil
                 },
                 initialDisplayMode: .timeline,
