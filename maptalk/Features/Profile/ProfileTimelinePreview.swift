@@ -29,6 +29,7 @@ struct ProfileTimelinePreview: View {
     private let quickHopThreshold: CLLocationDistance = 500_000
     private let autoAdvanceDuration: TimeInterval = 6
     private let autoAdvanceTick: UInt64 = 50_000_000
+    private let longHopThreshold: CLLocationDistance = 804_672 // ~500 miles
 
     init(
         pins: [ProfileViewModel.MapPin],
@@ -336,9 +337,16 @@ struct ProfileTimelinePreview: View {
             heading: 0,
             pitch: 0
         )
+        let travelDistance = currentRegion.center.distance(to: target.region.center)
         if animated {
-            withAnimation(.smooth(duration: 0.35)) {
-                cameraPosition = .camera(camera)
+            if travelDistance > longHopThreshold {
+                withTransaction(Transaction(animation: nil)) {
+                    cameraPosition = .camera(camera)
+                }
+            } else {
+                withAnimation(.smooth(duration: 0.35)) {
+                    cameraPosition = .camera(camera)
+                }
             }
         } else {
             cameraPosition = .camera(camera)
