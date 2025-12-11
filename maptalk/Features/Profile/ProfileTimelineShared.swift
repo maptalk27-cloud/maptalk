@@ -136,14 +136,16 @@ struct PreviewTimelineAxis: View {
                         }
                         .padding(.vertical, 6)
                         .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
                             RoundedRectangle(cornerRadius: 14, style: .continuous)
                                 .fill(Color.white.opacity(isSelected ? 0.08 : 0))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .stroke(Color.white.opacity(isSelected ? 0.12 : 0.06), lineWidth: 1)
+                                )
                         )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.white.opacity(isSelected ? 0.25 : 0.1), lineWidth: 1)
-                        )
+                        .padding(.horizontal, -6)
                         .contentShape(Rectangle())
                         .id(segment.id)
                         .onTapGesture {
@@ -175,13 +177,31 @@ struct PreviewTimelineAxis: View {
             }
             return lhs.date > rhs.date
         }
-        return HStack(spacing: -10) {
-            ForEach(events) { event in
-                avatar(for: event)
-                    .frame(width: 34, height: 34)
+        let rows = chunked(events, size: 13)
+        return VStack(alignment: .leading, spacing: 6) {
+            ForEach(rows.indices, id: \.self) { index in
+                let row = rows[index]
+                HStack(spacing: -10) {
+                    ForEach(row) { event in
+                        avatar(for: event)
+                            .frame(width: 34, height: 34)
+                    }
+                }
             }
         }
     }
+}
+
+private func chunked<T>(_ items: [T], size: Int) -> [[T]] {
+    guard size > 0 else { return [items] }
+    var result: [[T]] = []
+    var index = 0
+    while index < items.count {
+        let end = min(index + size, items.count)
+        result.append(Array(items[index..<end]))
+        index += size
+    }
+    return result
 }
 
 private func avatar(for event: TimelineEvent) -> some View {

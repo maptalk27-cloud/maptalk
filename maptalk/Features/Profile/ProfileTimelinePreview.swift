@@ -6,6 +6,7 @@ struct ProfileTimelinePreview: View {
     let footprints: [ProfileViewModel.Footprint]
     let reels: [RealPost]
     let region: MKCoordinateRegion
+    let onSelectSegment: ((TimelineSegment?) -> Void)?
     let userProvider: (UUID) -> User?
     let onOpenDetail: ((TimelineSegment?) -> Void)?
 
@@ -30,6 +31,7 @@ struct ProfileTimelinePreview: View {
         footprints: [ProfileViewModel.Footprint],
         reels: [RealPost],
         region: MKCoordinateRegion,
+        onSelectSegment: ((TimelineSegment?) -> Void)? = nil,
         userProvider: @escaping (UUID) -> User?,
         onOpenDetail: ((TimelineSegment?) -> Void)? = nil
     ) {
@@ -37,6 +39,7 @@ struct ProfileTimelinePreview: View {
         self.footprints = footprints
         self.reels = reels
         self.region = region
+        self.onSelectSegment = onSelectSegment
         self.userProvider = userProvider
         self.onOpenDetail = onOpenDetail
         _cameraPosition = State(initialValue: .region(region))
@@ -81,6 +84,7 @@ struct ProfileTimelinePreview: View {
             .onAppear {
                 if selectedTimelineSegmentId == nil {
                     selectedTimelineSegmentId = timelineSegments.first?.id
+                    onSelectSegment?(activeTimelineSegment)
                     if let first = timelineSegments.first {
                         flyToSegment(first, animated: false)
                     }
@@ -92,6 +96,7 @@ struct ProfileTimelinePreview: View {
                 selectedId: selectedTimelineSegmentId
             ) { segment in
                 selectedTimelineSegmentId = segment.id
+                onSelectSegment?(segment)
                 flyToSegment(segment)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -173,6 +178,7 @@ struct ProfileTimelinePreview: View {
             let next = nextSegment(after: selectedTimelineSegmentId, in: segments)
             await MainActor.run {
                 selectedTimelineSegmentId = next.id
+                onSelectSegment?(next)
                 flyToSegment(next)
             }
         }

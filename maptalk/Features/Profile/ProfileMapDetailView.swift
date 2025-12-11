@@ -390,7 +390,7 @@ struct ProfileMapDetailView: View {
             Capsule()
                 .fill(Color.white.opacity(0.4))
                 .frame(width: 44, height: 5)
-                .padding(.top, 8)
+                .padding(.top, 4)
 
             PreviewTimelineAxis(
                 segments: timelineSegments,
@@ -400,20 +400,20 @@ struct ProfileMapDetailView: View {
                 flyToTimelineSegment(segment)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 220)
+            .frame(height: 230)
         }
-        .padding(.horizontal, 14)
-        .padding(.bottom, 18)
+        .frame(maxWidth: .infinity, alignment: .bottom)
+        .padding(.horizontal, 8)
+        .padding(.bottom, -8)
         .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color.black.opacity(0.9))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(Color.white.opacity(0.12), lineWidth: 1)
                 )
+                .ignoresSafeArea(edges: [.bottom, .horizontal])
         )
-        .padding(.horizontal, 12)
-        .padding(.bottom, 12)
     }
 
     struct Entry: Identifiable {

@@ -7,6 +7,7 @@ struct ProfileHomeView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var isShowingMapDetail = false
     @State private var timelineDetailStartSegmentId: String?
+    @State private var selectedPreviewTimelineSegmentId: String?
 
     var body: some View {
         GeometryReader { proxy in
@@ -14,7 +15,6 @@ struct ProfileHomeView: View {
             let heroHeightHint = proxy.size.height * 0.42
             let horizontalPadding: CGFloat = 8
             let mapHeightSelf: CGFloat = 420
-            let mapHeightOther: CGFloat = 460
 
             ZStack(alignment: .top) {
                 Color.black.ignoresSafeArea()
@@ -57,9 +57,12 @@ struct ProfileHomeView: View {
                                 footprints: viewModel.footprints,
                                 reels: viewModel.reels,
                                 region: viewModel.mapRegion,
+                                onSelectSegment: { segment in
+                                    selectedPreviewTimelineSegmentId = segment?.id
+                                },
                                 userProvider: userProvider,
                                 onOpenDetail: { segment in
-                                    timelineDetailStartSegmentId = segment?.id
+                                    timelineDetailStartSegmentId = selectedPreviewTimelineSegmentId ?? segment?.id
                                     isShowingMapDetail = true
                                 }
                             )
