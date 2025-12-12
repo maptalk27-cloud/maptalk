@@ -32,11 +32,12 @@ struct ProfileMapDetailView: View {
     @State private var timelineEffectStyle: TimelineVisualEffect?
     @State private var timelineEffectProgress: Double = 0
     @State private var didApplyInitialTimelineFocus = false
+    @State private var didApplyInitialDetailFit = false
+    @State private var mapSize: CGSize = .zero
+    @State private var overlayHeight: CGFloat = 0
     private let timelineAnimationStyle: TimelineAnimationStyle = .smooth
-    private let timelinePaddingFactor: Double = 1.65
-    private let timelineMinSpanMeters: Double = 1_200
-    private let timelineZoomOutExtra: Double = 1.25
-    private let timelineTeleportThreshold: CLLocationDistance = 2_200_000
+    private let timelineMinSpanMeters: Double = 36_000
+    private let longHopThreshold: CLLocationDistance = 804_672 // ~500 miles
 
     init(
         pins: [ProfileViewModel.MapPin],
@@ -127,6 +128,13 @@ struct ProfileMapDetailView: View {
             }
             .ignoresSafeArea()
             .mapStyle(.standard)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { mapSize = proxy.size }
+                        .onChange(of: proxy.size) { _, newValue in mapSize = newValue }
+                }
+            )
             .saturation(mapSaturationEffect)
             .blur(radius: mapBlurEffect)
             .overlay(timelineEffectOverlay)
@@ -172,8 +180,22 @@ struct ProfileMapDetailView: View {
                             presentEntry(entry)
                         }
                     )
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear
+                                .onAppear { updateOverlayHeight(proxy: proxy) }
+                                .onChange(of: proxy.size) { _, _ in updateOverlayHeight(proxy: proxy) }
+                        }
+                    )
                 } else {
                     timelineOverlay
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .onAppear { updateOverlayHeight(proxy: proxy) }
+                                    .onChange(of: proxy.size) { _, _ in updateOverlayHeight(proxy: proxy) }
+                            }
+                        )
                 }
             }
             .overlay(alignment: .topTrailing) {
@@ -185,10 +207,14 @@ struct ProfileMapDetailView: View {
         .background(Color.black)
         .onAppear {
             applyInitialTimelineFocusIfNeeded()
+            applyInitialDetailFitIfNeeded()
         }
         .onChange(of: selectedSegmentId?.wrappedValue) { _, newValue in
             guard let newValue, newValue != selectedTimelineSegmentId else { return }
             setSelectedTimelineSegment(newValue)
+        }
+        .onChange(of: overlayHeight) { _, _ in
+            applyInitialDetailFitIfNeeded()
         }
         .onDisappear {
             onDismissWithSegment?(selectedTimelineSegmentId ?? timelineSegments.first?.id)
@@ -466,24 +492,8 @@ struct ProfileMapDetailView: View {
     }
 
     private func flyToTimelineSegment(_ segment: TimelineSegment, animated: Bool = true) {
-        let relatedEvents = timelineSegments
-            .filter { $0.label == segment.label }
-            .flatMap(\.events)
-        guard let target = boundingTarget(for: relatedEvents, padding: timelinePaddingFactor) else { return }
-
-        if let baseRegion = Optional(currentRegion),
-           baseRegion.center.distance(to: target.region.center) > timelineTeleportThreshold {
-            timelineEffectStyle = nil
-            timelineEffectProgress = 0
-            withTransaction(Transaction(animation: nil)) {
-                cameraPosition = .region(target.region)
-            }
-            currentRegion = target.region
-            lastCenter = target.region.center
-            return
-        }
-
-        triggerVisualEffect(for: timelineAnimationStyle)
+        let target = boundingTarget(for: segment.events)
+            ?? (region, max(ProfileMapAnnotationZoomHelper.spanMeters(for: region), timelineMinSpanMeters))
 
         let camera = MapCamera(
             centerCoordinate: target.region.center,
@@ -492,9 +502,18 @@ struct ProfileMapDetailView: View {
             pitch: 0
         )
 
-        let animation = timelineAnimationStyle.animation
-        let transaction = Transaction(animation: animated ? animation : nil)
-        withTransaction(transaction) {
+        let travelDistance = currentRegion.center.distance(to: target.region.center)
+        if animated {
+            if travelDistance > longHopThreshold {
+                withTransaction(Transaction(animation: nil)) {
+                    cameraPosition = .camera(camera)
+                }
+            } else {
+                withAnimation(.linear(duration: 0.35)) {
+                    cameraPosition = .camera(camera)
+                }
+            }
+        } else {
             cameraPosition = .camera(camera)
         }
         currentRegion = target.region
@@ -631,6 +650,15 @@ struct ProfileMapDetailView: View {
         didApplyInitialTimelineFocus = true
     }
 
+    private func applyInitialDetailFitIfNeeded() {
+        guard displayMode == .timeline,
+              didApplyInitialDetailFit == false,
+              overlayHeight > 0,
+              let segment = initialTimelineSegment else { return }
+        flyToTimelineSegment(segment, animated: false)
+        didApplyInitialDetailFit = true
+    }
+
     private var initialTimelineSegment: TimelineSegment? {
         if let id = selectedTimelineSegmentId,
            let segment = timelineSegments.first(where: { $0.id == id }) {
@@ -684,65 +712,59 @@ struct ProfileMapDetailView: View {
         }
     }
 
-    private func footprint(for pin: ProfileViewModel.MapPin) -> ProfileViewModel.Footprint? {
-        footprints.first { $0.id == pin.id }
+    private func updateOverlayHeight(proxy: GeometryProxy) {
+        let measured = proxy.size.height + proxy.safeAreaInsets.bottom
+        if abs(measured - overlayHeight) > 1 {
+            overlayHeight = measured
+        }
     }
 
-    private func boundingTarget(for events: [TimelineEvent], padding: Double) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
+    private func boundingTarget(for events: [TimelineEvent]) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
         guard events.isEmpty == false else { return nil }
+
+        if events.count == 1, let coordinate = events.first?.coordinate {
+            let region = MKCoordinateRegion(
+                center: coordinate,
+                latitudinalMeters: timelineMinSpanMeters,
+                longitudinalMeters: timelineMinSpanMeters
+            )
+            return (region, timelineMinSpanMeters)
+        }
 
         var mapRect = MKMapRect.null
         for event in events {
             let point = MKMapPoint(event.coordinate)
-            let radiusMeters: CLLocationDistance
-            if case let .reel(real, _) = event.kind {
-                radiusMeters = max(real.radiusMeters, 0)
-            } else {
-                radiusMeters = 0
-            }
-            let pointsRadius = radiusMeters * MKMapPointsPerMeterAtLatitude(event.coordinate.latitude)
-            let eventRect = MKMapRect(
-                origin: MKMapPoint(x: point.x - pointsRadius, y: point.y - pointsRadius),
-                size: MKMapSize(width: pointsRadius * 2, height: pointsRadius * 2)
-            )
+            let eventRect = MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0))
             mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
         }
-
-        // Ensure a minimum footprint so single points don't produce a zero-size rect.
-        let centerPoint = MKMapPoint(x: mapRect.midX, y: mapRect.midY)
-        let centerCoordinate = centerPoint.coordinate
-        let pointsPerMeter = MKMapPointsPerMeterAtLatitude(centerCoordinate.latitude)
-        let minSpanPoints = timelineMinSpanMeters * pointsPerMeter
-        if mapRect.width < minSpanPoints || mapRect.height < minSpanPoints {
-            let targetWidth = max(mapRect.width, minSpanPoints)
-            let targetHeight = max(mapRect.height, minSpanPoints)
-            mapRect = MKMapRect(
-                x: centerPoint.x - targetWidth / 2,
-                y: centerPoint.y - targetHeight / 2,
-                width: targetWidth,
-                height: targetHeight
-            )
-        }
-
-        // Apply the existing padding factor plus a slight zoom-out buffer.
-        let scale = max(padding * timelineZoomOutExtra, 1)
-        let extraWidth = mapRect.width * (scale - 1) / 2
-        let extraHeight = mapRect.height * (scale - 1) / 2
-        mapRect = mapRect.insetBy(dx: -extraWidth, dy: -extraHeight)
 
         let screenSize = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.screen.bounds.size }
             .first ?? .zero
         let fallbackSize = screenSize == .zero ? CGSize(width: 430, height: 932) : screenSize
-        let mapView = MKMapView(frame: CGRect(origin: .zero, size: fallbackSize))
-        let edgePadding = UIEdgeInsets(top: 60, left: 48, bottom: 220, right: 48)
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }
+        let baseSize = mapSize == .zero
+            ? ((window?.bounds.size ?? .zero) == .zero ? fallbackSize : (window?.bounds.size ?? fallbackSize))
+            : mapSize
+        let overlay = overlayHeight > 0 ? overlayHeight : (window?.safeAreaInsets.bottom ?? 0)
+        let targetSize = baseSize
+        let mapView = MKMapView(frame: CGRect(origin: .zero, size: targetSize))
+        let edgePadding = UIEdgeInsets(top: 36, left: 40, bottom: 36 + overlay, right: 40)
         let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
         let fittedRegion = MKCoordinateRegion(fittedRect)
 
         let spanMeters = ProfileMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
-        let distance = max(spanMeters, timelineMinSpanMeters) * 1.5
+        let multiplier: Double = events.count == 2 ? 3.4 : 2.2
+        let distance = max(spanMeters * multiplier, timelineMinSpanMeters)
 
         return (fittedRegion, distance)
+    }
+
+    private func footprint(for pin: ProfileViewModel.MapPin) -> ProfileViewModel.Footprint? {
+        footprints.first { $0.id == pin.id }
     }
 
     @ViewBuilder
