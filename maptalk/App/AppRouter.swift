@@ -18,11 +18,10 @@ struct AppRouter: View {
                 .tabItem { Label("Real", systemImage: "sparkles") }
                 .tag(2)
 
-            ProfileView(viewModel: .init(environment: environment))
-                .tabItem { Label("Profile", systemImage: "person.crop.circle") }
+            MySettingsView()
+                .tabItem { Label("My", systemImage: "person.crop.circle") }
                 .tag(3)
         }
         .accentColor(Theme.neonPrimary)
     }
 }
-
