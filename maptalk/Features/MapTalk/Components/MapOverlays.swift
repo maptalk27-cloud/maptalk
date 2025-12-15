@@ -49,7 +49,7 @@ struct MapOverlays: MapContent {
                 Button {
                     onSelectUser()
                 } label: {
-                    ProfileAvatarView(user: currentUser, size: 48)
+                    UserAvatarView(user: currentUser, size: 48)
                 }
                 .buttonStyle(.plain)
             }

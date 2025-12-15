@@ -16,7 +16,7 @@ struct MySettingsView: View {
                         // Open profile home if needed
                     } label: {
                         HStack(spacing: 12) {
-                            ProfileAvatarView(user: user, size: 64)
+                            UserAvatarView(user: user, size: 64)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("@\(user.handle)")
                                     .font(.headline)

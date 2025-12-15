@@ -271,7 +271,7 @@ private func avatar(for event: TimelineEvent) -> some View {
         )
     case let .poi(poi):
         return AnyView(
-            ProfileMapMarker(category: poi.poi.category)
+            UserMapMarker(category: poi.poi.category)
                 .frame(width: 30, height: 33)
         )
     }
@@ -381,7 +381,7 @@ func poiPreview(for rated: RatedPOI, size: CGFloat) -> some View {
 
     return ZStack {
         fillColor
-        ProfileMapMarker(category: rated.poi.category)
+        UserMapMarker(category: rated.poi.category)
             .frame(width: size, height: size * 1.1)
     }
     .frame(width: size, height: size)
@@ -391,7 +391,7 @@ func poiPreview(for rated: RatedPOI, size: CGFloat) -> some View {
     }
 }
 
-struct ProfileMapMarker: View {
+struct UserMapMarker: View {
     let category: POICategory
 
     var body: some View {
@@ -520,7 +520,7 @@ struct RoundedCorners: Shape {
     }
 }
 
-enum ProfileMapAnnotationZoomHelper {
+enum UserMapAnnotationZoomHelper {
     static let detailRevealMeters: CLLocationDistance = 500_0000
     static let oldReelRevealMeters: CLLocationDistance = 80_000
 

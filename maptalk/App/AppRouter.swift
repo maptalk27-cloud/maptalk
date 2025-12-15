@@ -14,8 +14,8 @@ struct AppRouter: View {
                 .tabItem { Label("Friends", systemImage: "person.2") }
                 .tag(1)
 
-            RealFeedView(viewModel: .init(environment: environment))
-                .tabItem { Label("Real", systemImage: "sparkles") }
+            UserMapView(viewModel: .init(environment: environment, context: .me))
+                .tabItem { Label("MyMap", systemImage: "mappin.and.ellipse") }
                 .tag(2)
 
             MySettingsView()

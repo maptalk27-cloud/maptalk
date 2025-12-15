@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct ProfileAvatarView: View {
+struct UserAvatarView: View {
     let user: User
     var size: CGFloat = 84
 

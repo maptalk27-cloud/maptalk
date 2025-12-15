@@ -1,9 +1,9 @@
 import MapKit
 import SwiftUI
 
-struct ProfileMapPreview: View {
-    let pins: [ProfileViewModel.MapPin]
-    let footprints: [ProfileViewModel.Footprint]
+struct UserMapPreview: View {
+    let pins: [UserMapViewModel.MapPin]
+    let footprints: [UserMapViewModel.Footprint]
     let reels: [RealPost]
     let region: MKCoordinateRegion
 
@@ -54,8 +54,8 @@ struct ProfileMapPreview: View {
     }
 
     init(
-        pins: [ProfileViewModel.MapPin],
-        footprints: [ProfileViewModel.Footprint],
+        pins: [UserMapViewModel.MapPin],
+        footprints: [UserMapViewModel.Footprint],
         reels: [RealPost],
         region: MKCoordinateRegion
     ) {
@@ -70,7 +70,7 @@ struct ProfileMapPreview: View {
     }
 
     var body: some View {
-        let showDetails = ProfileMapAnnotationZoomHelper.isClose(distance: globeDistance)
+        let showDetails = UserMapAnnotationZoomHelper.isClose(distance: globeDistance)
 
         VStack(spacing: 10) {
             Map(position: $cameraPosition, interactionModes: []) {
@@ -85,18 +85,18 @@ struct ProfileMapPreview: View {
                     }
                     ForEach(pins) { pin in
                         Annotation("", coordinate: pin.coordinate) {
-                            ProfileMapMarker(category: pin.category)
+                            UserMapMarker(category: pin.category)
                         }
                     }
                 } else {
                     ForEach(reels) { real in
                         Annotation("", coordinate: real.center) {
-                            ProfileCollapsedReelMarker(real: real)
+                            UserMapCollapsedReelMarker(real: real)
                         }
                     }
                     ForEach(pins) { pin in
                         Annotation("", coordinate: pin.coordinate) {
-                            ProfileMapDotMarker(category: pin.category)
+                            UserMapDotMarker(category: pin.category)
                         }
                     }
                 }

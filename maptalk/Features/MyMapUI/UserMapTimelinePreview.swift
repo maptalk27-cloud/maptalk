@@ -1,9 +1,9 @@
 import MapKit
 import SwiftUI
 
-struct ProfileTimelinePreview: View {
-    let pins: [ProfileViewModel.MapPin]
-    let footprints: [ProfileViewModel.Footprint]
+struct UserMapTimelinePreview: View {
+    let pins: [UserMapViewModel.MapPin]
+    let footprints: [UserMapViewModel.Footprint]
     let reels: [RealPost]
     let region: MKCoordinateRegion
     let selectedSegmentId: Binding<String?>?
@@ -32,8 +32,8 @@ struct ProfileTimelinePreview: View {
     private let longHopThreshold: CLLocationDistance = 804_672 // ~500 miles
 
     init(
-        pins: [ProfileViewModel.MapPin],
-        footprints: [ProfileViewModel.Footprint],
+        pins: [UserMapViewModel.MapPin],
+        footprints: [UserMapViewModel.Footprint],
         reels: [RealPost],
         region: MKCoordinateRegion,
         selectedSegmentId: Binding<String?>? = nil,
@@ -71,7 +71,7 @@ struct ProfileTimelinePreview: View {
                 }
                 ForEach(segmentPins(segment)) { pin in
                     Annotation("", coordinate: pin.coordinate) {
-                        ProfileMapMarker(category: pin.category)
+                        UserMapMarker(category: pin.category)
                     }
                 }
             }
@@ -319,7 +319,7 @@ struct ProfileTimelinePreview: View {
         }
     }
 
-    private func segmentPins(_ segment: TimelineSegment?) -> [ProfileViewModel.MapPin] {
+    private func segmentPins(_ segment: TimelineSegment?) -> [UserMapViewModel.MapPin] {
         guard let segment else { return [] }
         return segment.events.compactMap { event in
             if case let .poi(rated) = event.kind {
@@ -330,7 +330,7 @@ struct ProfileTimelinePreview: View {
     }
 
     private func flyToSegment(_ segment: TimelineSegment, animated: Bool = true) {
-        let target = boundingTarget(for: segment.events) ?? (region, max(ProfileMapAnnotationZoomHelper.spanMeters(for: region), minSpanMeters))
+        let target = boundingTarget(for: segment.events) ?? (region, max(UserMapAnnotationZoomHelper.spanMeters(for: region), minSpanMeters))
         let camera = MapCamera(
             centerCoordinate: target.region.center,
             distance: target.distance,
@@ -383,7 +383,7 @@ struct ProfileTimelinePreview: View {
         let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
         let fittedRegion = MKCoordinateRegion(fittedRect)
 
-        let spanMeters = ProfileMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
+        let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
         let multiplier: Double = events.count == 2 ? 2.0 : 1.2
         let distance = max(spanMeters * multiplier, minSpanMeters)
 

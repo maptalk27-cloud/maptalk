@@ -2,7 +2,7 @@ import Combine
 import MapKit
 
 @MainActor
-final class ProfileViewModel: ObservableObject {
+final class UserMapViewModel: ObservableObject {
     enum Context: Equatable, Identifiable {
         case me
         case friend(User)
@@ -85,7 +85,7 @@ final class ProfileViewModel: ObservableObject {
     )
     @Published private(set) var footprints: [Footprint] = []
     @Published private(set) var reels: [RealPost] = []
-    @Published private(set) var mapRegion: MKCoordinateRegion = ProfileViewModel.defaultRegion
+    @Published private(set) var mapRegion: MKCoordinateRegion = UserMapViewModel.defaultRegion
 
     var mapPins: [MapPin] {
         footprints.map { footprint in

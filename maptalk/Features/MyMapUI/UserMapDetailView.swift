@@ -2,17 +2,18 @@ import MapKit
 import SwiftUI
 import UIKit
 
-struct ProfileMapDetailView: View {
-    let pins: [ProfileViewModel.MapPin]
+struct UserMapDetailView: View {
+    let pins: [UserMapViewModel.MapPin]
     let reels: [RealPost]
-    let footprints: [ProfileViewModel.Footprint]
-    let profileUser: User
+    let footprints: [UserMapViewModel.Footprint]
+    let mapUser: User
     let region: MKCoordinateRegion
     let userProvider: (UUID) -> User?
     let onDismiss: () -> Void
     let onSelectSegment: ((String?) -> Void)?
     let onDismissWithSegment: ((String?) -> Void)?
     let selectedSegmentId: Binding<String?>?
+    let showsCloseButton: Bool
 
     @State private var flightController = MapFlightController()
     @State private var cameraPosition: MapCameraPosition
@@ -40,10 +41,10 @@ struct ProfileMapDetailView: View {
     private let longHopThreshold: CLLocationDistance = 804_672 // ~500 miles
 
     init(
-        pins: [ProfileViewModel.MapPin],
+        pins: [UserMapViewModel.MapPin],
         reels: [RealPost],
-        footprints: [ProfileViewModel.Footprint],
-        profileUser: User,
+        footprints: [UserMapViewModel.Footprint],
+        mapUser: User,
         region: MKCoordinateRegion,
         userProvider: @escaping (UUID) -> User?,
         onDismiss: @escaping () -> Void,
@@ -51,29 +52,32 @@ struct ProfileMapDetailView: View {
         onSelectSegment: ((String?) -> Void)? = nil,
         onDismissWithSegment: ((String?) -> Void)? = nil,
         initialDisplayMode: MapDisplayMode = .timeline,
-        initialTimelineSegmentId: String? = nil
+        initialTimelineSegmentId: String? = nil,
+        showsCloseButton: Bool = true
     ) {
         self.pins = pins
         self.reels = reels
         self.footprints = footprints
-        self.profileUser = profileUser
+        self.mapUser = mapUser
         self.region = region
         self.userProvider = userProvider
         self.onDismiss = onDismiss
         self.selectedSegmentId = selectedSegmentId
         self.onSelectSegment = onSelectSegment
         self.onDismissWithSegment = onDismissWithSegment
+        self.showsCloseButton = showsCloseButton
         _cameraPosition = State(initialValue: .region(region))
         _lastCenter = State(initialValue: region.center)
         _currentRegion = State(initialValue: region)
-        _isShowingDetailedAnnotations = State(initialValue: ProfileMapAnnotationZoomHelper.isClose(region: region))
+        _isShowingDetailedAnnotations = State(initialValue: UserMapAnnotationZoomHelper.isClose(region: region))
         _displayMode = State(initialValue: initialDisplayMode)
         _selectedTimelineSegmentId = State(initialValue: initialTimelineSegmentId ?? selectedSegmentId?.wrappedValue)
     }
 
     var body: some View {
-        GeometryReader { _ in
-            let topInset = safeAreaTopInset()
+        GeometryReader { proxy in
+            let topInset = max(proxy.safeAreaInsets.top, safeAreaTopInset())
+            let topOffset = max(topInset - 25, 12)
             ZStack(alignment: .topLeading) {
                 Map(position: $cameraPosition, interactionModes: .all) {
                     let now = Date()
@@ -102,9 +106,9 @@ struct ProfileMapDetailView: View {
                                 case .thumbnail:
                                     RealMapThumbnail(real: real, user: userProvider(real.userId), size: 44)
                                 case .heart:
-                                    ProfileMapReelHeartMarker()
+                                    UserMapReelHeartMarker()
                                 case .dot:
-                                    ProfileMapReelDotMarker()
+                                    UserMapReelDotMarker()
                                 }
                             }
                             .buttonStyle(.plain)
@@ -117,9 +121,9 @@ struct ProfileMapDetailView: View {
                                 presentPin(pin)
                             } label: {
                                 if isShowingDetailedAnnotations {
-                                    ProfileMapMarker(category: pin.category)
+                                    UserMapMarker(category: pin.category)
                                 } else {
-                                    ProfileMapDotMarker(category: pin.category)
+                                    UserMapDotMarker(category: pin.category)
                                 }
                             }
                             .buttonStyle(.plain)
@@ -142,7 +146,7 @@ struct ProfileMapDetailView: View {
                 lastCenter = context.region.center
                 currentRegion = context.region
                 lastCameraDistance = context.camera.distance
-                let nextState = ProfileMapAnnotationZoomHelper.nextDetailState(
+                let nextState = UserMapAnnotationZoomHelper.nextDetailState(
                         current: isShowingDetailedAnnotations,
                         distance: context.camera.distance,
                         region: context.region
@@ -152,26 +156,28 @@ struct ProfileMapDetailView: View {
                     }
                 }
 
-                Button {
-                    onDismissWithSegment?(selectedTimelineSegmentId ?? timelineSegments.first?.id)
-                    onDismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.body.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 40, height: 40)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Circle())
-                        .shadow(color: Color.black.opacity(0.4), radius: 8)
+                if showsCloseButton {
+                    Button {
+                        onDismissWithSegment?(selectedTimelineSegmentId ?? timelineSegments.first?.id)
+                        onDismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.body.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 40, height: 40)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                            .shadow(color: Color.black.opacity(0.4), radius: 8)
+                    }
+                    .padding(.top, topOffset)
+                    .padding(.leading, 18)
                 }
-                .padding(.top, topInset - 25)
-                .padding(.leading, 18)
             }
             .overlay(alignment: .bottom) {
                 if displayMode == .all {
-                    ProfileMapBottomSheet(
+                    UserMapBottomSheet(
                         entries: entries,
-                        profileUser: profileUser,
+                        mapUser: mapUser,
                         userProvider: userProvider,
                         sheetState: $sheetState,
                         filter: $filter,
@@ -200,7 +206,7 @@ struct ProfileMapDetailView: View {
             }
             .overlay(alignment: .topTrailing) {
                 modeToggle
-                    .padding(.top, topInset - 25)
+                    .padding(.top, topOffset)
                     .padding(.trailing, 18)
             }
         }
@@ -281,7 +287,7 @@ struct ProfileMapDetailView: View {
         }
     }
 
-    private var filteredPins: [ProfileViewModel.MapPin] {
+    private var filteredPins: [UserMapViewModel.MapPin] {
         switch filter {
         case .all, .poi:
             return pins
@@ -312,7 +318,7 @@ struct ProfileMapDetailView: View {
         }
     }
 
-    private var activePins: [ProfileViewModel.MapPin] {
+    private var activePins: [UserMapViewModel.MapPin] {
         switch displayMode {
         case .all:
             return filteredPins
@@ -331,7 +337,7 @@ struct ProfileMapDetailView: View {
         Dictionary(uniqueKeysWithValues: reels.map { ($0.id, $0) })
     }
 
-    private var mapPinsById: [UUID: ProfileViewModel.MapPin] {
+    private var mapPinsById: [UUID: UserMapViewModel.MapPin] {
         Dictionary(uniqueKeysWithValues: pins.map { ($0.id, $0) })
     }
 
@@ -475,7 +481,7 @@ struct ProfileMapDetailView: View {
         presentEntry(entry)
     }
 
-    private func presentPin(_ pin: ProfileViewModel.MapPin) {
+    private func presentPin(_ pin: UserMapViewModel.MapPin) {
         guard let footprint = footprint(for: pin),
               let entry = entry(for: footprint) else { return }
         presentEntry(entry)
@@ -493,7 +499,7 @@ struct ProfileMapDetailView: View {
 
     private func flyToTimelineSegment(_ segment: TimelineSegment, animated: Bool = true) {
         let target = boundingTarget(for: segment.events)
-            ?? (region, max(ProfileMapAnnotationZoomHelper.spanMeters(for: region), timelineMinSpanMeters))
+            ?? (region, max(UserMapAnnotationZoomHelper.spanMeters(for: region), timelineMinSpanMeters))
 
         let camera = MapCamera(
             centerCoordinate: target.region.center,
@@ -626,7 +632,7 @@ struct ProfileMapDetailView: View {
         }
     }
 
-    private func entry(for footprint: ProfileViewModel.Footprint) -> Entry? {
+    private func entry(for footprint: UserMapViewModel.Footprint) -> Entry? {
         entries.first { candidate in
             if case let .poi(rated) = candidate.kind {
                 return rated.id == footprint.id
@@ -756,14 +762,14 @@ struct ProfileMapDetailView: View {
         let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
         let fittedRegion = MKCoordinateRegion(fittedRect)
 
-        let spanMeters = ProfileMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
+        let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
         let multiplier: Double = events.count == 2 ? 3.4 : 2.2
         let distance = max(spanMeters * multiplier, timelineMinSpanMeters)
 
         return (fittedRegion, distance)
     }
 
-    private func footprint(for pin: ProfileViewModel.MapPin) -> ProfileViewModel.Footprint? {
+    private func footprint(for pin: UserMapViewModel.MapPin) -> UserMapViewModel.Footprint? {
         footprints.first { $0.id == pin.id }
     }
 
@@ -803,7 +809,7 @@ struct ProfileMapDetailView: View {
         let reference = referenceDistance()
 
         if isShowingDetailedAnnotations == false {
-            if reference <= ProfileMapAnnotationZoomHelper.detailRevealMeters {
+            if reference <= UserMapAnnotationZoomHelper.detailRevealMeters {
                 return .heart
             }
             return .dot
@@ -814,18 +820,18 @@ struct ProfileMapDetailView: View {
             return .thumbnail
         }
 
-        if ProfileMapAnnotationZoomHelper.isClose(
+        if UserMapAnnotationZoomHelper.isClose(
             distance: reference,
             region: currentRegion,
-            threshold: ProfileMapAnnotationZoomHelper.oldReelRevealMeters
+            threshold: UserMapAnnotationZoomHelper.oldReelRevealMeters
         ) {
             return .thumbnail
         }
 
-        if ProfileMapAnnotationZoomHelper.isClose(
+        if UserMapAnnotationZoomHelper.isClose(
             distance: reference,
             region: currentRegion,
-            threshold: ProfileMapAnnotationZoomHelper.detailRevealMeters
+            threshold: UserMapAnnotationZoomHelper.detailRevealMeters
         ) {
             return .heart
         }
@@ -837,7 +843,7 @@ struct ProfileMapDetailView: View {
         if let lastCameraDistance {
             return lastCameraDistance
         }
-        return ProfileMapAnnotationZoomHelper.spanMeters(for: currentRegion)
+        return UserMapAnnotationZoomHelper.spanMeters(for: currentRegion)
     }
 
     private func safeAreaTopInset() -> CGFloat {
@@ -866,13 +872,13 @@ private enum MapListFilter: String, CaseIterable {
     case reel = "Reel"
 }
 
-private struct ProfileMapBottomSheet: View {
-    let entries: [ProfileMapDetailView.Entry]
-    let profileUser: User
+private struct UserMapBottomSheet: View {
+    let entries: [UserMapDetailView.Entry]
+    let mapUser: User
     let userProvider: (UUID) -> User?
     @Binding var sheetState: MapSheetState
     @Binding var filter: MapListFilter
-    let onSelectEntry: (ProfileMapDetailView.Entry) -> Void
+    let onSelectEntry: (UserMapDetailView.Entry) -> Void
     @GestureState private var dragOffset: CGFloat = 0
     @State private var headerHeight: CGFloat = 0
     @State private var isFilterMenuPresented = false
@@ -933,9 +939,9 @@ private struct ProfileMapBottomSheet: View {
                                 Button {
                                     onSelectEntry(entry)
                                 } label: {
-                                    ProfileMapListCard(
+                                    UserMapListCard(
                                         entry: entry,
-                                        profileUser: profileUser,
+                                        mapUser: mapUser,
                                         userProvider: userProvider
                                     )
                                 }
@@ -1000,7 +1006,7 @@ private struct ProfileMapBottomSheet: View {
         }
     }
 
-    private var filteredEntries: [ProfileMapDetailView.Entry] {
+    private var filteredEntries: [UserMapDetailView.Entry] {
         switch filter {
         case .all:
             return entries
@@ -1123,9 +1129,9 @@ private struct ProfileMapBottomSheet: View {
     }
 }
 
-private struct ProfileMapListCard: View {
-    let entry: ProfileMapDetailView.Entry
-    let profileUser: User
+private struct UserMapListCard: View {
+    let entry: UserMapDetailView.Entry
+    let mapUser: User
     let userProvider: (UUID) -> User?
 
     var body: some View {
@@ -1149,9 +1155,9 @@ private struct ProfileMapListCard: View {
                 hideHeader: true
             )
         case let .poi(rated):
-            ProfilePOICard(
+            UserMapPOICard(
                 rated: rated,
-                profileUser: profileUser,
+                mapUser: mapUser,
                 userProvider: userProvider
             )
         }
@@ -1221,9 +1227,9 @@ private struct FilterDropdownSizeKey: PreferenceKey {
     }
 }
 
-private struct ProfilePOICard: View {
+private struct UserMapPOICard: View {
     let rated: RatedPOI
-    let profileUser: User
+    let mapUser: User
     let userProvider: (UUID) -> User?
 
     @State private var isStoryViewerPresented = false
@@ -1335,11 +1341,11 @@ private struct ProfilePOICard: View {
     }
 
     private var currentUser: User {
-        userProvider(profileUser.id) ?? profileUser
+        userProvider(mapUser.id) ?? mapUser
     }
 
     private var initialContributorIndex: Int {
-        if let index = storyContributors.firstIndex(where: { $0.userId == profileUser.id }) {
+        if let index = storyContributors.firstIndex(where: { $0.userId == mapUser.id }) {
             return index
         }
         return 0
@@ -1393,8 +1399,8 @@ private struct ProfilePOICard: View {
 
         return [
             ExperienceDetailView.POIStoryContributor(
-                id: profileUser.id,
-                userId: profileUser.id,
+                id: mapUser.id,
+                userId: mapUser.id,
                 user: currentUser,
                 items: mediaItems,
                 mostRecent: Date()
@@ -1419,7 +1425,7 @@ private struct ProfilePOICard: View {
     }
 
     private var avatarFallback: some View {
-        Text(String(profileUser.handle.prefix(2)).uppercased())
+        Text(String(mapUser.handle.prefix(2)).uppercased())
             .font(.caption.bold())
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1433,7 +1439,7 @@ private struct ProfilePOICard: View {
     }
 }
 
-struct ProfileMapDotMarker: View {
+struct UserMapDotMarker: View {
     let category: POICategory
 
     var body: some View {
@@ -1448,7 +1454,7 @@ struct ProfileMapDotMarker: View {
     }
 }
 
-private struct ProfileMapReelDotMarker: View {
+private struct UserMapReelDotMarker: View {
     var body: some View {
         let size: CGFloat = 9
         let dotColor = Color(red: 1.0, green: 0.35, blue: 0.62).opacity(0.95)
@@ -1475,7 +1481,7 @@ private enum ReelDisplayMode {
     }
 }
 
-private struct ProfileMapClusterMarker: View {
+private struct UserMapClusterMarker: View {
     let poiCount: Int
     let reelCount: Int
 
@@ -1526,7 +1532,7 @@ private struct ProfileMapClusterMarker: View {
     }
 }
 
-private struct ProfileMapReelHeartMarker: View {
+private struct UserMapReelHeartMarker: View {
     var body: some View {
         let innerSize: CGFloat = 21
         let corePink = Color(red: 1.0, green: 0.35, blue: 0.62)
@@ -1544,7 +1550,7 @@ private struct ProfileMapReelHeartMarker: View {
     }
 }
 
-struct ProfileCollapsedReelMarker: View {
+struct UserMapCollapsedReelMarker: View {
     let real: RealPost
 
     private var thumbnailURL: URL? {
@@ -1608,4 +1614,4 @@ struct ProfileCollapsedReelMarker: View {
     }
 }
 
-// ProfileMapMarker and RealMapThumbnail moved to ProfileTimelineShared.swift for reuse.
+// UserMapMarker and RealMapThumbnail moved to UserMapTimelineShared.swift for reuse.
