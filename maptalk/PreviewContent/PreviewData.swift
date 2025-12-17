@@ -1853,6 +1853,66 @@ enum PreviewData {
         return reals
     }()
 
+    static let sampleJourneys: [JourneyPost] = {
+        let now = Date()
+        let other = sampleFriends[1]
+        let journeyLikes = Array(sampleFriends.prefix(18)).map(\.id)
+        let journeyLikesTwo = Array(sampleFriends.dropFirst(5).prefix(12)).map(\.id)
+        let journeyOne = JourneyPost(
+            id: uuid(3001),
+            userId: currentUser.id,
+            title: "City light circuit",
+            createdAt: now.addingTimeInterval(-40),
+            reels: Array(sampleReals.prefix(20)),
+            pois: Array(sampleRatedPOIs.prefix(10)),
+            likes: journeyLikes,
+            comments: [
+                JourneyPost.Comment(
+                    id: uuid(3051),
+                    userId: sampleFriends[2].id,
+                    text: "This arc looks unreal.",
+                    createdAt: now.addingTimeInterval(-35 * 60)
+                ),
+                JourneyPost.Comment(
+                    id: uuid(3052),
+                    userId: sampleFriends[4].id,
+                    text: "Dropping pins for these stops.",
+                    createdAt: now.addingTimeInterval(-22 * 60)
+                ),
+                JourneyPost.Comment(
+                    id: uuid(3053),
+                    userId: sampleFriends[6].id,
+                    text: "Need the night market segment next.",
+                    createdAt: now.addingTimeInterval(-12 * 60)
+                )
+            ]
+        )
+        let journeyTwo = JourneyPost(
+            id: uuid(3002),
+            userId: other.id,
+            title: "Weekend arc",
+            createdAt: now.addingTimeInterval(-95),
+            reels: Array(sampleReals.dropFirst(2).prefix(2)),
+            pois: Array(sampleRatedPOIs.dropFirst(3).prefix(3)),
+            likes: journeyLikesTwo,
+            comments: [
+                JourneyPost.Comment(
+                    id: uuid(3061),
+                    userId: sampleFriends[0].id,
+                    text: "Obsessed with this route.",
+                    createdAt: now.addingTimeInterval(-55 * 60)
+                ),
+                JourneyPost.Comment(
+                    id: uuid(3062),
+                    userId: sampleFriends[3].id,
+                    text: "Saved for next weekend.",
+                    createdAt: now.addingTimeInterval(-38 * 60)
+                )
+            ]
+        )
+        return [journeyOne, journeyTwo]
+    }()
+
     static func user(for id: UUID) -> User? {
         if currentUser.id == id {
             return currentUser

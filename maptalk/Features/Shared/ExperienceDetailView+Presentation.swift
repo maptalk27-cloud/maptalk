@@ -28,7 +28,8 @@ extension ExperienceDetailView {
                             data: contentData(for: item.mode),
                             onRecentSharerSelected: { index, data in
                                 openRecentSharer(at: index, using: data)
-                            }
+                            },
+                            userProvider: userProvider
                         )
                         .tag(item.id)
                     }
@@ -39,7 +40,8 @@ extension ExperienceDetailView {
                     data: data,
                     onRecentSharerSelected: { index, content in
                         openRecentSharer(at: index, using: content)
-                    }
+                    },
+                    userProvider: userProvider
                 )
             }
         }
@@ -76,7 +78,15 @@ extension ExperienceDetailView {
 
     @ViewBuilder
     private func collapsedPreviewBody(using data: ContentData) -> some View {
-        if let hero = data.hero {
+        if let journey = data.journey {
+            JourneyCard(
+                journey: journey.journey,
+                user: journey.user,
+                style: .collapsed,
+                userProvider: userProvider
+            )
+            .padding(.horizontal, 12)
+        } else if let hero = data.hero {
             HeroSection(model: hero, style: .collapsed)
                 .padding(.horizontal, 12)
         } else if let poiInfo = data.poiInfo {

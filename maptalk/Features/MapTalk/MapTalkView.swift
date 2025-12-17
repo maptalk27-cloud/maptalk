@@ -22,6 +22,7 @@ struct MapTalkView: View {
     var body: some View {
         GeometryReader { geometry in
             let sortedReals = viewModel.reals.sorted { $0.createdAt > $1.createdAt }
+            let journeys = PreviewData.sampleJourneys
             let poiGroups = viewModel.ratedPOIs.compactMap { rated -> RealStoriesRow.POIStoryGroup? in
                 let sharers = rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
                     let hasPhoto = checkIn.media.contains { media in
@@ -46,6 +47,7 @@ struct MapTalkView: View {
             }
             let storyItems = (
                 sortedReals.map { RealStoriesRow.StoryItem(real: $0) } +
+                journeys.map { RealStoriesRow.StoryItem(journey: $0) } +
                 poiGroups.map { RealStoriesRow.StoryItem(poiGroup: $0) }
             )
             .sorted { $0.timestamp > $1.timestamp }
@@ -61,6 +63,11 @@ struct MapTalkView: View {
                     return ExperienceDetailView.SequencePager.Item(
                         id: group.id,
                         mode: .poi(group.ratedPOI)
+                    )
+                case let .journey(journey):
+                    return ExperienceDetailView.SequencePager.Item(
+                        id: journey.id,
+                        mode: .journey(journey)
                     )
                 }
             }
@@ -84,6 +91,14 @@ struct MapTalkView: View {
                 storyItems.first { item in
                     if case let .poi(group) = item.source {
                         return group.ratedPOI.id == rated.id
+                    }
+                    return false
+                }
+            }
+            let storyItemForJourney: (JourneyPost) -> RealStoriesRow.StoryItem? = { journey in
+                storyItems.first { item in
+                    if case let .journey(candidate) = item.source {
+                        return candidate.id == journey.id
                     }
                     return false
                 }
@@ -138,6 +153,15 @@ struct MapTalkView: View {
                     if shouldFocus {
                         viewModel.focus(on: group.ratedPOI)
                     }
+                case .journey:
+                    if let overrideCause {
+                        pendingRegionCause = overrideCause
+                    } else if pendingRegionCause == .initial {
+                        pendingRegionCause = .initial
+                    } else {
+                        pendingRegionCause = .other
+                    }
+                    selectedRealId = nil
                 }
                 presentSequenceIfNeeded(shouldPresent)
             }
@@ -235,6 +259,11 @@ struct MapTalkView: View {
 #endif
                                 if let item = storyItemForPOI(group.ratedPOI) {
                                     selectStoryItem(item, true, true, nil)
+                                }
+                            },
+                            onSelectJourney: { journey in
+                                if let item = storyItemForJourney(journey) {
+                                    selectStoryItem(item, true, false, nil)
                                 }
                             },
                             userProvider: viewModel.user(for:),
@@ -420,6 +449,8 @@ private extension MapTalkView {
             return viewModel.region(for: real)
         case let .poi(group):
             return viewModel.region(for: group.ratedPOI)
+        case .journey:
+            return nil
         }
     }
 }

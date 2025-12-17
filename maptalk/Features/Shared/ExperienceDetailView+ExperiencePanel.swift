@@ -6,11 +6,25 @@ extension ExperienceDetailView {
 struct ExperiencePanel: View {
     let data: ExperienceDetailView.ContentData
     let onRecentSharerSelected: ((Int, ExperienceDetailView.ContentData) -> Void)?
+    let userProvider: (UUID) -> User?
 
     var body: some View {
         ScrollView {
             VStack(spacing: 28) {
-                if let hero = data.hero {
+                if let journey = data.journey {
+                    JourneyCard(
+                        journey: journey.journey,
+                        user: journey.user,
+                        style: .standard,
+                        userProvider: userProvider
+                    )
+                    .padding(.horizontal, 4)
+
+                    if data.engagement.hasContent {
+                        EngagementSection(model: data.engagement, accentColor: data.accentColor)
+                            .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+                    }
+                } else if let hero = data.hero {
                     HeroSection(model: hero, style: .standard)
                         .padding(.horizontal, 4)
 

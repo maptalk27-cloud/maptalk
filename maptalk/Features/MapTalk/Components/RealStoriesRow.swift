@@ -22,6 +22,7 @@ struct RealStoriesRow: View {
         enum Source {
             case real(RealPost)
             case poi(POIStoryGroup)
+            case journey(JourneyPost)
         }
 
         let source: Source
@@ -33,6 +34,8 @@ struct RealStoriesRow: View {
                 return real.id
             case let .poi(group):
                 return group.id
+            case let .journey(journey):
+                return journey.id
             }
         }
 
@@ -45,12 +48,18 @@ struct RealStoriesRow: View {
             source = .poi(poiGroup)
             timestamp = poiGroup.latestTimestamp
         }
+
+        init(journey: JourneyPost) {
+            source = .journey(journey)
+            timestamp = journey.createdAt
+        }
     }
 
     let items: [StoryItem]
     let selectedId: UUID?
     let onSelectReal: (RealPost) -> Void
     let onSelectPOIGroup: (POIStoryGroup) -> Void
+    let onSelectJourney: (JourneyPost) -> Void
     let userProvider: (UUID) -> User?
     let alignTrigger: Int
 
@@ -59,6 +68,7 @@ struct RealStoriesRow: View {
         selectedId: UUID?,
         onSelectReal: @escaping (RealPost) -> Void,
         onSelectPOIGroup: @escaping (POIStoryGroup) -> Void,
+        onSelectJourney: @escaping (JourneyPost) -> Void,
         userProvider: @escaping (UUID) -> User?,
         alignTrigger: Int
     ) {
@@ -66,6 +76,7 @@ struct RealStoriesRow: View {
         self.selectedId = selectedId
         self.onSelectReal = onSelectReal
         self.onSelectPOIGroup = onSelectPOIGroup
+        self.onSelectJourney = onSelectJourney
         self.userProvider = userProvider
         self.alignTrigger = alignTrigger
     }
@@ -96,6 +107,8 @@ struct RealStoriesRow: View {
             realButton(for: real, isSelected: isSelected)
         case let .poi(group):
             poiButton(for: group, isSelected: isSelected)
+        case let .journey(journey):
+            journeyButton(for: journey, isSelected: isSelected)
         }
     }
 
@@ -129,6 +142,29 @@ struct RealStoriesRow: View {
             VStack(spacing: 6) {
                 POIStoryGroupBadge(group: group, isSelected: isSelected)
                 Text(group.poiName)
+                    .font(.caption2.bold())
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
+            .frame(width: 72)
+            .scaleEffect(isSelected ? 1.08 : 1.0)
+            .opacity(isSelected ? 1 : 0.82)
+            .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: isSelected)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func journeyButton(for journey: JourneyPost, isSelected: Bool) -> some View {
+        let user = userProvider(journey.userId)
+        return Button {
+            onSelectJourney(journey)
+        } label: {
+            VStack(spacing: 6) {
+                JourneyStoryBadge(
+                    user: user,
+                    isSelected: isSelected
+                )
+                Text(user?.handle ?? "you")
                     .font(.caption2.bold())
                     .foregroundStyle(.white)
                     .lineLimit(1)
@@ -233,6 +269,71 @@ private struct RealStoryBadge: View {
 
     private var initials: String {
         guard let handle = user?.handle else { return "ME" }
+        return String(handle.prefix(2)).uppercased()
+    }
+}
+
+private struct JourneyStoryBadge: View {
+    let user: User?
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(.black.opacity(0.45))
+                .frame(width: 62, height: 62)
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                }
+
+            if let url = user?.avatarURL {
+                AsyncImage(url: url) { image in
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } placeholder: {
+                    ProgressView()
+                }
+                .frame(width: 60, height: 60)
+                .clipShape(Circle())
+            } else {
+                Text(initials)
+                    .font(.headline.bold())
+                    .foregroundStyle(.white)
+            }
+        }
+        .frame(width: 70, height: 70)
+        .overlay(alignment: .bottomTrailing) {
+            Text("journey")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.black.opacity(0.75), in: Capsule(style: .continuous))
+                .overlay {
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.3), lineWidth: 0.6)
+                }
+                .offset(x: 6, y: 6)
+        }
+        .overlay(alignment: .topTrailing) {
+            if isSelected {
+                Circle()
+                    .fill(Theme.neonPrimary)
+                    .frame(width: 18, height: 18)
+                    .overlay {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .offset(x: 4, y: -4)
+            }
+        }
+    }
+
+    private var initials: String {
+        guard let handle = user?.handle else { return "JR" }
         return String(handle.prefix(2)).uppercased()
     }
 }

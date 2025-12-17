@@ -63,6 +63,7 @@ extension ExperienceDetailView {
             )
             return ContentData(
                 hero: hero,
+                journey: nil,
                 badges: badges,
                 story: nil,
                 highlights: HighlightsSectionModel(
@@ -100,6 +101,7 @@ extension ExperienceDetailView {
             }
             return ContentData(
                 hero: nil,
+                journey: nil,
                 badges: tagBadges,
                 story: gallery.isEmpty ? nil : StorySectionModel(galleryItems: gallery),
                 highlights: HighlightsSectionModel(
@@ -132,6 +134,64 @@ extension ExperienceDetailView {
                 accentColor: accent,
                 backgroundGradient: [Color.black, accent.opacity(0.25)],
                 recentSharers: recentSharers
+            )
+        case let .journey(journey):
+            let accent = Theme.neonPrimary
+            let user = userProvider(journey.userId)
+            let friendLikes = journey.likes.compactMap { userId -> FriendEngagement? in
+                guard let user = userProvider(userId) else { return nil }
+                return FriendEngagement(
+                    id: userId,
+                    userId: userId,
+                    kind: .like,
+                    user: user,
+                    message: "Reacted to this journey.",
+                    badge: nil,
+                    timestamp: nil,
+                    replies: [],
+                    endorsement: nil
+                )
+            }
+            let friendComments = journey.comments.compactMap { comment -> FriendEngagement? in
+                guard let user = userProvider(comment.userId) else { return nil }
+                return FriendEngagement(
+                    id: comment.id,
+                    userId: comment.userId,
+                    kind: .comment,
+                    user: user,
+                    message: comment.text,
+                    badge: nil,
+                    timestamp: comment.createdAt,
+                    replies: [],
+                    endorsement: nil
+                )
+            }
+            return ContentData(
+                hero: nil,
+                journey: JourneyCardModel(journey: journey, user: user),
+                badges: [],
+                story: nil,
+                highlights: HighlightsSectionModel(
+                    title: journey.title,
+                    subtitle: "Journey",
+                    highlight: nil,
+                    secondary: nil
+                ),
+                engagement: EngagementSectionModel(
+                    friendLikesIconName: "heart",
+                    friendLikesTitle: "Friend Likes",
+                    friendLikes: friendLikes,
+                    friendCommentsTitle: "Friend Comments",
+                    friendComments: friendComments,
+                    friendRatingsTitle: "Friend Ratings",
+                    friendRatings: [],
+                    storyContributors: []
+                ),
+                poiInfo: nil,
+                poiStats: nil,
+                accentColor: accent,
+                backgroundGradient: [Color.black, accent.opacity(0.25)],
+                recentSharers: []
             )
         }
     }

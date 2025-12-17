@@ -6,6 +6,7 @@ struct ExperienceDetailView: View {
     enum Mode {
         case real(RealPost, User?)
         case poi(RatedPOI)
+        case journey(JourneyPost)
     }
 
     struct SequencePager {
@@ -24,6 +25,7 @@ struct ExperienceDetailView: View {
 
     struct ContentData {
         let hero: HeroSectionModel?
+        let journey: JourneyCardModel?
         let badges: [String]
         let story: StorySectionModel?
         let highlights: HighlightsSectionModel
@@ -41,6 +43,11 @@ struct ExperienceDetailView: View {
         let displayNameOverride: String?
         let avatarCategory: POICategory?
         let suppressContent: Bool
+    }
+
+    struct JourneyCardModel {
+        let journey: JourneyPost
+        let user: User?
     }
 
     struct StorySectionModel {
