@@ -175,6 +175,7 @@ struct ExperienceDetailView: View {
     }
 }
 
+
 #if DEBUG
 extension ExperienceDetailView {
     func logPOIDebug(event: String, data: ContentData) {

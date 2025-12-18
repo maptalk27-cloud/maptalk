@@ -66,6 +66,18 @@ final class MapTalkViewModel: ObservableObject {
         region = region(for: rated)
     }
 
+    func region(for journey: JourneyPost) -> MKCoordinateRegion {
+        regionAround(
+            coordinate: journey.coordinate,
+            radiusMeters: 2_200,
+            minimumRadius: 2_200
+        )
+    }
+
+    func focus(on journey: JourneyPost) {
+        region = region(for: journey)
+    }
+
     private func bind() {
         let coordinateStream = environment.location.location
             .compactMap { $0?.coordinate }

@@ -7,6 +7,7 @@ enum RegionChangeCause {
     case initial
     case real
     case poi
+    case journey
     case user
     case other
 }
@@ -82,7 +83,7 @@ final class MapFlightController: ObservableObject {
         switch cause {
         case .initial, .other:
             return .direct
-        case .user, .poi, .real:
+        case .user, .poi, .real, .journey:
             return stagedPlan(
                 for: travelDistance,
                 baseSpan: max(current.dominantSpanMeters, target.dominantSpanMeters)

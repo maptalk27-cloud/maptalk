@@ -10,6 +10,21 @@ struct JourneyCard: View {
     let user: User?
     let style: Style
     let userProvider: (UUID) -> User?
+    let onAvatarStackTap: (() -> Void)?
+
+    init(
+        journey: JourneyPost,
+        user: User?,
+        style: Style,
+        userProvider: @escaping (UUID) -> User?,
+        onAvatarStackTap: (() -> Void)? = nil
+    ) {
+        self.journey = journey
+        self.user = user
+        self.style = style
+        self.userProvider = userProvider
+        self.onAvatarStackTap = onAvatarStackTap
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -44,9 +59,7 @@ struct JourneyCard: View {
         style == .collapsed ? 34 : 40
     }
 
-    private var stackAvatarSize: CGFloat {
-        style == .collapsed ? 30 : 34
-    }
+    private var stackAvatarSize: CGFloat { 34 }
 
     private var userNameRow: some View {
         Text(displayName)
@@ -102,14 +115,20 @@ struct JourneyCard: View {
         JourneyAvatarStack(
             journey: journey,
             userProvider: userProvider,
-            avatarSize: stackAvatarSize
+            avatarSize: stackAvatarSize,
+            maxRows: style == .collapsed ? 2 : nil
         )
-        .padding(10)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onAvatarStackTap?()
         }
     }
 
@@ -152,6 +171,19 @@ private struct JourneyAvatarStack: View {
     let journey: JourneyPost
     let userProvider: (UUID) -> User?
     let avatarSize: CGFloat
+    let maxRows: Int?
+
+    init(
+        journey: JourneyPost,
+        userProvider: @escaping (UUID) -> User?,
+        avatarSize: CGFloat,
+        maxRows: Int? = nil
+    ) {
+        self.journey = journey
+        self.userProvider = userProvider
+        self.avatarSize = avatarSize
+        self.maxRows = maxRows
+    }
 
     var body: some View {
         let events = sortedEvents
@@ -161,12 +193,22 @@ private struct JourneyAvatarStack: View {
                 .foregroundStyle(.white.opacity(0.6))
         } else {
             let rows = chunked(events, size: 13)
+            let visibleRows = maxRows.map { Array(rows.prefix($0)) } ?? rows
+            let visibleCount = visibleRows.reduce(0) { $0 + $1.count }
+            let remainingCount = max(events.count - visibleCount, 0)
+
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(rows.indices, id: \.self) { index in
-                    let row = rows[index]
+                ForEach(visibleRows.indices, id: \.self) { index in
+                    let row = visibleRows[index]
                     HStack(spacing: -10) {
                         ForEach(row) { event in
                             avatar(for: event)
+                        }
+                        if remainingCount > 0 && index == visibleRows.count - 1 {
+                            Text("+\(remainingCount)")
+                                .font(.caption2.bold())
+                                .foregroundStyle(.white)
+                                .padding(.leading, 14)
                         }
                     }
                 }

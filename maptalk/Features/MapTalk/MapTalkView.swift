@@ -153,15 +153,18 @@ struct MapTalkView: View {
                     if shouldFocus {
                         viewModel.focus(on: group.ratedPOI)
                     }
-                case .journey:
+                case let .journey(journey):
                     if let overrideCause {
                         pendingRegionCause = overrideCause
                     } else if pendingRegionCause == .initial {
                         pendingRegionCause = .initial
                     } else {
-                        pendingRegionCause = .other
+                        pendingRegionCause = .journey
                     }
                     selectedRealId = nil
+                    if shouldFocus {
+                        viewModel.focus(on: journey)
+                    }
                 }
                 presentSequenceIfNeeded(shouldPresent)
             }
@@ -197,6 +200,7 @@ struct MapTalkView: View {
                     MapOverlays(
                         ratedPOIs: viewModel.ratedPOIs,
                         reals: viewModel.reals,
+                        journeys: journeys,
                         userCoordinate: viewModel.userCoordinate,
                         currentUser: PreviewData.currentUser,
                         onSelectPOI: { rated in
@@ -227,6 +231,11 @@ struct MapTalkView: View {
                         },
                         onSelectReal: { real in
                             presentReal(real)
+                        },
+                        onSelectJourney: { journey in
+                            if let item = storyItemForJourney(journey) {
+                                selectStoryItem(item, true, false, .other)
+                            }
                         },
                         onSelectUser: { }
                     )
@@ -261,11 +270,11 @@ struct MapTalkView: View {
                                     selectStoryItem(item, true, true, nil)
                                 }
                             },
-                            onSelectJourney: { journey in
-                                if let item = storyItemForJourney(journey) {
-                                    selectStoryItem(item, true, false, nil)
-                                }
-                            },
+                        onSelectJourney: { journey in
+                            if let item = storyItemForJourney(journey) {
+                                selectStoryItem(item, true, true, .journey)
+                            }
+                        },
                             userProvider: viewModel.user(for:),
                             alignTrigger: reelAlignTrigger
                         )
@@ -449,8 +458,8 @@ private extension MapTalkView {
             return viewModel.region(for: real)
         case let .poi(group):
             return viewModel.region(for: group.ratedPOI)
-        case .journey:
-            return nil
+        case let .journey(journey):
+            return viewModel.region(for: journey)
         }
     }
 }

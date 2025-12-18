@@ -122,14 +122,15 @@ struct RealStoriesRow: View {
                     user: user,
                     isSelected: isSelected
                 )
+                .opacity(isSelected ? 1 : 0.82)
                 Text(user?.handle ?? "you")
-                    .font(.caption2.bold())
-                    .foregroundStyle(.white)
+                    .font(.caption2.weight(.thin))
+                    .foregroundStyle(.black)
                     .lineLimit(1)
+                    .padding(.vertical, 2)
             }
             .frame(width: 72)
             .scaleEffect(isSelected ? 1.08 : 1.0)
-            .opacity(isSelected ? 1 : 0.82)
             .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: isSelected)
         }
         .buttonStyle(.plain)
@@ -141,14 +142,15 @@ struct RealStoriesRow: View {
         } label: {
             VStack(spacing: 6) {
                 POIStoryGroupBadge(group: group, isSelected: isSelected)
+                .opacity(isSelected ? 1 : 0.82)
                 Text(group.poiName)
-                    .font(.caption2.bold())
-                    .foregroundStyle(.white)
+                    .font(.caption2.weight(.thin))
+                    .foregroundStyle(.black)
                     .lineLimit(1)
+                    .padding(.vertical, 2)
             }
             .frame(width: 72)
             .scaleEffect(isSelected ? 1.08 : 1.0)
-            .opacity(isSelected ? 1 : 0.82)
             .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: isSelected)
         }
         .buttonStyle(.plain)
@@ -164,14 +166,15 @@ struct RealStoriesRow: View {
                     user: user,
                     isSelected: isSelected
                 )
+                .opacity(isSelected ? 1 : 0.82)
                 Text(user?.handle ?? "you")
-                    .font(.caption2.bold())
-                    .foregroundStyle(.white)
+                    .font(.caption2.weight(.thin))
+                    .foregroundStyle(.black)
                     .lineLimit(1)
+                    .padding(.vertical, 2)
             }
             .frame(width: 72)
             .scaleEffect(isSelected ? 1.08 : 1.0)
-            .opacity(isSelected ? 1 : 0.82)
             .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: isSelected)
         }
         .buttonStyle(.plain)
@@ -248,7 +251,7 @@ private struct RealStoryBadge: View {
             } else {
                 Text(initials)
                     .font(.headline.bold())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.black)
             }
         }
         .frame(width: 70, height: 70)
@@ -300,11 +303,11 @@ private struct JourneyStoryBadge: View {
             } else {
                 Text(initials)
                     .font(.headline.bold())
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.black)
             }
         }
         .frame(width: 70, height: 70)
-        .overlay(alignment: .bottomTrailing) {
+        .overlay(alignment: .bottom) {
             Text("journey")
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
@@ -315,9 +318,8 @@ private struct JourneyStoryBadge: View {
                     Capsule(style: .continuous)
                         .stroke(Color.white.opacity(0.3), lineWidth: 0.6)
                 }
-                .offset(x: 6, y: 6)
         }
-        .overlay(alignment: .topTrailing) {
+        .overlay(alignment: .bottomTrailing) {
             if isSelected {
                 Circle()
                     .fill(Theme.neonPrimary)
@@ -327,7 +329,7 @@ private struct JourneyStoryBadge: View {
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.white)
                     }
-                    .offset(x: 4, y: -4)
+                    .offset(x: 6, y: 6)
             }
         }
     }
@@ -460,7 +462,7 @@ private struct AvatarThumbnail: View {
     private var placeholder: some View {
         Text(initials)
             .font(.caption2.bold())
-            .foregroundStyle(.white)
+            .foregroundStyle(.black)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.gray.opacity(0.4))
     }

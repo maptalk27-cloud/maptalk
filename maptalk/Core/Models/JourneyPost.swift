@@ -1,3 +1,4 @@
+import CoreLocation
 import Foundation
 
 struct JourneyPost: Identifiable {
@@ -11,6 +12,7 @@ struct JourneyPost: Identifiable {
     let id: UUID
     let userId: UUID
     let title: String
+    let coordinate: CLLocationCoordinate2D
     let createdAt: Date
     let reels: [RealPost]
     let pois: [RatedPOI]

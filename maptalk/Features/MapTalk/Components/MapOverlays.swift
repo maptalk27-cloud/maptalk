@@ -4,10 +4,12 @@ import SwiftUI
 struct MapOverlays: MapContent {
     let ratedPOIs: [RatedPOI]
     let reals: [RealPost]
+    let journeys: [JourneyPost]
     let userCoordinate: CLLocationCoordinate2D?
     let currentUser: User
     let onSelectPOI: (RatedPOI) -> Void
     let onSelectReal: (RealPost) -> Void
+    let onSelectJourney: (JourneyPost) -> Void
     let onSelectUser: () -> Void
 
     var body: some MapContent {
@@ -39,6 +41,17 @@ struct MapOverlays: MapContent {
                     onSelectReal(real)
                 } label: {
                     RealAvatarMarker(user: PreviewData.user(for: real.userId))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        ForEach(journeys) { journey in
+            Annotation("", coordinate: journey.coordinate) {
+                Button {
+                    onSelectJourney(journey)
+                } label: {
+                    JourneyMapMarker(user: PreviewData.user(for: journey.userId))
                 }
                 .buttonStyle(.plain)
             }
@@ -107,6 +120,79 @@ private struct RealAvatarMarker: View {
                 .stroke(Theme.neonPrimary, lineWidth: 2.4)
         }
         .modifier(Theme.neonGlow(Theme.neonPrimary))
+    }
+}
+
+private struct JourneyMapMarker: View {
+    let user: User?
+
+    private var initials: String {
+        guard let handle = user?.handle else { return "JR" }
+        return String(handle.prefix(2)).uppercased()
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Theme.neonAccent.opacity(0.9),
+                                Theme.neonAccent.opacity(0.35)
+                            ],
+                            center: .center,
+                            startRadius: 5,
+                            endRadius: 40
+                        )
+                    )
+                    .shadow(color: Theme.neonAccent.opacity(0.45), radius: 10, y: 4)
+
+                if let url = user?.avatarURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image.resizable().scaledToFill()
+                        case .failure:
+                            Color.gray.opacity(0.4)
+                        default:
+                            ProgressView()
+                        }
+                    }
+                    .clipShape(Circle())
+                } else {
+                    Text(initials)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: 62, height: 62)
+            .overlay {
+                Circle()
+                    .strokeBorder(Color.white.opacity(0.65), lineWidth: 2)
+                    .blendMode(.screen)
+                    .shadow(color: Theme.neonAccent.opacity(0.5), radius: 10)
+            }
+            .overlay {
+                Circle()
+                    .stroke(Theme.neonAccent, lineWidth: 2.4)
+            }
+            .modifier(Theme.neonGlow(Theme.neonAccent))
+
+            Text("journey")
+                .font(.caption2.bold())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(Color.black.opacity(0.8), in: Capsule(style: .continuous))
+                .overlay {
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.25), lineWidth: 0.8)
+                }
+                .offset(y: 6)
+                .zIndex(1)
+        }
+        .frame(width: 62, height: 62)
     }
 }
 
