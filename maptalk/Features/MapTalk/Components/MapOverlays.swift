@@ -51,7 +51,7 @@ struct MapOverlays: MapContent {
                 Button {
                     onSelectJourney(journey)
                 } label: {
-                    JourneyMapMarker(user: PreviewData.user(for: journey.userId))
+                    JourneyMapMarker(user: PreviewData.user(for: journey.userId), label: "journey")
                 }
                 .buttonStyle(.plain)
             }
@@ -125,6 +125,7 @@ private struct RealAvatarMarker: View {
 
 private struct JourneyMapMarker: View {
     let user: User?
+    let label: String
 
     private var initials: String {
         guard let handle = user?.handle else { return "JR" }
@@ -177,21 +178,21 @@ private struct JourneyMapMarker: View {
                 Circle()
                     .stroke(Theme.neonAccent, lineWidth: 2.4)
             }
-            .modifier(Theme.neonGlow(Theme.neonAccent))
+        .modifier(Theme.neonGlow(Theme.neonAccent))
 
-            Text("journey")
-                .font(.caption2.bold())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
-                .background(Color.black.opacity(0.8), in: Capsule(style: .continuous))
-                .overlay {
-                    Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(0.25), lineWidth: 0.8)
-                }
-                .offset(y: 6)
-                .zIndex(1)
-        }
+        Text(label)
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Color.black.opacity(0.7), in: Capsule(style: .continuous))
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(Color.white.opacity(0.3), lineWidth: 0.6)
+            }
+            .offset(y: 8)
+            .zIndex(1)
+    }
         .frame(width: 62, height: 62)
     }
 }

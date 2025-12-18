@@ -164,6 +164,7 @@ struct RealStoriesRow: View {
             VStack(spacing: 6) {
                 JourneyStoryBadge(
                     user: user,
+                    label: "journey",
                     isSelected: isSelected
                 )
                 .opacity(isSelected ? 1 : 0.82)
@@ -278,6 +279,7 @@ private struct RealStoryBadge: View {
 
 private struct JourneyStoryBadge: View {
     let user: User?
+    let label: String
     let isSelected: Bool
 
     var body: some View {
@@ -308,7 +310,7 @@ private struct JourneyStoryBadge: View {
         }
         .frame(width: 70, height: 70)
         .overlay(alignment: .bottom) {
-            Text("journey")
+            Text(label)
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 6)

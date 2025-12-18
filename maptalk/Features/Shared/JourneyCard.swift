@@ -62,10 +62,15 @@ struct JourneyCard: View {
     private var stackAvatarSize: CGFloat { 34 }
 
     private var userNameRow: some View {
-        Text(displayName)
-            .font(.headline.weight(.semibold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 8) {
+            Text(displayName)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+            Text(journey.displayLabel)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var avatarView: some View {
@@ -105,7 +110,7 @@ struct JourneyCard: View {
     }
 
     private var contentText: some View {
-        Text(journey.title.isEmpty ? "Journey update" : journey.title)
+        Text(journey.content.isEmpty ? "Journey update" : journey.content)
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
             .lineLimit(style == .collapsed ? 2 : 3)

@@ -1861,7 +1861,8 @@ enum PreviewData {
         let journeyOne = JourneyPost(
             id: uuid(3001),
             userId: currentUser.id,
-            title: "City light circuit",
+            title: "my best trip",
+            content: "City light circuit",
             coordinate: CLLocationCoordinate2D(latitude: 47.611, longitude: -122.332),
             createdAt: now.addingTimeInterval(-40),
             reels: Array(sampleReals.prefix(20)),
@@ -1891,7 +1892,8 @@ enum PreviewData {
         let journeyTwo = JourneyPost(
             id: uuid(3002),
             userId: other.id,
-            title: "Weekend arc",
+            title: "",
+            content: "Weekend arc",
             coordinate: CLLocationCoordinate2D(latitude: 51.5079, longitude: -0.0878),
             createdAt: now.addingTimeInterval(-95),
             reels: Array(sampleReals.dropFirst(2).prefix(2)),
