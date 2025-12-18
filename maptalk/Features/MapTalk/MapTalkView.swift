@@ -69,6 +69,7 @@ struct MapTalkView: View {
                     makePOIGroup(rated, false)
                 }
                 let items = (
+                    [RealStoriesRow.StoryItem(journey: journey)] +
                     journey.reels.sorted { $0.createdAt > $1.createdAt }.map { RealStoriesRow.StoryItem(real: $0) } +
                     journeyPOIs.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
                 )
@@ -213,11 +214,9 @@ struct MapTalkView: View {
                     } else {
                         selectedRealId = nil
                     }
-                    return
-                }
-                if let first = storyItems.first {
-                    let override: RegionChangeCause = pendingRegionCause == .initial ? .initial : .other
-                    selectStoryItem(first, false, false, override)
+                } else {
+                    selectedStoryId = nil
+                    selectedRealId = nil
                 }
             }
 
@@ -344,6 +343,8 @@ struct MapTalkView: View {
             }
             .sheet(isPresented: $isExperiencePresented, onDismiss: {
                 experienceDetent = .fraction(0.25)
+                selectedRealId = nil
+                selectedStoryId = nil
             }) {
                 if let experience = activeExperience {
                     let isExpanded = experienceDetent == .large
@@ -388,6 +389,9 @@ struct MapTalkView: View {
                                             )
                                         }
                                         focusedJourneyHeader = journey
+                                        selectedStoryId = journey.id
+                                        activeExperience = .sequence(nonce: UUID())
+                                        isExperiencePresented = true
                                     },
                                 userProvider: viewModel.user(for:)
                             )
@@ -442,22 +446,16 @@ struct MapTalkView: View {
                 }
                 if let currentId = selectedStoryId {
                     if ids.contains(currentId) == false {
-                        if let first = storyItems.first {
-                            selectStoryItem(first, false, false, .other)
-                        } else {
-                            selectedStoryId = nil
-                            selectedRealId = nil
-                        }
+                        selectedStoryId = nil
+                        selectedRealId = nil
                     }
-                } else if let first = storyItems.first {
-                    selectStoryItem(first, false, false, .other)
+                } else {
+                    selectedStoryId = nil
+                    selectedRealId = nil
                 }
             }
             .onChangeCompat(of: selectedStoryId) { identifier in
                 if focusedJourneyHeader != nil {
-                    if identifier == nil {
-                        exitJourneyFocus()
-                    }
                     return
                 }
             }
