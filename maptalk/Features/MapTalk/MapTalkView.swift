@@ -18,18 +18,22 @@ struct MapTalkView: View {
     @State private var pendingRegionCause: RegionChangeCause = .initial
     @State private var reelAlignTrigger: Int = 0
     @State private var controlsBottomPadding: CGFloat = 0
+    @State private var focusedJourneyHeader: JourneyPost?
 
     var body: some View {
         GeometryReader { geometry in
-            let sortedReals = viewModel.reals.sorted { $0.createdAt > $1.createdAt }
-            let journeys = PreviewData.sampleJourneys
-            let poiGroups = viewModel.ratedPOIs.compactMap { rated -> RealStoriesRow.POIStoryGroup? in
+            let makePOIGroup: (RatedPOI, Bool) -> RealStoriesRow.POIStoryGroup? = { rated, onlyRecent in
                 let sharers = rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
                     let hasPhoto = checkIn.media.contains { media in
                         if case .photo = media.kind { return true }
                         return false
                     }
-                    guard hasPhoto, checkIn.createdAt >= Date().addingTimeInterval(-60 * 60 * 24) else { return nil }
+                    if onlyRecent {
+                        if hasPhoto == false { return nil }
+                        if checkIn.createdAt < Date().addingTimeInterval(-60 * 60 * 24) {
+                            return nil
+                        }
+                    }
                     let user = viewModel.user(for: checkIn.userId)
                     return RealStoriesRow.POISharer(
                         id: checkIn.id,
@@ -42,15 +46,24 @@ struct MapTalkView: View {
                 return RealStoriesRow.POIStoryGroup(
                     ratedPOI: rated,
                     sharers: sharers,
-                    latestTimestamp: sharers.first?.timestamp ?? Date()
+                    latestTimestamp: sharers.first?.timestamp ?? (rated.checkIns.map(\.createdAt).max() ?? Date())
                 )
             }
-            let storyItems = (
+
+            let sortedReals = viewModel.reals.sorted { $0.createdAt > $1.createdAt }
+            let journeys = PreviewData.sampleJourneys
+            let poiGroups = viewModel.ratedPOIs.compactMap { rated in
+                makePOIGroup(rated, true)
+            }
+            let baseStoryItems = (
                 sortedReals.map { RealStoriesRow.StoryItem(real: $0) } +
                 journeys.map { RealStoriesRow.StoryItem(journey: $0) } +
-                poiGroups.map { RealStoriesRow.StoryItem(poiGroup: $0) }
+                poiGroups.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
             )
             .sorted { $0.timestamp > $1.timestamp }
+
+            let storyItems = baseStoryItems
+
             let storyItemIds = storyItems.map(\.id)
             let sequenceItems = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
                 switch item.source {
@@ -243,15 +256,20 @@ struct MapTalkView: View {
                 .ignoresSafeArea()
 
                 VStack(alignment: .leading, spacing: 14) {
-                    SegmentedControl(
-                        options: ["World", "Friends"],
-                        selection: Binding(
-                            get: { viewModel.mode.rawValue },
-                            set: { viewModel.mode = .init(index: $0) }
+                    if let journeyHeader = focusedJourneyHeader {
+                        journeyHeaderView(for: journeyHeader)
+                            .padding(.horizontal, 16)
+                    } else {
+                        SegmentedControl(
+                            options: ["World", "Friends"],
+                            selection: Binding(
+                                get: { viewModel.mode.rawValue },
+                                set: { viewModel.mode = .init(index: $0) }
+                            )
                         )
-                    )
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 16)
+                    }
 
                     if storyItems.isEmpty == false {
                         RealStoriesRow(
@@ -349,6 +367,9 @@ struct MapTalkView: View {
                                     sequencePager: pager,
                                     selection: selectionBinding,
                                     isExpanded: isExpanded,
+                                    onJourneyAvatarStackTap: { journey in
+                                        focusedJourneyHeader = journey
+                                    },
                                     userProvider: viewModel.user(for:)
                                 )
                             } else {
@@ -413,7 +434,25 @@ struct MapTalkView: View {
                     selectStoryItem(first, false, false, .other)
                 }
             }
+            .onChangeCompat(of: selectedStoryId) { identifier in
+                guard let identifier,
+                      let item = storyItemForId(identifier) else {
+                    focusedJourneyHeader = nil
+                    return
+                }
+                if case let .journey(journey) = item.source {
+                    if focusedJourneyHeader?.id == journey.id {
+                        return
+                    }
+                    focusedJourneyHeader = nil
+                } else {
+                    focusedJourneyHeader = nil
+                }
+            }
             .onChangeCompat(of: isExperiencePresented) { isActive in
+                if isActive == false {
+                    focusedJourneyHeader = nil
+                }
                 let target = isActive ? previewControlsPadding : baseControlsPadding
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                     controlsBottomPadding = target
@@ -461,6 +500,51 @@ private extension MapTalkView {
         case let .journey(journey):
             return viewModel.region(for: journey)
         }
+    }
+
+    @ViewBuilder
+    func journeyHeaderView(for journey: JourneyPost) -> some View {
+        HStack(spacing: 12) {
+            Button {
+                focusedJourneyHeader = nil
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(Color.black.opacity(0.45), in: Circle())
+            }
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.black.opacity(0.45))
+                    .frame(height: 52)
+                    .frame(minWidth: 240)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                    }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(journeyTitle(for: journey))
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text("Journey")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+
+            Spacer()
+        }
+    }
+
+    func journeyTitle(for journey: JourneyPost) -> String {
+        let trimmed = journey.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? journey.displayLabel : trimmed
     }
 }
 

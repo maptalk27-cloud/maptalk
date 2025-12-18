@@ -29,7 +29,8 @@ extension ExperienceDetailView {
                             onRecentSharerSelected: { index, data in
                                 openRecentSharer(at: index, using: data)
                             },
-                            userProvider: userProvider
+                            userProvider: userProvider,
+                            onJourneyAvatarStackTap: onJourneyAvatarStackTap
                         )
                         .tag(item.id)
                     }
@@ -41,7 +42,8 @@ extension ExperienceDetailView {
                     onRecentSharerSelected: { index, content in
                         openRecentSharer(at: index, using: content)
                     },
-                    userProvider: userProvider
+                    userProvider: userProvider,
+                    onJourneyAvatarStackTap: onJourneyAvatarStackTap
                 )
             }
         }
@@ -83,7 +85,10 @@ extension ExperienceDetailView {
                 journey: journey.journey,
                 user: journey.user,
                 style: .collapsed,
-                userProvider: userProvider
+                userProvider: userProvider,
+                onAvatarStackTap: {
+                    onJourneyAvatarStackTap?(journey.journey)
+                }
             )
             .padding(.horizontal, 12)
         } else if let hero = data.hero {

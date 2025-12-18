@@ -115,17 +115,20 @@ struct ExperienceDetailView: View {
     let poi: RatedPOI?
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
+    let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
     let userProvider: (UUID) -> User?
     @State private var storyViewerState: POIStoryViewerState?
 
     init(
         ratedPOI: RatedPOI,
         isExpanded: Bool,
+        onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         userProvider: @escaping (UUID) -> User? = { _ in nil }
     ) {
         self.poi = ratedPOI
         self.sequenceContext = nil
         self.isExpanded = isExpanded
+        self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.userProvider = userProvider
     }
 
@@ -133,11 +136,13 @@ struct ExperienceDetailView: View {
         sequencePager: SequencePager,
         selection: Binding<UUID>,
         isExpanded: Bool,
+        onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         userProvider: @escaping (UUID) -> User? = { _ in nil }
     ) {
         self.poi = nil
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
+        self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.userProvider = userProvider
     }
 

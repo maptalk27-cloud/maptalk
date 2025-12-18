@@ -7,6 +7,7 @@ struct ExperiencePanel: View {
     let data: ExperienceDetailView.ContentData
     let onRecentSharerSelected: ((Int, ExperienceDetailView.ContentData) -> Void)?
     let userProvider: (UUID) -> User?
+    let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
 
     var body: some View {
         ScrollView {
@@ -16,7 +17,10 @@ struct ExperiencePanel: View {
                         journey: journey.journey,
                         user: journey.user,
                         style: .standard,
-                        userProvider: userProvider
+                        userProvider: userProvider,
+                        onAvatarStackTap: {
+                            onJourneyAvatarStackTap?(journey.journey)
+                        }
                     )
                     .padding(.horizontal, 4)
 
