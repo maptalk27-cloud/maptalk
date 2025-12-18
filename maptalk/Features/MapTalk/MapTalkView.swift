@@ -69,7 +69,6 @@ struct MapTalkView: View {
                     makePOIGroup(rated, false)
                 }
                 let items = (
-                    [RealStoriesRow.StoryItem(journey: journey)] +
                     journey.reels.sorted { $0.createdAt > $1.createdAt }.map { RealStoriesRow.StoryItem(real: $0) } +
                     journeyPOIs.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
                 )
@@ -225,7 +224,7 @@ struct MapTalkView: View {
                     MapOverlays(
                         ratedPOIs: focusedJourneyHeader?.pois ?? viewModel.ratedPOIs,
                         reals: focusedJourneyHeader?.reels ?? viewModel.reals,
-                        journeys: focusedJourneyHeader.map { [$0] } ?? baseJourneys,
+                        journeys: focusedJourneyHeader == nil ? baseJourneys : [],
                         userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
                         currentUser: PreviewData.currentUser,
                         onSelectPOI: { rated in
@@ -389,9 +388,6 @@ struct MapTalkView: View {
                                             )
                                         }
                                         focusedJourneyHeader = journey
-                                        selectedStoryId = journey.id
-                                        activeExperience = .sequence(nonce: UUID())
-                                        isExperiencePresented = true
                                     },
                                 userProvider: viewModel.user(for:)
                             )
