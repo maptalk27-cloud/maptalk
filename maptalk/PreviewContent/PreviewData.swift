@@ -1855,18 +1855,279 @@ enum PreviewData {
 
     static let sampleJourneys: [JourneyPost] = {
         let now = Date()
-        let other = sampleFriends[1]
-        let journeyLikes = Array(sampleFriends.prefix(18)).map(\.id)
-        let journeyLikesTwo = Array(sampleFriends.dropFirst(5).prefix(12)).map(\.id)
+        let chengsi = currentUser
+        let friend = sampleFriends[1]
+        let journeyLikes = Array(sampleFriends.prefix(10)).map(\.id)
+        let journeyLikesTwo = Array(sampleFriends.dropFirst(2).prefix(10)).map(\.id)
+
+        // Hawaii journey (Chengsi) — Oahu focus
+        let hawaiiReels: [RealPost] = [
+            .init(
+                id: uuid(4001),
+                userId: chengsi.id,
+                center: .init(latitude: 21.272, longitude: -157.821),
+                radiusMeters: 320,
+                message: "Lanai lineup glowing at blue hour.",
+                attachments: [
+                    .init(id: uuid(4301), kind: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=60")!))
+                ],
+                likes: [friend.id, sampleFriends[2].id, sampleFriends[3].id],
+                comments: [
+                    comment(4401, user: sampleFriends[4], text: "Sky looks unreal.", minutesAgo: 28, relativeTo: now)
+                ],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-11_000),
+                expiresAt: now.addingTimeInterval(18 * 3600)
+            ),
+            .init(
+                id: uuid(4002),
+                userId: chengsi.id,
+                center: .init(latitude: 21.3007, longitude: -157.863),
+                radiusMeters: 180,
+                message: "Pow! Murals pulsing off the warehouse walls.",
+                attachments: [
+                    .init(id: uuid(4302), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=60")!))
+                ],
+                likes: [sampleFriends[0].id, sampleFriends[5].id],
+                comments: [],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-9_800),
+                expiresAt: now.addingTimeInterval(16 * 3600)
+            ),
+            .init(
+                id: uuid(4003),
+                userId: chengsi.id,
+                center: .init(latitude: 21.5795, longitude: -158.1031),
+                radiusMeters: 260,
+                message: "Shrimp truck smoke + salt spray collab.",
+                attachments: [
+                    .init(id: uuid(4303), kind: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=1200&q=60")!))
+                ],
+                likes: [friend.id, sampleFriends[6].id],
+                comments: [],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-8_200),
+                expiresAt: now.addingTimeInterval(15 * 3600)
+            )
+        ]
+
+        let hawaiiPOIs: [RatedPOI] = [
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5001),
+                    name: "Kai’lua Sunrise Pillbox",
+                    coordinate: .init(latitude: 21.6436, longitude: -157.9019),
+                    category: .viewpoint
+                ),
+                highlight: "Pink horizon / pillbox silhouettes.",
+                secondary: "Steep start then all glow.",
+                media: [
+                    .init(id: uuid(5201), kind: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5101),
+                        userId: chengsi.id,
+                        createdAt: now.addingTimeInterval(-9_000),
+                        endorsement: .hype,
+                        media: [
+                            .init(id: uuid(5202), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1000&q=60")!))
+                        ],
+                        tag: .explore
+                    )
+                ],
+                comments: [
+                    RatedPOI.Comment(
+                        id: uuid(5301),
+                        userId: friend.id,
+                        content: .text("Need this exact light."),
+                        createdAt: now.addingTimeInterval(-7_800)
+                    )
+                ],
+                endorsements: .init(hype: 6, solid: 2, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .explore, count: 7),
+                    .init(tag: .detour, count: 2)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 34
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5002),
+                    name: "North Shore Shrimp Lot",
+                    coordinate: .init(latitude: 21.5798, longitude: -158.1035),
+                    category: .restaurant
+                ),
+                highlight: "Garlic slick + beach wind.",
+                secondary: "Cash line moves fast.",
+                media: [
+                    .init(id: uuid(5203), kind: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5102),
+                        userId: chengsi.id,
+                        createdAt: now.addingTimeInterval(-7_600),
+                        endorsement: .solid,
+                        media: [
+                            .init(id: uuid(5204), kind: .photo(URL(string: "https://images.unsplash.com/photo-1521017432531-fbd92d768814?auto=format&fit=crop&w=1000&q=60")!))
+                        ],
+                        tag: .dine
+                    ),
+                    .init(
+                        id: uuid(5103),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-7_200),
+                        endorsement: .hype,
+                        media: [],
+                        tag: .social
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 5, solid: 3, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .dine, count: 5),
+                    .init(tag: .social, count: 3)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 21
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5003),
+                    name: "Kakaʻako Neon Walls",
+                    coordinate: .init(latitude: 21.3007, longitude: -157.8630),
+                    category: .art
+                ),
+                highlight: "Fresh paint, projector haze.",
+                secondary: "Best after rain.",
+                media: [
+                    .init(id: uuid(5205), kind: .photo(URL(string: "https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5104),
+                        userId: chengsi.id,
+                        createdAt: now.addingTimeInterval(-8_400),
+                        endorsement: .hype,
+                        media: [],
+                        tag: .express
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 4, solid: 1, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .express, count: 4),
+                    .init(tag: .detour, count: 1)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 15
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5007),
+                    name: "Waikiki Reef Walk",
+                    coordinate: .init(latitude: 21.2767, longitude: -157.8253),
+                    category: .viewpoint
+                ),
+                highlight: "Reef fire reflections from the roof deck.",
+                secondary: "Driftwood bar downstairs.",
+                media: [
+                    .init(id: uuid(5209), kind: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5108),
+                        userId: chengsi.id,
+                        createdAt: now.addingTimeInterval(-8_900),
+                        endorsement: .hype,
+                        media: [],
+                        tag: .explore
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 5, solid: 1, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .explore, count: 5),
+                    .init(tag: .date, count: 1)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 27
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5008),
+                    name: "Tantalus Ridge Drive",
+                    coordinate: .init(latitude: 21.3274, longitude: -157.8110),
+                    category: .viewpoint
+                ),
+                highlight: "City glow loop under the pines.",
+                secondary: "Fog rolls in fast.",
+                media: [
+                    .init(id: uuid(5210), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5109),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-8_100),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .detour
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 2, solid: 4, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .detour, count: 3),
+                    .init(tag: .unwind, count: 2)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 14
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5009),
+                    name: "Haleʻiwa Shave Ice Row",
+                    coordinate: .init(latitude: 21.5935, longitude: -158.1037),
+                    category: .market
+                ),
+                highlight: "Pineapple ice under the ironwood trees.",
+                secondary: "Cash lane, picnic benches only.",
+                media: [
+                    .init(id: uuid(5211), kind: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5110),
+                        userId: chengsi.id,
+                        createdAt: now.addingTimeInterval(-7_700),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .social
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 3, solid: 3, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .social, count: 4),
+                    .init(tag: .dine, count: 2)
+                ],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 18
+            )
+        ]
+
         let journeyOne = JourneyPost(
             id: uuid(3001),
-            userId: currentUser.id,
-            title: "my best trip",
-            content: "City light circuit",
-            coordinate: CLLocationCoordinate2D(latitude: 47.611, longitude: -122.332),
+            userId: chengsi.id,
+            title: "Hawaii neon arc",
+            content: "Oʻahu dusk-to-dawn loop.",
+            coordinate: CLLocationCoordinate2D(latitude: 21.3099, longitude: -157.8581),
             createdAt: now.addingTimeInterval(-40),
-            reels: Array(sampleReals.prefix(20)),
-            pois: Array(sampleRatedPOIs.prefix(10)),
+            reels: hawaiiReels,
+            pois: hawaiiPOIs,
             likes: journeyLikes,
             comments: [
                 JourneyPost.Comment(
@@ -1880,24 +2141,288 @@ enum PreviewData {
                     userId: sampleFriends[4].id,
                     text: "Dropping pins for these stops.",
                     createdAt: now.addingTimeInterval(-22 * 60)
-                ),
-                JourneyPost.Comment(
-                    id: uuid(3053),
-                    userId: sampleFriends[6].id,
-                    text: "Need the night market segment next.",
-                    createdAt: now.addingTimeInterval(-12 * 60)
                 )
             ]
         )
+
+        // Florida journey (friend) — Miami focus
+        let floridaReels: [RealPost] = [
+            .init(
+                id: uuid(4004),
+                userId: friend.id,
+                center: .init(latitude: 25.7815, longitude: -80.1321),
+                radiusMeters: 220,
+                message: "Golden hour on South Beach deck.",
+                attachments: [
+                    .init(id: uuid(4304), kind: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=60")!))
+                ],
+                likes: [chengsi.id, sampleFriends[3].id],
+                comments: [],
+                visibility: .publicAll,
+                createdAt: now.addingTimeInterval(-14_400),
+                expiresAt: now.addingTimeInterval(20 * 3600)
+            ),
+            .init(
+                id: uuid(4005),
+                userId: friend.id,
+                center: .init(latitude: 25.8011, longitude: -80.1992),
+                radiusMeters: 180,
+                message: "Wynwood espresso + paint fumes.",
+                attachments: [
+                    .init(id: uuid(4305), kind: .photo(URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=1200&q=60")!))
+                ],
+                likes: [sampleFriends[5].id],
+                comments: [],
+                visibility: .publicAll,
+                createdAt: now.addingTimeInterval(-13_200),
+                expiresAt: now.addingTimeInterval(18 * 3600)
+            ),
+            .init(
+                id: uuid(4006),
+                userId: friend.id,
+                center: .init(latitude: 25.745, longitude: -80.497),
+                radiusMeters: 640,
+                message: "Airboats and thunder over sawgrass.",
+                attachments: [
+                    .init(id: uuid(4306), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=60")!))
+                ],
+                likes: [chengsi.id],
+                comments: [],
+                visibility: .publicAll,
+                createdAt: now.addingTimeInterval(-12_600),
+                expiresAt: now.addingTimeInterval(17 * 3600)
+            )
+        ]
+
+        let floridaPOIs: [RatedPOI] = [
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5004),
+                    name: "Wynwood Coffee Lab",
+                    coordinate: .init(latitude: 25.8014, longitude: -80.1990),
+                    category: .coffee
+                ),
+                highlight: "Single-origin + street art crawl.",
+                secondary: "Grab a cortado before walls.",
+                media: [
+                    .init(id: uuid(5206), kind: .photo(URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5105),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-13_400),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .social
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 2, solid: 3, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .social, count: 4),
+                    .init(tag: .study, count: 2)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 12
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5005),
+                    name: "South Beach Sunset Deck",
+                    coordinate: .init(latitude: 25.7820, longitude: -80.1323),
+                    category: .viewpoint
+                ),
+                highlight: "Crimson sky over neon hotels.",
+                secondary: "Best just after rain clears.",
+                media: [
+                    .init(id: uuid(5207), kind: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5106),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-14_600),
+                        endorsement: .hype,
+                        media: [],
+                        tag: .explore
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 5, solid: 1, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .explore, count: 5),
+                    .init(tag: .date, count: 1)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 19
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5006),
+                    name: "Everglades Sawgrass Rise",
+                    coordinate: .init(latitude: 25.7452, longitude: -80.4972),
+                    category: .viewpoint
+                ),
+                highlight: "Storm shelf rolling over the flats.",
+                secondary: "Thunder & airboats soundtrack.",
+                media: [
+                    .init(id: uuid(5208), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5107),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-12_800),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .explore
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 3, solid: 2, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .explore, count: 4),
+                    .init(tag: .detour, count: 2)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 11
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5010),
+                    name: "Biscayne Kite Point",
+                    coordinate: .init(latitude: 25.7630, longitude: -80.1390),
+                    category: .viewpoint
+                ),
+                highlight: "Kites against cruise ship lights.",
+                secondary: "Windy, bring a shell.",
+                media: [
+                    .init(id: uuid(5212), kind: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5111),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-13_000),
+                        endorsement: .hype,
+                        media: [],
+                        tag: .explore
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 4, solid: 1, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .explore, count: 4),
+                    .init(tag: .detour, count: 1)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 16
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5011),
+                    name: "Design District Steps",
+                    coordinate: .init(latitude: 25.8160, longitude: -80.1920),
+                    category: .art
+                ),
+                highlight: "Metallic steps glowing between galleries.",
+                secondary: "Late-night espresso stand nearby.",
+                media: [
+                    .init(id: uuid(5213), kind: .photo(URL(string: "https://images.unsplash.com/photo-1495474472287-4d71bcdd2085?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5112),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-12_900),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .entertainment
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 2, solid: 3, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .entertainment, count: 3),
+                    .init(tag: .premium, count: 1)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 13
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5012),
+                    name: "Venetian Pool Drift",
+                    coordinate: .init(latitude: 25.7390, longitude: -80.2710),
+                    category: .other
+                ),
+                highlight: "Coral walls and blue hour swim lights.",
+                secondary: "Weekday dusk is empty.",
+                media: [
+                    .init(id: uuid(5214), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5113),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-12_500),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .unwind
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 1, solid: 4, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .unwind, count: 3),
+                    .init(tag: .date, count: 1)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 10
+            ),
+            RatedPOI(
+                poi: .init(
+                    id: uuid(5013),
+                    name: "Glades Boardwalk Rise",
+                    coordinate: .init(latitude: 25.7460, longitude: -80.4200),
+                    category: .viewpoint
+                ),
+                highlight: "Orange storm light over sawgrass.",
+                secondary: "Mosquitoes bring your spray.",
+                media: [
+                    .init(id: uuid(5215), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1000&q=60")!))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(5114),
+                        userId: friend.id,
+                        createdAt: now.addingTimeInterval(-12_400),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .explore
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 2, solid: 3, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .explore, count: 4),
+                    .init(tag: .detour, count: 2)
+                ],
+                isFavoritedByCurrentUser: false,
+                favoritesCount: 12
+            )
+        ]
+
         let journeyTwo = JourneyPost(
             id: uuid(3002),
-            userId: other.id,
-            title: "",
-            content: "Weekend arc",
-            coordinate: CLLocationCoordinate2D(latitude: 51.5079, longitude: -0.0878),
+            userId: friend.id,
+            title: "Florida glow",
+            content: "Miami heat with a wetlands detour.",
+            coordinate: CLLocationCoordinate2D(latitude: 25.7820, longitude: -80.1857),
             createdAt: now.addingTimeInterval(-95),
-            reels: Array(sampleReals.dropFirst(2).prefix(2)),
-            pois: Array(sampleRatedPOIs.dropFirst(3).prefix(3)),
+            reels: floridaReels,
+            pois: floridaPOIs,
             likes: journeyLikesTwo,
             comments: [
                 JourneyPost.Comment(
@@ -1914,6 +2439,7 @@ enum PreviewData {
                 )
             ]
         )
+
         return [journeyOne, journeyTwo]
     }()
 
