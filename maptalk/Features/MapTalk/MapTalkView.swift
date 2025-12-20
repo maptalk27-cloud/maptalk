@@ -704,25 +704,25 @@ private extension MapTalkView {
 
     func exitJourneyFocus() {
         focusedJourneyHeader = nil
-        if let snapshot = preFocusSnapshot {
-            selectedStoryId = snapshot.selectedId
-            if let real = viewModel.reals.first(where: { $0.id == snapshot.selectedId }) {
-                selectedRealId = real.id
-            } else {
-                selectedRealId = nil
+        if let journey = preFocusSnapshot?.selectedId.flatMap({ id in
+            PreviewData.sampleJourneys.first(where: { $0.id == id })
+        }) {
+            let region = viewModel.region(for: journey)
+            flightController.handleRegionChange(
+                currentRegion: currentRegion,
+                targetRegion: region,
+                cause: .journey,
+                cameraPosition: $cameraPosition
+            ) { updated in
+                currentRegion = updated
             }
-            pendingRegionCause = .other
-            if let region = snapshot.region {
-                currentRegion = region
-            }
-            cameraPosition = snapshot.camera
-            preFocusSnapshot = nil
-        }
-        if isExperiencePresented {
+            // Keep the journey preview card active after exiting focus.
+            selectedStoryId = journey.id
             activeExperience = .sequence(nonce: UUID())
-        } else {
-            activeExperience = nil
+            isExperiencePresented = true
+            experienceDetent = .fraction(0.25)
         }
+        preFocusSnapshot = nil
     }
 }
 
