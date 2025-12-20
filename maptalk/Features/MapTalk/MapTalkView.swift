@@ -104,6 +104,46 @@ struct MapTalkView: View {
                     experienceDetent = .fraction(0.25)
                 }
             }
+            let journeyBoundingTarget: (JourneyPost) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? = { journey in
+                let reelCoords = journey.reels.map(\.center)
+                let poiCoords = journey.pois.map { $0.poi.coordinate }
+                let coords = reelCoords + poiCoords
+                guard coords.isEmpty == false else { return nil }
+
+                if coords.count == 1, let coord = coords.first {
+                    let region = MKCoordinateRegion(
+                        center: coord,
+                        latitudinalMeters: 800,
+                        longitudinalMeters: 800
+                    )
+                    return (region, 800)
+                }
+
+                var mapRect = MKMapRect.null
+                for coord in coords {
+                    let point = MKMapPoint(coord)
+                    let eventRect = MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0))
+                    mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
+                }
+
+                let fallbackSize = CGSize(width: 430, height: 932)
+                let baseSize = geometry.size == .zero ? fallbackSize : geometry.size
+                let mapView = MKMapView(frame: CGRect(origin: .zero, size: baseSize))
+                let edgePadding = UIEdgeInsets(
+                    top: 36,
+                    left: 40,
+                    bottom: 36 + geometry.safeAreaInsets.bottom + controlsBottomPadding,
+                    right: 40
+                )
+                let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
+                let fittedRegion = MKCoordinateRegion(fittedRect)
+
+                let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
+                let multiplier: Double = coords.count == 2 ? 3.4 : 2.2
+                let distance = max(spanMeters * multiplier, 800)
+
+                return (fittedRegion, distance)
+            }
 
             let storyItemForReal: (RealPost) -> RealStoriesRow.StoryItem? = { real in
                 storyItems.first { item in
@@ -200,6 +240,44 @@ struct MapTalkView: View {
                 selectStoryItem(item, true, false, nil)
             }
 
+            let handleJourneyTap: (JourneyPost) -> Void = { journey in
+                if focusedJourneyHeader == nil {
+                    preFocusSnapshot = (
+                        camera: cameraPosition,
+                        region: currentRegion,
+                        selectedId: selectedStoryId
+                    )
+                }
+                focusedJourneyHeader = journey
+                selectedStoryId = journey.id
+                if let target = journeyBoundingTarget(journey) {
+                    pendingRegionCause = .journey
+                    flightController.cancelActiveTransition()
+                    withAnimation(.easeInOut(duration: 0.32)) {
+                        cameraPosition = .camera(
+                            MapCamera(
+                                centerCoordinate: target.region.center,
+                                distance: target.distance,
+                                heading: 0,
+                                pitch: 0
+                            )
+                        )
+                    }
+                    currentRegion = target.region
+                    let preservedId = preFocusSnapshot?.selectedId ?? selectedStoryId
+                    preFocusSnapshot = (
+                        camera: cameraPosition,
+                        region: currentRegion,
+                        selectedId: preservedId
+                    )
+                } else {
+                    viewModel.focus(on: journey)
+                }
+                activeExperience = .journey(journey: journey, nonce: UUID())
+                isExperiencePresented = true
+                experienceDetent = .fraction(0.25)
+            }
+
             let ensureSelectionIfNeeded: () -> Void = {
                 if storyItems.isEmpty {
                     selectedStoryId = nil
@@ -268,7 +346,11 @@ struct MapTalkView: View {
 
                 VStack(alignment: .leading, spacing: 14) {
                     if let journeyHeader = focusedJourneyHeader {
-                        journeyHeaderView(for: journeyHeader)
+                        journeyHeaderView(
+                            for: journeyHeader,
+                            isActive: (focusedJourneyHeader?.id == journeyHeader.id) && isExperiencePresented,
+                            onTap: handleJourneyTap
+                        )
                             .padding(.horizontal, 16)
                     } else {
                         SegmentedControl(
@@ -544,17 +626,7 @@ struct MapTalkView: View {
             }
             .onChangeCompat(of: focusedJourneyHeader?.id) { _ in
                 guard let journey = focusedJourneyHeader else { return }
-                if preFocusSnapshot == nil {
-                    preFocusSnapshot = (
-                        camera: cameraPosition,
-                        region: currentRegion,
-                        selectedId: selectedStoryId
-                    )
-                }
-                selectedStoryId = journey.id
-                activeExperience = .journey(journey: journey, nonce: UUID())
-                isExperiencePresented = true
-                experienceDetent = .fraction(0.25)
+                handleJourneyTap(journey)
             }
         }
     }
@@ -573,8 +645,11 @@ private extension MapTalkView {
     }
 
     @ViewBuilder
-    func journeyHeaderView(for journey: JourneyPost) -> some View {
-        let isActive = (focusedJourneyHeader?.id == journey.id) && isExperiencePresented
+    func journeyHeaderView(
+        for journey: JourneyPost,
+        isActive: Bool,
+        onTap: @escaping (JourneyPost) -> Void
+    ) -> some View {
         HStack(spacing: 12) {
             Button {
                 exitJourneyFocus()
@@ -612,18 +687,7 @@ private extension MapTalkView {
         Spacer()
     }
     .onTapGesture {
-        if focusedJourneyHeader == nil {
-            preFocusSnapshot = (
-                camera: cameraPosition,
-                region: currentRegion,
-                selectedId: selectedStoryId
-            )
-        }
-        focusedJourneyHeader = journey
-        selectedStoryId = journey.id
-        activeExperience = .journey(journey: journey, nonce: UUID())
-        isExperiencePresented = true
-        experienceDetent = .fraction(0.25)
+        onTap(journey)
     }
 }
 

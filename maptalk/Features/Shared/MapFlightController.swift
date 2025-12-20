@@ -15,6 +15,10 @@ enum RegionChangeCause {
 final class MapFlightController: ObservableObject {
     private var activeTransitionID: UUID?
 
+    func cancelActiveTransition() {
+        activeTransitionID = nil
+    }
+
     func handleRegionChange(
         currentRegion: MKCoordinateRegion?,
         targetRegion: MKCoordinateRegion,
