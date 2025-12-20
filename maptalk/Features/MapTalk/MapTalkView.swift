@@ -129,10 +129,17 @@ struct MapTalkView: View {
                 let fallbackSize = CGSize(width: 430, height: 932)
                 let baseSize = geometry.size == .zero ? fallbackSize : geometry.size
                 let mapView = MKMapView(frame: CGRect(origin: .zero, size: baseSize))
+                // Reserve space for the header + stories row so the fitted region stays below them.
+                let headerHeight = 52.0    // title bar
+                let spacing: Double = 14.0 // spacing between title and row
+                let rowHeight = 108.0      // RealStoriesRow fixed height
+                let topInset = headerHeight + spacing + rowHeight + 8.0
+                // Bottom inset: reserve space for the collapsed card.
+                let bottomInset = 200.0
                 let edgePadding = UIEdgeInsets(
-                    top: 36,
+                    top: topInset,
                     left: 40,
-                    bottom: 36 + geometry.safeAreaInsets.bottom + controlsBottomPadding,
+                    bottom: bottomInset,
                     right: 40
                 )
                 let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
