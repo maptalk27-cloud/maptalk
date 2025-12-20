@@ -11,24 +11,10 @@ struct MapOverlays: MapContent {
     let onSelectReal: (RealPost) -> Void
     let onSelectJourney: (JourneyPost) -> Void
     let onSelectUser: () -> Void
+    let heroNamespace: Namespace.ID?
+    let useTimelineStyle: Bool
 
     var body: some MapContent {
-        ForEach(ratedPOIs) { rated in
-            let isRecent = rated.hasRecentPhotoShare
-            Annotation("", coordinate: rated.poi.coordinate) {
-                Button {
-                    onSelectPOI(rated)
-                } label: {
-                    POICategoryMarker(
-                        category: rated.poi.category,
-                        count: rated.checkIns.count,
-                        isRecentHighlight: isRecent
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-
         ForEach(reals) { real in
             MapCircle(center: real.center, radius: real.radiusMeters)
                 .foregroundStyle(Theme.neonPrimary.opacity(0.15))
@@ -40,7 +26,47 @@ struct MapOverlays: MapContent {
                 Button {
                     onSelectReal(real)
                 } label: {
-                    RealAvatarMarker(user: PreviewData.user(for: real.userId))
+                    let baseMarker: AnyView = {
+                        if useTimelineStyle {
+                            return AnyView(
+                                RealMapThumbnail(
+                                    real: real,
+                                    user: PreviewData.user(for: real.userId),
+                                    size: 40
+                                )
+                            )
+                        } else {
+                            return AnyView(RealAvatarMarker(user: PreviewData.user(for: real.userId)))
+                        }
+                    }()
+                    if let heroNamespace {
+                        baseMarker
+                            .matchedGeometryEffect(id: "real-\(real.id)", in: heroNamespace, isSource: true)
+                    } else {
+                        baseMarker
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+
+        // Draw POIs after reels so they sit above the reel markers.
+        ForEach(ratedPOIs) { rated in
+            let isRecent = rated.hasRecentPhotoShare
+            Annotation("", coordinate: rated.poi.coordinate) {
+                Button {
+                    onSelectPOI(rated)
+                } label: {
+                    if useTimelineStyle {
+                        UserMapMarker(category: rated.poi.category)
+                            .frame(width: 24, height: 26)
+                    } else {
+                        POICategoryMarker(
+                            category: rated.poi.category,
+                            count: rated.checkIns.count,
+                            isRecentHighlight: isRecent
+                        )
+                    }
                 }
                 .buttonStyle(.plain)
             }

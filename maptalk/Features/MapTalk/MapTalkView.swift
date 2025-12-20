@@ -20,9 +20,11 @@ struct MapTalkView: View {
     @State private var controlsBottomPadding: CGFloat = 0
     @State private var focusedJourneyHeader: JourneyPost?
     @State private var preFocusSnapshot: (camera: MapCameraPosition, region: MKCoordinateRegion?, selectedId: UUID?)?
+    @Namespace private var heroNamespace
 
     var body: some View {
         GeometryReader { geometry in
+            let journeyNamespace = focusedJourneyHeader != nil ? heroNamespace : nil
             let makePOIGroup: (RatedPOI, Bool) -> RealStoriesRow.POIStoryGroup? = { rated, onlyRecent in
                 let sharers = rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
                     let hasPhoto = checkIn.media.contains { media in
@@ -247,7 +249,7 @@ struct MapTalkView: View {
                 selectStoryItem(item, true, false, nil)
             }
 
-            let handleJourneyTap: (JourneyPost) -> Void = { journey in
+            let handleJourneyTap: (JourneyPost, Bool) -> Void = { journey, presentSheet in
                 if focusedJourneyHeader == nil {
                     preFocusSnapshot = (
                         camera: cameraPosition,
@@ -280,9 +282,11 @@ struct MapTalkView: View {
                 } else {
                     viewModel.focus(on: journey)
                 }
-                activeExperience = .journey(journey: journey, nonce: UUID())
-                isExperiencePresented = true
-                experienceDetent = .fraction(0.25)
+                if presentSheet {
+                    activeExperience = .journey(journey: journey, nonce: UUID())
+                    isExperiencePresented = true
+                    experienceDetent = .fraction(0.25)
+                }
             }
 
             let ensureSelectionIfNeeded: () -> Void = {
@@ -342,11 +346,11 @@ struct MapTalkView: View {
                             presentReal(real)
                         },
                         onSelectJourney: { journey in
-                            if let item = storyItemForJourney(journey) {
-                                selectStoryItem(item, true, false, .other)
-                            }
+                            handleJourneyTap(journey, true)
                         },
-                        onSelectUser: { }
+                        onSelectUser: { },
+                        heroNamespace: journeyNamespace,
+                        useTimelineStyle: focusedJourneyHeader != nil
                     )
                 }
                 .ignoresSafeArea()
@@ -356,7 +360,9 @@ struct MapTalkView: View {
                         journeyHeaderView(
                             for: journeyHeader,
                             isActive: (focusedJourneyHeader?.id == journeyHeader.id) && isExperiencePresented,
-                            onTap: handleJourneyTap
+                            onTap: { journey in
+                                handleJourneyTap(journey, true)
+                            }
                         )
                             .padding(.horizontal, 16)
                     } else {
@@ -388,11 +394,12 @@ struct MapTalkView: View {
                                     selectStoryItem(item, true, true, nil)
                                 }
                             },
-                        onSelectJourney: { journey in
-                            if let item = storyItemForJourney(journey) {
-                                selectStoryItem(item, true, true, .journey)
-                            }
-                        },
+                            onSelectJourney: { journey in
+                                if let item = storyItemForJourney(journey) {
+                                    // Only focus/fly, do not open the sheet from the row.
+                                    selectStoryItem(item, true, true, .journey)
+                                }
+                            },
                             userProvider: viewModel.user(for:),
                             alignTrigger: reelAlignTrigger
                         )
@@ -491,14 +498,7 @@ struct MapTalkView: View {
                                     selection: selectionBinding,
                                     isExpanded: isExpanded,
                                     onJourneyAvatarStackTap: { journey in
-                                        if focusedJourneyHeader == nil {
-                                            preFocusSnapshot = (
-                                                camera: cameraPosition,
-                                                region: currentRegion,
-                                                selectedId: selectedStoryId
-                                            )
-                                        }
-                                        focusedJourneyHeader = journey
+                                        handleJourneyTap(journey, true)
                                     },
                                     userProvider: viewModel.user(for:)
                                 )
@@ -507,25 +507,28 @@ struct MapTalkView: View {
                             return AnyView(EmptyView())
                         }
                     case let .journey(journey: journey, nonce: nonce):
-                        let pager = ExperienceDetailView.SequencePager(items: [
-                            ExperienceDetailView.SequencePager.Item(
-                                id: journey.id,
-                                mode: .journey(journey)
-                            )
-                        ])
-                        let selection = Binding<UUID>(
-                            get: { journey.id },
-                            set: { _ in }
+                    let pager = ExperienceDetailView.SequencePager(items: [
+                        ExperienceDetailView.SequencePager.Item(
+                            id: journey.id,
+                            mode: .journey(journey)
                         )
-                        return AnyView(
-                            ExperienceDetailView(
-                                sequencePager: pager,
-                                selection: selection,
-                                isExpanded: isExpanded,
-                                userProvider: viewModel.user(for:)
-                            )
-                            .id("\(journey.id)-\(nonce)")
+                    ])
+                    let selection = Binding<UUID>(
+                        get: { journey.id },
+                        set: { _ in }
+                    )
+                    return AnyView(
+                        ExperienceDetailView(
+                            sequencePager: pager,
+                            selection: selection,
+                            isExpanded: isExpanded,
+                            onJourneyAvatarStackTap: { _ in
+                                handleJourneyTap(journey, false)
+                            },
+                            userProvider: viewModel.user(for:)
                         )
+                        .id("\(journey.id)-\(nonce)")
+                    )
                     case let .poi(rated: rated, nonce: nonce):
                         return AnyView(
                             ExperienceDetailView(
@@ -631,10 +634,6 @@ struct MapTalkView: View {
             .onChangeCompat(of: viewModel.mode) { _ in
                 collapseDetent()
             }
-            .onChangeCompat(of: focusedJourneyHeader?.id) { _ in
-                guard let journey = focusedJourneyHeader else { return }
-                handleJourneyTap(journey)
-            }
         }
     }
 }
@@ -705,9 +704,6 @@ private extension MapTalkView {
 
     func exitJourneyFocus() {
         focusedJourneyHeader = nil
-        isExperiencePresented = false
-        activeExperience = nil
-        experienceDetent = .fraction(0.25)
         if let snapshot = preFocusSnapshot {
             selectedStoryId = snapshot.selectedId
             if let real = viewModel.reals.first(where: { $0.id == snapshot.selectedId }) {
@@ -721,6 +717,11 @@ private extension MapTalkView {
             }
             cameraPosition = snapshot.camera
             preFocusSnapshot = nil
+        }
+        if isExperiencePresented {
+            activeExperience = .sequence(nonce: UUID())
+        } else {
+            activeExperience = nil
         }
     }
 }
