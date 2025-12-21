@@ -442,10 +442,13 @@ struct MapTalkView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if let journeyHeader = focusedJourneyHeader {
                         let journeyPath = journeyStack + [journeyHeader]
+                        let isHeaderHighlighted = (focusedJourneyHeader?.id == journeyHeader.id) &&
+                            isExperiencePresented &&
+                            (selectedStoryId == journeyHeader.id)
                         journeyHeaderView(
                             path: journeyPath,
                             selectedJourneyId: journeyHeader.id,
-                            isActive: (focusedJourneyHeader?.id == journeyHeader.id) && isExperiencePresented,
+                            isActive: isHeaderHighlighted,
                             onSelect: { journey in
                                 focusJourneyFromBreadcrumb(journey)
                             },
@@ -866,10 +869,10 @@ private extension MapTalkView {
         }
 
         private var borderColor: Color {
-            if isSelected {
-                return Color.white.opacity(isActive ? 0.95 : 0.7)
+            if isSelected, isActive {
+                return Color.white.opacity(0.95)
             }
-            return Color.white.opacity(0.25)
+            return Color.clear
         }
     }
 
