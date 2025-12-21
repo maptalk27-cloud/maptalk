@@ -77,7 +77,11 @@ struct MapOverlays: MapContent {
                 Button {
                     onSelectJourney(journey)
                 } label: {
-                    JourneyMapMarker(user: PreviewData.user(for: journey.userId), label: "journey")
+                    JourneyMapMarker(
+                        user: PreviewData.user(for: journey.userId),
+                        label: "journey",
+                        size: 52
+                    )
                 }
                 .buttonStyle(.plain)
             }
@@ -152,6 +156,7 @@ private struct RealAvatarMarker: View {
 private struct JourneyMapMarker: View {
     let user: User?
     let label: String
+    let size: CGFloat
 
     private var initials: String {
         guard let handle = user?.handle else { return "JR" }
@@ -193,7 +198,7 @@ private struct JourneyMapMarker: View {
                         .foregroundStyle(.white)
                 }
             }
-            .frame(width: 62, height: 62)
+            .frame(width: size, height: size)
             .overlay {
                 Circle()
                     .strokeBorder(Color.white.opacity(0.65), lineWidth: 2)
@@ -219,7 +224,7 @@ private struct JourneyMapMarker: View {
             .offset(y: 8)
             .zIndex(1)
     }
-        .frame(width: 62, height: 62)
+        .frame(width: size, height: size)
     }
 }
 

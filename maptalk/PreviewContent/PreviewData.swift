@@ -54,6 +54,202 @@ enum PreviewData {
     private static let generatedFriends: [User] = (0..<120).map { generatedFriend(index: $0) }
 
     static let sampleFriends: [User] = primaryFriends + generatedFriends
+    // Nested journeys keyed by parent journey id.
+    static let nestedJourneys: [UUID: [JourneyPost]] = {
+        let now = Date()
+
+        let parentHawaii = sampleJourneys.first { $0.id == uuid(3001) }
+        let parentFlorida = sampleJourneys.first { $0.id == uuid(3002) }
+
+        var map: [UUID: [JourneyPost]] = [:]
+
+        if let parentHawaii {
+            let subReels: [RealPost] = [
+                .init(
+                    id: uuid(70001),
+                    userId: currentUser.id,
+                    center: .init(latitude: 21.341, longitude: -157.789),
+                    radiusMeters: 200,
+                    message: "North Shore dusk detour",
+                    attachments: [
+                        .init(id: uuid(70011), kind: .photo(URL(string: "https://images.unsplash.com/photo-1505761671935-60b3a7427bad?auto=format&fit=crop&w=1200&q=60")!))
+                    ],
+                    likes: [sampleFriends[0].id],
+                    comments: [],
+                    visibility: .friendsOnly,
+                    createdAt: now.addingTimeInterval(-4_000),
+                    expiresAt: now.addingTimeInterval(12 * 3600)
+                ),
+                .init(
+                    id: uuid(70002),
+                    userId: currentUser.id,
+                    center: .init(latitude: 21.278, longitude: -157.828),
+                    radiusMeters: 160,
+                    message: "Late-night poke run",
+                    attachments: [
+                        .init(id: uuid(70012), kind: .photo(URL(string: "https://images.unsplash.com/photo-1521017432531-fbd92d768814?auto=format&fit=crop&w=1200&q=60")!))
+                    ],
+                    likes: [sampleFriends[1].id, sampleFriends[2].id],
+                    comments: [],
+                    visibility: .friendsOnly,
+                    createdAt: now.addingTimeInterval(-3_400),
+                    expiresAt: now.addingTimeInterval(11 * 3600)
+                )
+            ]
+
+            let subPOIs: [RatedPOI] = [
+                RatedPOI(
+                    poi: .init(
+                        id: uuid(70021),
+                        name: "Sunset Beach Overlook",
+                        coordinate: .init(latitude: 21.675, longitude: -158.041),
+                        category: .viewpoint
+                    ),
+                    highlight: "Sky cotton candy hues.",
+                    secondary: "Grab malasadas on the way.",
+                    media: [],
+                    checkIns: [
+                        RatedPOI.CheckIn(
+                            id: uuid(71011),
+                            userId: currentUser.id,
+                            createdAt: now.addingTimeInterval(-7_500),
+                        endorsement: .hype,
+                        media: [
+                            .init(id: uuid(72011), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=60")!))
+                        ],
+                        tag: .explore
+                    ),
+                        RatedPOI.CheckIn(
+                            id: uuid(71012),
+                            userId: sampleFriends[2].id,
+                            createdAt: now.addingTimeInterval(-7_000),
+                            endorsement: .solid,
+                            media: [
+                                .init(id: uuid(72012), kind: .photo(URL(string: "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=1200&q=60")!))
+                            ],
+                            tag: .explore
+                        )
+                    ],
+                    comments: [],
+                    endorsements: .init(hype: 2, solid: 3, meh: 0, questionable: 0),
+                    tags: [],
+                    isFavoritedByCurrentUser: false,
+                    favoritesCount: 0
+                ),
+                RatedPOI(
+                    poi: .init(
+                        id: uuid(70022),
+                        name: "Haleʻiwa Shave Ice",
+                        coordinate: .init(latitude: 21.593, longitude: -158.103),
+                        category: .restaurant
+                    ),
+                    highlight: "Lychee + lilikoi swirl.",
+                    secondary: "Park by the bridge.",
+                    media: [],
+                    checkIns: [
+                        RatedPOI.CheckIn(
+                            id: uuid(71013),
+                            userId: sampleFriends[4].id,
+                            createdAt: now.addingTimeInterval(-6_800),
+                            endorsement: .solid,
+                            media: [
+                                .init(id: uuid(72013), kind: .photo(URL(string: "https://images.unsplash.com/photo-1504674900247-0877df9cc836?auto=format&fit=crop&w=1200&q=60")!))
+                            ],
+                            tag: .dine
+                        )
+                    ],
+                    comments: [],
+                    endorsements: .init(hype: 3, solid: 2, meh: 0, questionable: 0),
+                    tags: [],
+                    isFavoritedByCurrentUser: true,
+                    favoritesCount: 5
+                )
+            ]
+
+            let subJourney = JourneyPost(
+                id: uuid(3003),
+                userId: currentUser.id,
+                title: "North Shore night glide",
+                content: "Late surf check + poke loop.",
+                coordinate: CLLocationCoordinate2D(latitude: 21.579, longitude: -158.104),
+                createdAt: now.addingTimeInterval(-180),
+                reels: subReels,
+                pois: subPOIs,
+                likes: [],
+                comments: []
+            )
+
+            map[parentHawaii.id] = [subJourney]
+        }
+
+        if let parentFlorida {
+            let subReels: [RealPost] = [
+                .init(
+                    id: uuid(70003),
+                    userId: sampleFriends[1].id,
+                    center: .init(latitude: 25.790, longitude: -80.136),
+                    radiusMeters: 140,
+                    message: "Sunrise rollerblade on the boardwalk",
+                    attachments: [
+                        .init(id: uuid(70013), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=60")!))
+                    ],
+                    likes: [currentUser.id],
+                    comments: [],
+                    visibility: .friendsOnly,
+                    createdAt: now.addingTimeInterval(-6_200),
+                    expiresAt: now.addingTimeInterval(10 * 3600)
+                )
+            ]
+
+            let subPOIs: [RatedPOI] = [
+                RatedPOI(
+                    poi: .init(
+                        id: uuid(70023),
+                        name: "Bayfront Cuban Coffee",
+                        coordinate: .init(latitude: 25.776, longitude: -80.186),
+                        category: .coffee
+                    ),
+                    highlight: "Espresso con leche before the heat.",
+                    secondary: "Window service only.",
+                    media: [],
+                    checkIns: [
+                        RatedPOI.CheckIn(
+                            id: uuid(71021),
+                            userId: sampleFriends[1].id,
+                            createdAt: now.addingTimeInterval(-6_000),
+                        endorsement: .solid,
+                        media: [
+                            .init(id: uuid(72021), kind: .photo(URL(string: "https://images.unsplash.com/photo-1464306076886-da185f6a9d05?auto=format&fit=crop&w=1200&q=60")!))
+                        ],
+                        tag: .explore
+                    )
+                ],
+                    comments: [],
+                    endorsements: .init(hype: 1, solid: 2, meh: 0, questionable: 0),
+                    tags: [],
+                    isFavoritedByCurrentUser: false,
+                    favoritesCount: 0
+                )
+            ]
+
+            let subJourney = JourneyPost(
+                id: uuid(3004),
+                userId: sampleFriends[1].id,
+                title: "Miami dawn dash",
+                content: "Rollerblade + cafecito loop.",
+                coordinate: CLLocationCoordinate2D(latitude: 25.785, longitude: -80.139),
+                createdAt: now.addingTimeInterval(-240),
+                reels: subReels,
+                pois: subPOIs,
+                likes: [],
+                comments: []
+            )
+
+            map[parentFlorida.id] = [subJourney]
+        }
+
+        return map
+    }()
     private static var locationLabels: [UUID: String] = [:]
 
     struct ChengsiMock {

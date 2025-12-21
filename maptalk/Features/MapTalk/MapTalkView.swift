@@ -20,6 +20,8 @@ struct MapTalkView: View {
     @State private var controlsBottomPadding: CGFloat = 0
     @State private var focusedJourneyHeader: JourneyPost?
     @State private var preFocusSnapshot: (camera: MapCameraPosition, region: MKCoordinateRegion?, selectedId: UUID?)?
+    @State private var journeyStack: [JourneyPost] = []
+    @State private var detentRerenderKey: Int = 0
     @Namespace private var heroNamespace
 
     var body: some View {
@@ -70,9 +72,11 @@ struct MapTalkView: View {
                 let journeyPOIs = journey.pois.compactMap { rated in
                     makePOIGroup(rated, false)
                 }
+                let subJourneys = PreviewData.nestedJourneys[journey.id] ?? []
                 let items = (
                     journey.reels.sorted { $0.createdAt > $1.createdAt }.map { RealStoriesRow.StoryItem(real: $0) } +
-                    journeyPOIs.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
+                    journeyPOIs.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) } +
+                    subJourneys.map { RealStoriesRow.StoryItem(journey: $0) }
                 )
                 return items.sorted { $0.timestamp > $1.timestamp }
             }()
@@ -80,30 +84,79 @@ struct MapTalkView: View {
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
 
             let storyItemIds = storyItems.map(\.id)
-            let sequenceItems: [ExperienceDetailView.SequencePager.Item] = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
-                switch item.source {
-                case let .real(real):
-                    return ExperienceDetailView.SequencePager.Item(
-                        id: real.id,
-                        mode: .real(real, viewModel.user(for: real.userId))
-                    )
-                case let .poi(group):
-                    return ExperienceDetailView.SequencePager.Item(
-                        id: group.id,
-                        mode: .poi(group.ratedPOI)
-                    )
-                case let .journey(journey):
-                    return ExperienceDetailView.SequencePager.Item(
+            let nestedJourneys = focusedJourneyHeader.flatMap { PreviewData.nestedJourneys[$0.id] } ?? []
+            let sequenceItems: [ExperienceDetailView.SequencePager.Item] = {
+                if let journey = focusedJourneyHeader {
+                    let journeyItem = ExperienceDetailView.SequencePager.Item(
                         id: journey.id,
                         mode: .journey(journey)
                     )
+                    let others = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
+                        switch item.source {
+                        case let .real(real):
+                            return ExperienceDetailView.SequencePager.Item(
+                                id: real.id,
+                                mode: .real(real, viewModel.user(for: real.userId))
+                            )
+                        case let .poi(group):
+                            return ExperienceDetailView.SequencePager.Item(
+                                id: group.id,
+                                mode: .poi(group.ratedPOI)
+                            )
+                        case let .journey(journey):
+                            return ExperienceDetailView.SequencePager.Item(
+                                id: journey.id,
+                                mode: .journey(journey)
+                            )
+                        }
+                    }
+                    return [journeyItem] + others
+                } else {
+                    return storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
+                        switch item.source {
+                        case let .real(real):
+                            return ExperienceDetailView.SequencePager.Item(
+                                id: real.id,
+                                mode: .real(real, viewModel.user(for: real.userId))
+                            )
+                        case let .poi(group):
+                            return ExperienceDetailView.SequencePager.Item(
+                                id: group.id,
+                                mode: .poi(group.ratedPOI)
+                            )
+                        case let .journey(journey):
+                            return ExperienceDetailView.SequencePager.Item(
+                                id: journey.id,
+                                mode: .journey(journey)
+                            )
+                        }
+                    }
                 }
-            }
+            }()
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
             let collapseDetent = {
+                print("[MapTalkView] collapseDetent requested; current detent=\(experienceDetent)")
+                let wasLarge = experienceDetent == .large
+                let wasPresented = isExperiencePresented
+                let target: PresentationDetent = .fraction(0.25)
+                detentRerenderKey &+= 1
+                experienceDetent = target
                 DispatchQueue.main.async {
-                    experienceDetent = .fraction(0.25)
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        experienceDetent = target
+                    }
+                }
+                if wasPresented, wasLarge {
+                    let savedExperience = activeExperience
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        isExperiencePresented = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            activeExperience = savedExperience
+                            experienceDetent = target
+                            isExperiencePresented = wasPresented
+                        }
+                    }
                 }
             }
             let journeyBoundingTarget: (JourneyPost) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? = { journey in
@@ -176,10 +229,16 @@ struct MapTalkView: View {
                         return candidate.id == journey.id
                     }
                     return false
-                }
+                } ?? RealStoriesRow.StoryItem(journey: journey)
             }
             let storyItemForId: (UUID) -> RealStoriesRow.StoryItem? = { id in
-                storyItems.first { $0.id == id }
+                if let match = storyItems.first(where: { $0.id == id }) {
+                    return match
+                }
+                if let journey = focusedJourneyHeader, journey.id == id {
+                    return RealStoriesRow.StoryItem(journey: journey)
+                }
+                return nil
             }
 
             let presentSequenceIfNeeded: (Bool) -> Void = { shouldPresent in
@@ -249,7 +308,15 @@ struct MapTalkView: View {
                 selectStoryItem(item, true, false, nil)
             }
 
-            let handleJourneyTap: (JourneyPost, Bool) -> Void = { journey, presentSheet in
+            let handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void = { journey, presentSheet, parent in
+                let isTappingCurrentFocusedJourney = (focusedJourneyHeader?.id == journey.id)
+                if isExperiencePresented, experienceDetent == .large, isTappingCurrentFocusedJourney == false {
+                    print("[MapTalkView] journeyTap collapsing sheet from large -> .25 detent")
+                    collapseDetent()
+                    if case .sequence = activeExperience {
+                        activeExperience = .sequence(nonce: activeExperience?.sequenceNonce ?? UUID())
+                    }
+                }
                 if focusedJourneyHeader == nil {
                     preFocusSnapshot = (
                         camera: cameraPosition,
@@ -257,12 +324,15 @@ struct MapTalkView: View {
                         selectedId: selectedStoryId
                     )
                 }
+                if let parent, parent.id != journey.id {
+                    journeyStack.append(parent)
+                }
                 focusedJourneyHeader = journey
                 selectedStoryId = journey.id
                 if let target = journeyBoundingTarget(journey) {
                     pendingRegionCause = .journey
                     flightController.cancelActiveTransition()
-                    withAnimation(.easeInOut(duration: 0.32)) {
+                    withAnimation(.easeInOut(duration: 0.35)) {
                         cameraPosition = .camera(
                             MapCamera(
                                 centerCoordinate: target.region.center,
@@ -283,9 +353,16 @@ struct MapTalkView: View {
                     viewModel.focus(on: journey)
                 }
                 if presentSheet {
-                    activeExperience = .journey(journey: journey, nonce: UUID())
-                    isExperiencePresented = true
-                    experienceDetent = .fraction(0.25)
+                    if isTappingCurrentFocusedJourney, isExperiencePresented, experienceDetent == .large {
+                        // Already on this journey in large sheet: refresh data but keep detent.
+                        activeExperience = .sequence(nonce: activeExperience?.sequenceNonce ?? UUID())
+                    } else {
+                        activeExperience = .sequence(nonce: UUID())
+                        if isExperiencePresented == false {
+                            isExperiencePresented = true
+                        }
+                        experienceDetent = .fraction(0.25)
+                    }
                 }
             }
 
@@ -313,7 +390,7 @@ struct MapTalkView: View {
                     MapOverlays(
                         ratedPOIs: focusedJourneyHeader?.pois ?? viewModel.ratedPOIs,
                         reals: focusedJourneyHeader?.reels ?? viewModel.reals,
-                        journeys: focusedJourneyHeader == nil ? baseJourneys : [],
+                        journeys: focusedJourneyHeader == nil ? baseJourneys : nestedJourneys,
                         userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
                         currentUser: PreviewData.currentUser,
                         onSelectPOI: { rated in
@@ -346,7 +423,7 @@ struct MapTalkView: View {
                             presentReal(real)
                         },
                         onSelectJourney: { journey in
-                            handleJourneyTap(journey, true)
+                            handleJourneyTap(journey, true, focusedJourneyHeader)
                         },
                         onSelectUser: { },
                         heroNamespace: journeyNamespace,
@@ -361,7 +438,7 @@ struct MapTalkView: View {
                             for: journeyHeader,
                             isActive: (focusedJourneyHeader?.id == journeyHeader.id) && isExperiencePresented,
                             onTap: { journey in
-                                handleJourneyTap(journey, true)
+                                handleJourneyTap(journey, true, focusedJourneyHeader)
                             }
                         )
                             .padding(.horizontal, 16)
@@ -461,7 +538,9 @@ struct MapTalkView: View {
                                 },
                                 set: { newValue in
                                     selectedStoryId = newValue
-                                    if let item = storyItemForId(newValue) {
+                                    if let journey = focusedJourneyHeader, newValue == journey.id {
+                                        handleJourneyTap(journey, false, nil)
+                                    } else if let item = storyItemForId(newValue) {
                                         selectStoryItem(item, false, true, nil)
                                     }
                                     reelAlignTrigger += 1
@@ -498,7 +577,7 @@ struct MapTalkView: View {
                                     selection: selectionBinding,
                                     isExpanded: isExpanded,
                                     onJourneyAvatarStackTap: { journey in
-                                        handleJourneyTap(journey, true)
+                                        handleJourneyTap(journey, true, focusedJourneyHeader)
                                     },
                                     userProvider: viewModel.user(for:)
                                 )
@@ -506,29 +585,6 @@ struct MapTalkView: View {
                         } else {
                             return AnyView(EmptyView())
                         }
-                    case let .journey(journey: journey, nonce: nonce):
-                    let pager = ExperienceDetailView.SequencePager(items: [
-                        ExperienceDetailView.SequencePager.Item(
-                            id: journey.id,
-                            mode: .journey(journey)
-                        )
-                    ])
-                    let selection = Binding<UUID>(
-                        get: { journey.id },
-                        set: { _ in }
-                    )
-                    return AnyView(
-                        ExperienceDetailView(
-                            sequencePager: pager,
-                            selection: selection,
-                            isExpanded: isExpanded,
-                            onJourneyAvatarStackTap: { _ in
-                                handleJourneyTap(journey, false)
-                            },
-                            userProvider: viewModel.user(for:)
-                        )
-                        .id("\(journey.id)-\(nonce)")
-                    )
                     case let .poi(rated: rated, nonce: nonce):
                         return AnyView(
                             ExperienceDetailView(
@@ -544,9 +600,9 @@ struct MapTalkView: View {
                 }()
 
                 content
+                    .id(detentRerenderKey)
                     .presentationDetents([.fraction(0.25), .large], selection: $experienceDetent)
                     .presentationBackground(.thinMaterial)
-                    .presentationSizing(.fitted)
                     .presentationCompactAdaptation(.none)
                     .applyBackgroundInteractionIfAvailable()
             }
@@ -602,11 +658,13 @@ struct MapTalkView: View {
             }
             .onChangeCompat(of: isExperiencePresented) { isActive in
                 let target = isActive ? previewControlsPadding : baseControlsPadding
+                print("[MapTalkView] isExperiencePresented changed to \(isActive) detent=\(experienceDetent)")
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                     controlsBottomPadding = target
                 }
             }
             .onChangeCompat(of: experienceDetent) { detent in
+                print("[MapTalkView] detent changed -> \(detent)")
                 if detent == .fraction(0.25), isExperiencePresented {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                         controlsBottomPadding = previewControlsPadding
@@ -648,6 +706,37 @@ private extension MapTalkView {
         case let .journey(journey):
             return viewModel.region(for: journey)
         }
+    }
+
+    func journeyFallbackTarget(for journey: JourneyPost) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
+        let coords = journey.reels.map(\.center) + journey.pois.map { $0.poi.coordinate }
+        guard coords.isEmpty == false else { return nil }
+
+        if coords.count == 1, let coord = coords.first {
+            let region = MKCoordinateRegion(center: coord, latitudinalMeters: 800, longitudinalMeters: 800)
+            return (region, 800)
+        }
+
+        var mapRect = MKMapRect.null
+        for coord in coords {
+            let point = MKMapPoint(coord)
+            let eventRect = MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0))
+            mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
+        }
+
+        let baseSize = CGSize(width: 430, height: 932)
+        let mapView = MKMapView(frame: CGRect(origin: .zero, size: baseSize))
+        let topInset = 52.0 + 14.0 + 108.0 + 8.0
+        let bottomInset = 200.0
+        let edgePadding = UIEdgeInsets(top: topInset, left: 40, bottom: bottomInset, right: 40)
+        let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
+        let fittedRegion = MKCoordinateRegion(fittedRect)
+
+        let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
+        let multiplier: Double = coords.count == 2 ? 2.0 : 2.2
+        let distance = max(spanMeters * multiplier, 240)
+
+        return (fittedRegion, distance)
     }
 
     @ViewBuilder
@@ -703,26 +792,52 @@ private extension MapTalkView {
     }
 
     func exitJourneyFocus() {
-        focusedJourneyHeader = nil
-        if let journey = preFocusSnapshot?.selectedId.flatMap({ id in
-            PreviewData.sampleJourneys.first(where: { $0.id == id })
-        }) {
-            let region = viewModel.region(for: journey)
-            flightController.handleRegionChange(
-                currentRegion: currentRegion,
-                targetRegion: region,
-                cause: .journey,
-                cameraPosition: $cameraPosition
-            ) { updated in
-                currentRegion = updated
+        let currentJourney = focusedJourneyHeader
+        if let parent = journeyStack.popLast() {
+            focusedJourneyHeader = parent
+            selectedStoryId = parent.id
+            if let target = journeyFallbackTarget(for: parent) {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    cameraPosition = .camera(
+                        MapCamera(
+                            centerCoordinate: target.region.center,
+                            distance: target.distance,
+                            heading: 0,
+                            pitch: 0
+                        )
+                    )
+                }
+                currentRegion = target.region
+            } else {
+                let region = viewModel.region(for: parent)
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    cameraPosition = .region(region)
+                }
+                currentRegion = region
             }
-            // Keep the journey preview card active after exiting focus.
-            selectedStoryId = journey.id
             activeExperience = .sequence(nonce: UUID())
             isExperiencePresented = true
             experienceDetent = .fraction(0.25)
+            preFocusSnapshot = nil
+            return
         }
+        focusedJourneyHeader = nil
         preFocusSnapshot = nil
+        if let journey = currentJourney {
+            selectedStoryId = journey.id
+            let region = viewModel.region(for: journey)
+            withAnimation(.easeInOut(duration: 0.35)) {
+                cameraPosition = .region(region)
+            }
+            currentRegion = region
+            activeExperience = .sequence(nonce: UUID())
+            isExperiencePresented = true
+            experienceDetent = .fraction(0.25)
+        } else {
+            activeExperience = nil
+            isExperiencePresented = false
+            experienceDetent = .fraction(0.25)
+        }
     }
 }
 
