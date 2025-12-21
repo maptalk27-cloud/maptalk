@@ -366,6 +366,13 @@ struct MapTalkView: View {
                 }
             }
 
+            let focusJourneyFromBreadcrumb: (JourneyPost) -> Void = { journey in
+                if let index = journeyStack.firstIndex(where: { $0.id == journey.id }) {
+                    journeyStack = Array(journeyStack.prefix(upTo: index))
+                }
+                handleJourneyTap(journey, true, nil)
+            }
+
             let ensureSelectionIfNeeded: () -> Void = {
                 if storyItems.isEmpty {
                     selectedStoryId = nil
@@ -434,14 +441,19 @@ struct MapTalkView: View {
 
                 VStack(alignment: .leading, spacing: 14) {
                     if let journeyHeader = focusedJourneyHeader {
+                        let journeyPath = journeyStack + [journeyHeader]
                         journeyHeaderView(
-                            for: journeyHeader,
+                            path: journeyPath,
+                            selectedJourneyId: journeyHeader.id,
                             isActive: (focusedJourneyHeader?.id == journeyHeader.id) && isExperiencePresented,
-                            onTap: { journey in
-                                handleJourneyTap(journey, true, focusedJourneyHeader)
+                            onSelect: { journey in
+                                focusJourneyFromBreadcrumb(journey)
+                            },
+                            onExit: {
+                                exitJourneyFocus()
                             }
                         )
-                            .padding(.horizontal, 16)
+                        .padding(.horizontal, 16)
                     } else {
                         SegmentedControl(
                             options: ["World", "Friends"],
@@ -741,13 +753,15 @@ private extension MapTalkView {
 
     @ViewBuilder
     func journeyHeaderView(
-        for journey: JourneyPost,
+        path: [JourneyPost],
+        selectedJourneyId: UUID?,
         isActive: Bool,
-        onTap: @escaping (JourneyPost) -> Void
+        onSelect: @escaping (JourneyPost) -> Void,
+        onExit: @escaping () -> Void
     ) -> some View {
         HStack(spacing: 12) {
             Button {
-                exitJourneyFocus()
+                onExit()
             } label: {
                 Image(systemName: "chevron.left")
                     .font(.headline.weight(.semibold))
@@ -756,39 +770,107 @@ private extension MapTalkView {
                     .background(Color.black.opacity(0.45), in: Circle())
             }
 
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.black.opacity(isActive ? 0.65 : 0.45))
-                    .frame(height: 52)
-                    .frame(minWidth: 240)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Color.white.opacity(isActive ? 0.9 : 0.35), lineWidth: isActive ? 1.5 : 1)
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(path, id: \.id) { journey in
+                            let title = journeyTitle(for: journey)
+                            JourneyBreadcrumbCard(
+                                title: title,
+                                subtitle: "Journey",
+                                leadingSymbol: String(title.prefix(1)).uppercased(),
+                                isSelected: journey.id == selectedJourneyId,
+                                isActive: isActive && journey.id == selectedJourneyId
+                            )
+                            .id(journey.id)
+                            .onTapGesture {
+                                onSelect(journey)
+                            }
+                        }
                     }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(journeyTitle(for: journey))
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(isActive ? Color.white : Color.white)
-                        .lineLimit(1)
-                    Text("Journey")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(isActive ? .white.opacity(0.9) : .white.opacity(0.72))
+                    .padding(.vertical, 4)
+                    .animation(.spring(response: 0.45, dampingFraction: 0.85), value: selectedJourneyId)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .onAppear {
+                    guard let selectedJourneyId else { return }
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(selectedJourneyId, anchor: .center)
+                    }
+                }
+                .onChangeCompat(of: selectedJourneyId) { identifier in
+                    guard let identifier else { return }
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
+                        proxy.scrollTo(identifier, anchor: .center)
+                    }
+                }
             }
-
-        Spacer()
+        }
     }
-    .onTapGesture {
-        onTap(journey)
-    }
-}
 
     func journeyTitle(for journey: JourneyPost) -> String {
         let trimmed = journey.title.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? journey.displayLabel : trimmed
+    }
+
+    private struct JourneyBreadcrumbCard: View {
+        let title: String
+        let subtitle: String
+        let leadingSymbol: String
+        let isSelected: Bool
+        let isActive: Bool
+
+        var body: some View {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(backgroundColor)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(borderColor, lineWidth: isSelected ? 1.5 : 1)
+                    }
+
+                content
+            }
+            .frame(width: isSelected ? 260 : 60, height: 56)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isSelected)
+        }
+
+        @ViewBuilder
+        private var content: some View {
+            if isSelected {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+
+                    Text(subtitle)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            } else {
+                Text(leadingSymbol)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+
+        private var backgroundColor: Color {
+            if isSelected {
+                return Color.black.opacity(isActive ? 0.75 : 0.6)
+            }
+            return Color.black.opacity(0.35)
+        }
+
+        private var borderColor: Color {
+            if isSelected {
+                return Color.white.opacity(isActive ? 0.95 : 0.7)
+            }
+            return Color.white.opacity(0.25)
+        }
     }
 
     func exitJourneyFocus() {
