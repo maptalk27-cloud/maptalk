@@ -143,13 +143,11 @@ private struct RealAvatarMarker: View {
             Circle()
                 .strokeBorder(Color.white.opacity(0.6), lineWidth: 2)
                 .blendMode(.screen)
-                .shadow(color: Theme.neonPrimary.opacity(0.6), radius: 12)
         }
         .overlay {
             Circle()
                 .stroke(Theme.neonPrimary, lineWidth: 2.4)
         }
-        .modifier(Theme.neonGlow(Theme.neonPrimary))
     }
 }
 
@@ -178,7 +176,6 @@ private struct JourneyMapMarker: View {
                             endRadius: 40
                         )
                     )
-                    .shadow(color: Theme.neonAccent.opacity(0.45), radius: 10, y: 4)
 
                 if let url = user?.avatarURL {
                     AsyncImage(url: url) { phase in
@@ -203,27 +200,25 @@ private struct JourneyMapMarker: View {
                 Circle()
                     .strokeBorder(Color.white.opacity(0.65), lineWidth: 2)
                     .blendMode(.screen)
-                    .shadow(color: Theme.neonAccent.opacity(0.5), radius: 10)
             }
             .overlay {
                 Circle()
                     .stroke(Theme.neonAccent, lineWidth: 2.4)
             }
-        .modifier(Theme.neonGlow(Theme.neonAccent))
 
-        Text(label)
-            .font(.system(size: 9, weight: .bold, design: .rounded))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.black.opacity(0.7), in: Capsule(style: .continuous))
-            .overlay {
-                Capsule(style: .continuous)
-                    .stroke(Color.white.opacity(0.3), lineWidth: 0.6)
-            }
-            .offset(y: 8)
-            .zIndex(1)
-    }
+            Text(label)
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.black.opacity(0.7), in: Capsule(style: .continuous))
+                .overlay {
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.3), lineWidth: 0.6)
+                }
+                .offset(y: 8)
+                .zIndex(1)
+        }
         .frame(width: size, height: size)
     }
 }
@@ -238,47 +233,47 @@ private struct POICategoryMarker: View {
         ZStack {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(markerGradient)
-                .frame(width: 46, height: 46)
+                .frame(width: 44, height: 44)
                 .rotationEffect(.degrees(45))
-                .shadow(color: markerGlow.opacity(0.45), radius: 12, y: 4)
 
             if isRecentHighlight {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(markerGlow, lineWidth: 1.6)
+                    .frame(width: 44, height: 44)
+                    .rotationEffect(.degrees(45))
+
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .stroke(Color.white.opacity(0.65), lineWidth: 1)
+                    .frame(width: 42, height: 42)
+                    .rotationEffect(.degrees(45))
+
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.orange.opacity(0.75), lineWidth: 3)
+                    .stroke(markerGlow, lineWidth: 2)
                     .frame(width: 48, height: 48)
                     .rotationEffect(.degrees(45))
-
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.orange.opacity(0.3), lineWidth: 6)
-                    .frame(width: 56, height: 56)
-                    .rotationEffect(.degrees(45))
-                    .blur(radius: 3)
             }
-
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(Color.white.opacity(0.45), lineWidth: 1.25)
-                .frame(width: 46, height: 46)
-                .rotationEffect(.degrees(45))
 
             Image(systemName: category.symbolName)
                 .font(.title3.weight(.bold))
                 .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
         }
-        .frame(width: 48, height: 48)
-        .shadow(color: isRecentHighlight ? Color.orange.opacity(0.4) : .clear, radius: 14, y: 6)
+        .frame(width: 52, height: 52)
         .overlay(alignment: .bottomTrailing) {
             if count > 1 {
                 Text("\(count)")
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay {
-                        Capsule().stroke(Color.white.opacity(0.5), lineWidth: 0.8)
-                    }
-                    .offset(x: 2, y: 6)
-                    .shadow(color: markerGlow.opacity(0.4), radius: 4, y: 2)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule()
+                            .fill(Color(white: 0.15))
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.white, lineWidth: 1.5)
+                    )
+                    .offset(x: 8, y: 8)
             }
         }
     }
