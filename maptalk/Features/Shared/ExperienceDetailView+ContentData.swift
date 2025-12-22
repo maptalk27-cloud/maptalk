@@ -138,6 +138,10 @@ extension ExperienceDetailView {
         case let .journey(journey):
             let accent = Theme.neonPrimary
             let user = userProvider(journey.userId)
+            let isPrimaryJourney = sequenceContext?.pager.primaryJourneyId == journey.id
+            let journeyGradient = isPrimaryJourney
+                ? [accent.opacity(0.85), Color.black.opacity(0.8)]
+                : [Color.black, accent.opacity(0.2)]
             let friendLikes = journey.likes.compactMap { userId -> FriendEngagement? in
                 guard let user = userProvider(userId) else { return nil }
                 return FriendEngagement(
@@ -190,7 +194,7 @@ extension ExperienceDetailView {
                 poiInfo: nil,
                 poiStats: nil,
                 accentColor: accent,
-                backgroundGradient: [Color.black, accent.opacity(0.25)],
+                backgroundGradient: journeyGradient,
                 recentSharers: []
             )
         }

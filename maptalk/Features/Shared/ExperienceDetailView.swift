@@ -16,6 +16,12 @@ struct ExperienceDetailView: View {
         }
 
         let items: [Item]
+        let primaryJourneyId: UUID?
+
+        init(items: [Item], primaryJourneyId: UUID? = nil) {
+            self.items = items
+            self.primaryJourneyId = primaryJourneyId
+        }
     }
 
     struct SequenceContext {

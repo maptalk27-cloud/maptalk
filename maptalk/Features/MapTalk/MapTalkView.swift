@@ -133,6 +133,7 @@ struct MapTalkView: View {
                     }
                 }
             }()
+            let primaryJourneyId = focusedJourneyHeader?.id
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
             let collapseDetent = {
@@ -544,7 +545,10 @@ struct MapTalkView: View {
                     switch activeExperience {
                     case .sequence:
                         if sequenceItems.isEmpty == false {
-                            let pager = ExperienceDetailView.SequencePager(items: sequenceItems)
+                            let pager = ExperienceDetailView.SequencePager(
+                                items: sequenceItems,
+                                primaryJourneyId: primaryJourneyId
+                            )
                             let selectionBinding: Binding<UUID>
                             if focusedJourneyHeader != nil {
                             selectionBinding = Binding<UUID>(
@@ -829,16 +833,21 @@ private extension MapTalkView {
         var body: some View {
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(backgroundColor)
+                    .fill(backgroundFill)
                     .overlay {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(borderColor, lineWidth: isSelected ? 1.5 : 1)
+                            .stroke(borderStyle, lineWidth: isSelected ? 1.5 : 1)
                     }
 
                 content
             }
             .frame(width: isSelected ? 260 : 60, height: 56)
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .shadow(
+                color: isSelected && isActive ? Theme.neonPrimary.opacity(0.15) : .clear,
+                radius: isSelected && isActive ? 4 : 0,
+                y: isSelected && isActive ? 1 : 0
+            )
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isSelected)
         }
 
@@ -865,18 +874,37 @@ private extension MapTalkView {
             }
         }
 
-        private var backgroundColor: Color {
-            if isSelected {
-                return Color.black.opacity(isActive ? 0.75 : 0.6)
+        private var backgroundFill: AnyShapeStyle {
+            if isSelected, isActive {
+                return AnyShapeStyle(
+                    LinearGradient(
+                        colors: [Theme.neonPrimary.opacity(0.28), Color.black.opacity(0.82)],
+                        startPoint: .topTrailing,
+                        endPoint: .bottomLeading
+                    )
+                )
             }
-            return Color.black.opacity(0.35)
+            if isSelected {
+                return AnyShapeStyle(Color.black.opacity(0.6))
+            }
+            return AnyShapeStyle(Color.black.opacity(0.35))
         }
 
-        private var borderColor: Color {
+        private var borderStyle: AnyShapeStyle {
             if isSelected, isActive {
-                return Color.white.opacity(0.95)
+                return AnyShapeStyle(
+                    LinearGradient(
+                        colors: [
+                            Theme.neonPrimary.opacity(0.35),
+                            Theme.neonPrimary.opacity(0.12),
+                            .clear
+                        ],
+                        startPoint: .topTrailing,
+                        endPoint: .bottomLeading
+                    )
+                )
             }
-            return Color.clear
+            return AnyShapeStyle(Color.white.opacity(0.22))
         }
     }
 
