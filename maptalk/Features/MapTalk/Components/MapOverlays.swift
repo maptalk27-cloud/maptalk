@@ -141,13 +141,19 @@ private struct RealAvatarMarker: View {
         .frame(width: 60, height: 60)
         .overlay {
             Circle()
-                .strokeBorder(Color.white.opacity(0.6), lineWidth: 2)
-                .blendMode(.screen)
+                .strokeBorder(Color.white.opacity(0.6), lineWidth: 1.6)
         }
         .overlay {
             Circle()
                 .stroke(Theme.neonPrimary, lineWidth: 2.4)
         }
+        .background {
+            Circle()
+                .stroke(Theme.neonPrimary.opacity(0.28), lineWidth: 3)
+                .frame(width: 64, height: 64)
+        }
+        .padding(4)
+        .drawingGroup()
     }
 }
 
@@ -198,12 +204,16 @@ private struct JourneyMapMarker: View {
             .frame(width: size, height: size)
             .overlay {
                 Circle()
-                    .strokeBorder(Color.white.opacity(0.65), lineWidth: 2)
-                    .blendMode(.screen)
+                    .strokeBorder(Color.white.opacity(0.65), lineWidth: 1.6)
             }
             .overlay {
                 Circle()
                     .stroke(Theme.neonAccent, lineWidth: 2.4)
+            }
+            .background {
+                Circle()
+                    .stroke(Theme.neonAccent.opacity(0.28), lineWidth: 3)
+                    .frame(width: size + 4, height: size + 4)
             }
 
             Text(label)
@@ -219,7 +229,9 @@ private struct JourneyMapMarker: View {
                 .offset(y: 8)
                 .zIndex(1)
         }
-        .frame(width: size, height: size)
+        .frame(width: size, height: size + 18)
+        .padding(4)
+        .drawingGroup()
     }
 }
 
@@ -230,50 +242,46 @@ private struct POICategoryMarker: View {
     let isRecentHighlight: Bool
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(markerGradient)
-                .frame(width: 44, height: 44)
-                .rotationEffect(.degrees(45))
-
-            if isRecentHighlight {
+        ZStack(alignment: .bottomTrailing) {
+            ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(markerGlow, lineWidth: 1.6)
+                    .fill(markerGradient)
                     .frame(width: 44, height: 44)
                     .rotationEffect(.degrees(45))
 
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(Color.white.opacity(0.65), lineWidth: 1)
-                    .frame(width: 42, height: 42)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(isRecentHighlight ? 0.9 : 0.6), lineWidth: 1.6)
+                    .frame(width: 44, height: 44)
                     .rotationEffect(.degrees(45))
 
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(markerGlow, lineWidth: 2)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(markerGlow.opacity(isRecentHighlight ? 1 : 0.6), lineWidth: 2.4)
+                    .frame(width: 44, height: 44)
+                    .rotationEffect(.degrees(45))
+
+                Image(systemName: category.symbolName)
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 52, height: 52)
+            .background {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(markerGlow.opacity(0.28), lineWidth: 3)
                     .frame(width: 48, height: 48)
                     .rotationEffect(.degrees(45))
             }
+            .padding(10)
+            .drawingGroup()
 
-            Image(systemName: category.symbolName)
-                .font(.title3.weight(.bold))
-                .foregroundStyle(.white)
-        }
-        .frame(width: 52, height: 52)
-        .overlay(alignment: .bottomTrailing) {
             if count > 1 {
                 Text("\(count)")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.white)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(
-                        Capsule()
-                            .fill(Color(white: 0.15))
-                    )
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.white, lineWidth: 1.5)
-                    )
-                    .offset(x: 8, y: 8)
+                    .background(Capsule().fill(Color(white: 0.15)))
+                    .overlay(Capsule().stroke(Color.white, lineWidth: 1.5))
+                    .offset(x: -6, y: -6)
             }
         }
     }
