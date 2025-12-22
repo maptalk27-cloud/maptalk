@@ -531,7 +531,11 @@ struct MapTalkView: View {
             .sheet(isPresented: $isExperiencePresented, onDismiss: {
                 experienceDetent = .fraction(0.25)
                 selectedRealId = nil
-                selectedStoryId = nil
+                if let journey = focusedJourneyHeader {
+                    selectedStoryId = journey.id
+                } else {
+                    selectedStoryId = nil
+                }
             }) {
                 let isExpanded = experienceDetent == .large
                 let shouldAnimateSelection = isExpanded == false

@@ -170,6 +170,7 @@ struct JourneyCard: View {
         .padding(.vertical, 5)
         .background(.white.opacity(0.12), in: Capsule(style: .continuous))
     }
+
 }
 
 private struct JourneyAvatarStack: View {
@@ -237,8 +238,10 @@ private struct JourneyAvatarStack: View {
             )
         }
         return (reelEvents + poiEvents).sorted { lhs, rhs in
-            if lhs.priority != rhs.priority {
-                return lhs.priority > rhs.priority
+            let lhsPriority = lhs.priority.rawValue
+            let rhsPriority = rhs.priority.rawValue
+            if lhsPriority != rhsPriority {
+                return lhsPriority < rhsPriority
             }
             return lhs.date > rhs.date
         }
@@ -247,8 +250,9 @@ private struct JourneyAvatarStack: View {
     @ViewBuilder
     private func avatar(for event: JourneyStackEvent) -> some View {
         switch event.kind {
-        case let .reel(real, user):
-            RealMapThumbnail(real: real, user: user, size: avatarSize)
+        case let .reel(reel, user):
+            let displayUser = user ?? userProvider(reel.userId)
+            RealMapThumbnail(real: reel, user: displayUser, size: avatarSize)
         case let .poi(rated):
             UserMapMarker(category: rated.poi.category)
                 .frame(width: avatarSize * 0.88, height: avatarSize * 0.97)
@@ -256,34 +260,45 @@ private struct JourneyAvatarStack: View {
     }
 }
 
-private enum JourneyStackKind {
-    case reel(RealPost, User?)
-    case poi(RatedPOI)
-}
-
 private struct JourneyStackEvent: Identifiable {
+    enum Kind {
+        case reel(RealPost, User?)
+        case poi(RatedPOI)
+    }
+
+    enum Priority: Int {
+        case reel = 0
+        case poi = 1
+    }
+
     let id: UUID
     let date: Date
-    let kind: JourneyStackKind
+    let kind: Kind
 
-    var priority: Int {
+    var priority: Priority {
         switch kind {
         case .reel:
-            return 1
+            return .reel
         case .poi:
-            return 0
+            return .poi
         }
     }
 }
 
-private func chunked<T>(_ items: [T], size: Int) -> [[T]] {
-    guard size > 0 else { return [items] }
+private func chunked<T>(_ array: [T], size: Int) -> [[T]] {
+    guard size > 0 else { return [] }
     var result: [[T]] = []
-    var index = 0
-    while index < items.count {
-        let end = min(index + size, items.count)
-        result.append(Array(items[index..<end]))
-        index += size
+    var current: [T] = []
+    current.reserveCapacity(size)
+    for element in array {
+        current.append(element)
+        if current.count == size {
+            result.append(current)
+            current = []
+        }
+    }
+    if current.isEmpty == false {
+        result.append(current)
     }
     return result
 }
