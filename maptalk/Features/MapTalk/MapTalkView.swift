@@ -493,7 +493,26 @@ struct MapTalkView: View {
                         )
                     }
                 }
-                .padding(.top, 10)
+                .padding(.horizontal, 0)
+                .padding(.top, geometry.safeAreaInsets.top + 10)
+                .padding(.bottom, 10)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .background {
+                    Rectangle()
+                        .fill(.ultraThinMaterial.opacity(0.55))
+                        .mask {
+                            LinearGradient(
+                                colors: [
+                                    .white,
+                                    .white,
+                                    .white.opacity(0)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
+                }
+                .ignoresSafeArea(edges: .top)
 
                 if focusedJourneyHeader == nil {
                     VStack {

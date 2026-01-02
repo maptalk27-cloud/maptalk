@@ -92,6 +92,7 @@ struct RealStoriesRow: View {
                             .id(item.id)
                     }
                 }
+                .padding(.horizontal, 12)
             }
             .onChangeCompat(of: alignTrigger) { _ in
                 centerOnSelected(using: proxy, animated: true)
