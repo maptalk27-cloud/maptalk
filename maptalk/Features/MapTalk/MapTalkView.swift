@@ -440,7 +440,12 @@ struct MapTalkView: View {
                 }
                 .ignoresSafeArea()
 
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(spacing: 6) {
+                    if focusedJourneyHeader == nil {
+                        MapTalkHandwrittenBadge()
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+
                     if let journeyHeader = focusedJourneyHeader {
                         let journeyPath = journeyStack + [journeyHeader]
                         let isHeaderHighlighted = (focusedJourneyHeader?.id == journeyHeader.id) &&
@@ -457,16 +462,6 @@ struct MapTalkView: View {
                                 exitJourneyFocus()
                             }
                         )
-                        .padding(.horizontal, 16)
-                    } else {
-                        SegmentedControl(
-                            options: ["World", "Friends"],
-                            selection: Binding(
-                                get: { viewModel.mode.rawValue },
-                                set: { viewModel.mode = .init(index: $0) }
-                            )
-                        )
-                        .frame(maxWidth: .infinity)
                         .padding(.horizontal, 16)
                     }
 
@@ -498,7 +493,7 @@ struct MapTalkView: View {
                         )
                     }
                 }
-                .padding(.top, 16)
+                .padding(.top, 10)
 
                 if focusedJourneyHeader == nil {
                     VStack {
@@ -955,6 +950,40 @@ private extension MapTalkView {
             isExperiencePresented = false
             experienceDetent = .fraction(0.25)
         }
+    }
+}
+
+private struct MapTalkHandwrittenBadge: View {
+    private var handwritingFont: Font {
+        if UIFont(name: "SavoyeLetPlain", size: 36) != nil {
+            return .custom("SavoyeLetPlain", size: 36)
+        }
+        if UIFont(name: "SnellRoundhand-Bold", size: 34) != nil {
+            return .custom("SnellRoundhand-Bold", size: 34)
+        }
+        if UIFont(name: "MarkerFelt-Wide", size: 32) != nil {
+            return .custom("MarkerFelt-Wide", size: 32)
+        }
+        return .system(size: 32, weight: .regular, design: .serif).italic()
+    }
+
+    private var inkGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color.black.opacity(0.95),
+                Color(red: 0.1, green: 0.1, blue: 0.1).opacity(0.82),
+                Color.black.opacity(0.92)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+    }
+
+    var body: some View {
+        Text("maptalk")
+            .font(handwritingFont)
+            .kerning(-0.8)
+            .foregroundStyle(inkGradient)
     }
 }
 
