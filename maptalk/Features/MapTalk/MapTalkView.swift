@@ -955,16 +955,16 @@ private extension MapTalkView {
 
 private struct MapTalkHandwrittenBadge: View {
     private var handwritingFont: Font {
-        if UIFont(name: "SavoyeLetPlain", size: 36) != nil {
-            return .custom("SavoyeLetPlain", size: 36)
+        if UIFont(name: "SavoyeLetPlain", size: 44) != nil {
+            return .custom("SavoyeLetPlain", size: 44)
         }
-        if UIFont(name: "SnellRoundhand-Bold", size: 34) != nil {
-            return .custom("SnellRoundhand-Bold", size: 34)
+        if UIFont(name: "SnellRoundhand-Bold", size: 42) != nil {
+            return .custom("SnellRoundhand-Bold", size: 42)
         }
-        if UIFont(name: "MarkerFelt-Wide", size: 32) != nil {
-            return .custom("MarkerFelt-Wide", size: 32)
+        if UIFont(name: "MarkerFelt-Wide", size: 38) != nil {
+            return .custom("MarkerFelt-Wide", size: 38)
         }
-        return .system(size: 32, weight: .regular, design: .serif).italic()
+        return .system(size: 38, weight: .regular, design: .serif).italic()
     }
 
     private var inkGradient: LinearGradient {
@@ -981,7 +981,7 @@ private struct MapTalkHandwrittenBadge: View {
 
     var body: some View {
         Text("maptalk")
-            .font(handwritingFont)
+            .font(handwritingFont.weight(.bold))
             .kerning(-0.8)
             .foregroundStyle(inkGradient)
     }
