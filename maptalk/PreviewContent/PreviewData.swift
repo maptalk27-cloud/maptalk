@@ -180,6 +180,39 @@ enum PreviewData {
             )
 
             map[parentHawaii.id] = [subJourney]
+
+            let thirdLevelReels: [RealPost] = [
+                .init(
+                    id: uuid(70031),
+                    userId: currentUser.id,
+                    center: .init(latitude: 21.605, longitude: -158.105),
+                    radiusMeters: 140,
+                    message: "Secret reef check after midnight.",
+                    attachments: [
+                        .init(id: uuid(70032), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=60")!))
+                    ],
+                    likes: [sampleFriends[0].id],
+                    comments: [],
+                    visibility: .friendsOnly,
+                    createdAt: now.addingTimeInterval(-2_200),
+                    expiresAt: now.addingTimeInterval(8 * 3600)
+                )
+            ]
+
+            let thirdLevelJourney = JourneyPost(
+                id: uuid(3005),
+                userId: currentUser.id,
+                title: "Cove glow scout",
+                content: "Micro loop inside the night glide.",
+                coordinate: CLLocationCoordinate2D(latitude: 21.607, longitude: -158.098),
+                createdAt: now.addingTimeInterval(-160),
+                reels: thirdLevelReels,
+                pois: [],
+                likes: [],
+                comments: []
+            )
+
+            map[subJourney.id] = [thirdLevelJourney]
         }
 
         if let parentFlorida {
@@ -246,6 +279,37 @@ enum PreviewData {
             )
 
             map[parentFlorida.id] = [subJourney]
+
+            let miamiNestedJourney = JourneyPost(
+                id: uuid(3006),
+                userId: sampleFriends[1].id,
+                title: "South Beach micro loop",
+                content: "Hidden alley murals + cortadito.",
+                coordinate: CLLocationCoordinate2D(latitude: 25.779, longitude: -80.134),
+                createdAt: now.addingTimeInterval(-180),
+                reels: [
+                    .init(
+                        id: uuid(70041),
+                        userId: sampleFriends[1].id,
+                        center: .init(latitude: 25.7785, longitude: -80.1335),
+                        radiusMeters: 110,
+                        message: "Alley cats + neon paint drips.",
+                        attachments: [
+                            .init(id: uuid(70042), kind: .photo(URL(string: "https://images.unsplash.com/photo-1521737604893-d14cc237f11d?auto=format&fit=crop&w=1200&q=60")!))
+                        ],
+                        likes: [currentUser.id],
+                        comments: [],
+                        visibility: .friendsOnly,
+                        createdAt: now.addingTimeInterval(-2_800),
+                        expiresAt: now.addingTimeInterval(7 * 3600)
+                    )
+                ],
+                pois: [],
+                likes: [],
+                comments: []
+            )
+
+            map[subJourney.id] = [miamiNestedJourney]
         }
 
         return map

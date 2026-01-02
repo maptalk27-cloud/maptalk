@@ -499,7 +499,8 @@ struct MapTalkView: View {
                 .frame(maxWidth: .infinity, alignment: .top)
                 .background {
                     Rectangle()
-                        .fill(.ultraThinMaterial.opacity(0.55))
+                        .fill(.ultraThinMaterial.opacity(0.65))
+                        .overlay(Color.white.opacity(0.06))
                         .mask {
                             LinearGradient(
                                 colors: [
