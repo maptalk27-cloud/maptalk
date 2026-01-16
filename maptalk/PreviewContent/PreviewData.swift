@@ -536,6 +536,46 @@ enum PreviewData {
             favoritesCount: 11
         )
 
+        let lagosNightReal = RealPost(
+            id: uuid(9120),
+            userId: currentUser.id,
+            center: .init(latitude: 6.5244, longitude: 3.3792),
+            radiusMeters: 680,
+            message: "Lagos rooftop afrobeat jam washing the skyline in lasers.",
+            attachments: [
+                .init(
+                    id: uuid(9121),
+                    kind: .video(
+                        url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
+                        poster: URL(string: "https://images.unsplash.com/photo-1523419409543-0c1df022bddb?auto=format&fit=crop&w=1100&q=60")
+                    )
+                )
+            ],
+            likes: [aurora.id, night.id, skyline.id],
+            comments: [],
+            visibility: .friendsOnly,
+            createdAt: referenceDate.addingTimeInterval(120),
+            expiresAt: referenceDate.addingTimeInterval(20 * 3600)
+        )
+        registerLocationLabel("Lagos, Nigeria", for: lagosNightReal.id)
+
+        let nairobiSunriseReal = RealPost(
+            id: uuid(9122),
+            userId: currentUser.id,
+            center: .init(latitude: -1.2921, longitude: 36.8219),
+            radiusMeters: 540,
+            message: "Nairobi sunrise ride over Karura canopy.",
+            attachments: [
+                .init(id: uuid(9123), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!))
+            ],
+            likes: [bund.id],
+            comments: [],
+            visibility: .publicAll,
+            createdAt: referenceDate.addingTimeInterval(60),
+            expiresAt: referenceDate.addingTimeInterval(28 * 3600)
+        )
+        registerLocationLabel("Nairobi, Kenya", for: nairobiSunriseReal.id)
+
         let droneCountdownReal = RealPost(
             id: uuid(101),
             userId: currentUser.id,
@@ -827,6 +867,8 @@ enum PreviewData {
             user: currentUser,
             pois: [recentFootprint, marketFootprint, pastFootprint, laFootprint, londonFootprint, bangkokFootprint],
             reels: [
+                lagosNightReal,
+                nairobiSunriseReal,
                 droneCountdownReal,
                 stargazingReal,
                 moscowReal,
