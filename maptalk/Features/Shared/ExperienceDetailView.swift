@@ -155,8 +155,8 @@ struct ExperienceDetailView: View {
     var body: some View {
         let currentData = contentData(for: currentMode)
 
-        ZStack {
-            background(for: currentData)
+        ZStack(alignment: .top) {
+            background(for: currentData, isExpanded: isExpanded)
 
             if isExpanded {
                 expandedContent(using: currentData)
@@ -164,6 +164,7 @@ struct ExperienceDetailView: View {
                 collapsedPreview(using: currentData)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.black.ignoresSafeArea())
         .onAppear {
             logPOIDebug(event: "onAppear", data: currentData)

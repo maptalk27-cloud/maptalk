@@ -340,8 +340,23 @@ struct AutoPlayVideoView: View {
     let poster: URL?
     let accentColor: Color
     let mode: MediaCardView.Mode
+    let showsPlaceholderBadge: Bool
 
     @State private var isVideoVisible = false
+
+    init(
+        url: URL,
+        poster: URL?,
+        accentColor: Color,
+        mode: MediaCardView.Mode,
+        showsPlaceholderBadge: Bool = true
+    ) {
+        self.url = url
+        self.poster = poster
+        self.accentColor = accentColor
+        self.mode = mode
+        self.showsPlaceholderBadge = showsPlaceholderBadge
+    }
 
     var body: some View {
         ZStack {
@@ -389,23 +404,32 @@ struct AutoPlayVideoView: View {
         }
     }
 
+    @ViewBuilder
     private var placeholderPoster: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "play.rectangle.fill")
-                .font(.system(size: mode == .lightbox ? 52 : 38, weight: .bold))
-                .foregroundStyle(accentColor)
-            Text("Loading video")
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.7))
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
+        if showsPlaceholderBadge {
+            VStack(spacing: 12) {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.system(size: mode == .lightbox ? 52 : 38, weight: .bold))
+                    .foregroundStyle(accentColor)
+                Text("Loading video")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                LinearGradient(
+                    colors: [accentColor.opacity(0.35), .black.opacity(0.82)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+        } else {
             LinearGradient(
-                colors: [accentColor.opacity(0.35), .black.opacity(0.82)],
+                colors: [accentColor.opacity(0.2), .black.opacity(0.7)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
-        )
+        }
     }
 }
 

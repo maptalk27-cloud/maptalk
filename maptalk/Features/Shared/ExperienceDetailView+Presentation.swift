@@ -50,32 +50,33 @@ extension ExperienceDetailView {
     }
 
     func collapsedPreview(using data: ContentData) -> some View {
-        VStack(spacing: 16) {
-            if let context = sequenceContext {
-                TabView(selection: context.selection) {
-                    ForEach(context.pager.items) { item in
-                        collapsedPreviewContent(for: item.mode)
-                            .tag(item.id)
+        GeometryReader { proxy in
+            let size = proxy.size
+            Group {
+                if let context = sequenceContext {
+                    TabView(selection: context.selection) {
+                        ForEach(context.pager.items) { item in
+                            collapsedPreviewContent(for: item.mode)
+                                .tag(item.id)
+                                .frame(width: size.width, height: size.height)
+                        }
                     }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .frame(width: size.width, height: size.height)
+                } else {
+                    collapsedPreviewLayer(using: data)
+                        .frame(width: size.width, height: size.height)
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .padding(.top, 0)
-                .frame(height: 240)
-                .padding(.horizontal, 0)
-            } else {
-                collapsedPreviewBody(using: data)
             }
+            .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
         }
-        .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
-        .padding(.top, 12)
-        .padding(.bottom, -8)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
     private func collapsedPreviewContent(for mode: Mode) -> some View {
         let data = contentData(for: mode)
-        collapsedPreviewBody(using: data)
+        collapsedPreviewLayer(using: data)
     }
 
     @ViewBuilder
@@ -91,9 +92,6 @@ extension ExperienceDetailView {
                 }
             )
             .padding(.horizontal, 12)
-        } else if let hero = data.hero {
-            HeroSection(model: hero, style: .collapsed)
-                .padding(.horizontal, 12)
         } else if let poiInfo = data.poiInfo {
             POICollapsedHero(
                 info: poiInfo,
@@ -116,7 +114,69 @@ extension ExperienceDetailView {
         }
     }
 
-    func background(for data: ContentData) -> some View {
+    @ViewBuilder
+    private func collapsedPreviewLayer(using data: ContentData) -> some View {
+        if let hero = data.hero {
+            let isSplitLayout = shouldHideMediaTile(for: data)
+            let useTallLayout = true
+            ExperienceDetailView.HeroSection(
+                model: hero,
+                style: .collapsed,
+                hideMedia: isSplitLayout,
+                useTallLayout: useTallLayout
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, useTallLayout ? 0 : 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            collapsedPreviewBody(using: data)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private func backgroundVideo(for data: ContentData) -> (url: URL, poster: URL?)? {
+        guard let hero = data.hero else { return nil }
+        return hero.real.attachments.compactMap { attachment -> (URL, URL?)? in
+            guard case let .video(url, poster) = attachment.kind else { return nil }
+            return (url, poster)
+        }
+        .first
+    }
+
+    private func shouldHideMediaTile(for data: ContentData) -> Bool {
+        backgroundVideo(for: data) != nil
+    }
+
+    @ViewBuilder
+    func background(for data: ContentData, isExpanded: Bool) -> some View {
+        if isExpanded == false, let video = backgroundVideo(for: data) {
+            AutoPlayVideoView(
+                url: video.url,
+                poster: video.poster,
+                accentColor: data.accentColor,
+                mode: .card,
+                showsPlaceholderBadge: false
+            )
+            .allowsHitTesting(false)
+            .ignoresSafeArea()
+            .overlay {
+                LinearGradient(
+                    colors: [
+                        .black.opacity(0.18),
+                        .black.opacity(0.1),
+                        .black.opacity(0.22)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+            }
+        } else {
+            gradientBackground(for: data)
+        }
+    }
+
+    private func gradientBackground(for data: ContentData) -> some View {
         LinearGradient(
             colors: data.backgroundGradient,
             startPoint: .topLeading,

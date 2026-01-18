@@ -621,6 +621,20 @@ struct EngagementSection: View {
 struct HeroSection: View {
     let model: ExperienceDetailView.HeroSectionModel
     let style: CompactRealCard.Style
+    let hideMedia: Bool
+    let useTallLayout: Bool
+
+    init(
+        model: ExperienceDetailView.HeroSectionModel,
+        style: CompactRealCard.Style,
+        hideMedia: Bool = false,
+        useTallLayout: Bool = false
+    ) {
+        self.model = model
+        self.style = style
+        self.hideMedia = hideMedia
+        self.useTallLayout = useTallLayout
+    }
 
     var body: some View {
         CompactRealCard(
@@ -629,7 +643,10 @@ struct HeroSection: View {
             style: style,
             displayNameOverride: model.displayNameOverride,
             avatarCategory: model.avatarCategory,
-            suppressContent: model.suppressContent
+            suppressContent: model.suppressContent,
+            hideHeader: false,
+            hideMedia: hideMedia,
+            useTallLayout: useTallLayout
         )
     }
 }

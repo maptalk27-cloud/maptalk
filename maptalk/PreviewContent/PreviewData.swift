@@ -583,13 +583,6 @@ enum PreviewData {
             radiusMeters: 600,
             message: "Drone light show countdown on Pier 62.",
             attachments: [
-                .init(
-                    id: uuid(1101),
-                    kind: .video(
-                        url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
-                        poster: URL(string: "https://images.unsplash.com/photo-1534447677768-be436bb09401?auto=format&fit=crop&w=900&q=60")
-                    )
-                ),
                 .init(id: uuid(1102), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")!)),
                 .init(id: uuid(1103), kind: .photo(URL(string: "https://images.unsplash.com/photo-1478720568477-152d9b164e26?auto=format&fit=crop&w=900&q=60")!)),
                 .init(id: uuid(1104), kind: .photo(URL(string: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=900&q=60")!))
@@ -739,11 +732,7 @@ enum PreviewData {
             message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
             attachments: [
                 .init(id: uuid(1930), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
-                .init(id: uuid(1931), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!)),
-                .init(id: uuid(1932), kind: .video(
-                    url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
-                    poster: URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")
-                ))
+                .init(id: uuid(1931), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!))
             ],
             likes: [currentUser.id, aurora.id],
             comments: [
@@ -849,11 +838,7 @@ enum PreviewData {
             radiusMeters: 620,
             message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
             attachments: [
-                .init(id: uuid(9115), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
-                .init(id: uuid(9116), kind: .video(
-                    url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
-                    poster: URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")
-                ))
+                .init(id: uuid(9115), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!))
             ],
             likes: [sampleFriends[7].id, sampleFriends[8].id],
             comments: [],
@@ -1597,13 +1582,6 @@ enum PreviewData {
                 radiusMeters: 600,
                 message: "Drone light show countdown on Pier 62.",
                 attachments: [
-                    .init(
-                        id: uuid(1101),
-                        kind: .video(
-                            url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
-                            poster: URL(string: "https://images.unsplash.com/photo-1534447677768-be436bb09401?auto=format&fit=crop&w=900&q=60")
-                        )
-                    ),
                     .init(id: uuid(1102), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")!)),
                     .init(id: uuid(1103), kind: .photo(URL(string: "https://images.unsplash.com/photo-1478720568477-152d9b164e26?auto=format&fit=crop&w=900&q=60")!)),
                     .init(id: uuid(1104), kind: .photo(URL(string: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=900&q=60")!))
@@ -1838,13 +1816,6 @@ enum PreviewData {
                 radiusMeters: 900,
                 message: "Lantern rehearsal on the Bund waterfront.",
                 attachments: [
-                    .init(
-                        id: uuid(1501),
-                        kind: .video(
-                            url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")!,
-                            poster: URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")
-                        )
-                    ),
                     .init(id: uuid(1502), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1100&q=60")!)),
                     .init(id: uuid(1503), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!))
                 ],
@@ -2133,11 +2104,7 @@ enum PreviewData {
                 message: "Bangkok tuk-tuk convoy projecting pixel art on alley walls.",
                 attachments: [
                     .init(id: uuid(1930), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=1100&q=60")!)),
-                    .init(id: uuid(1931), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!)),
-                    .init(id: uuid(1932), kind: .video(
-                        url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
-                        poster: URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")
-                    ))
+                    .init(id: uuid(1931), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=1100&q=60")!))
                 ],
                 likes: [currentUser.id, aurora.id],
                 comments: [

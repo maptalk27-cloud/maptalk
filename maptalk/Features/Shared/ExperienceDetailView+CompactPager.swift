@@ -16,6 +16,8 @@ struct CompactRealCard: View {
     let avatarCategory: POICategory?
     let suppressContent: Bool
     let hideHeader: Bool
+    let hideMedia: Bool
+    let useTallLayout: Bool
 
     @State private var isLightboxPresented = false
     @State private var lightboxSelection: UUID
@@ -27,7 +29,9 @@ struct CompactRealCard: View {
         displayNameOverride: String? = nil,
         avatarCategory: POICategory? = nil,
         suppressContent: Bool = false,
-        hideHeader: Bool = false
+        hideHeader: Bool = false,
+        hideMedia: Bool = false,
+        useTallLayout: Bool = false
     ) {
         self.real = real
         self.user = user
@@ -36,6 +40,8 @@ struct CompactRealCard: View {
         self.avatarCategory = avatarCategory
         self.suppressContent = suppressContent
         self.hideHeader = hideHeader
+        self.hideMedia = hideMedia
+        self.useTallLayout = useTallLayout
         _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
 
@@ -55,18 +61,27 @@ struct CompactRealCard: View {
                 if suppressContent == false {
                     contentText
 
-                    if hasMedia {
+                    if shouldShowMedia {
                         mediaRow
                     }
                 }
 
+                if useSplitLayout {
+                    Spacer(minLength: 0)
+                }
+
                 footerRow
             }
+            .frame(maxHeight: useSplitLayout ? .infinity : nil, alignment: .top)
         }
         .padding(.top, headerTopPadding)
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, verticalPadding)
-        .frame(maxWidth: .infinity)
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: useSplitLayout ? .infinity : nil,
+            alignment: .topLeading
+        )
         .fullScreenCover(isPresented: $isLightboxPresented) {
             if lightboxItems.isEmpty == false {
                 ExperienceDetailView.MediaLightbox(
@@ -84,11 +99,20 @@ struct CompactRealCard: View {
     }
 
     private var verticalPadding: CGFloat {
-        style == .collapsed ? 12 : 22
+        if style == .collapsed {
+            return useSplitLayout ? 6 : 12
+        }
+        return 22
     }
 
     private var headerTopPadding: CGFloat {
-        hideHeader ? 14 : 40
+        if hideHeader {
+            return 14
+        }
+        if useSplitLayout {
+            return 14
+        }
+        return 40
     }
 
     private var avatarSize: CGFloat {
@@ -210,6 +234,14 @@ struct CompactRealCard: View {
 
     private var hasMedia: Bool {
         real.attachments.isEmpty == false
+    }
+
+    private var shouldShowMedia: Bool {
+        hasMedia && hideMedia == false
+    }
+
+    private var useSplitLayout: Bool {
+        style == .collapsed && (hideMedia || useTallLayout)
     }
 
     private var collageSources: [RealPost.Attachment?] {
