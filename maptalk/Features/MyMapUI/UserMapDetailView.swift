@@ -1151,6 +1151,7 @@ private struct UserMapListCard: View {
                 style: .collapsed,
                 displayNameOverride: nil,
                 avatarCategory: nil,
+                userProvider: userProvider,
                 suppressContent: false,
                 hideHeader: true
             )
@@ -1420,7 +1421,10 @@ private struct UserMapPOICard: View {
         case let .photo(url):
             return ExperienceDetailView.MediaDisplayItem(id: media.id, content: .photo(url))
         case let .video(url, poster):
-            return ExperienceDetailView.MediaDisplayItem(id: media.id, content: .video(url: url, poster: poster))
+            return ExperienceDetailView.MediaDisplayItem(
+                id: media.id,
+                content: .video(url: url, poster: poster, metadata: nil)
+            )
         }
     }
 

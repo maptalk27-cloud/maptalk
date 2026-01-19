@@ -4,7 +4,7 @@ extension ExperienceDetailView {
     struct MediaDisplayItem: Identifiable, Hashable {
         enum Content: Hashable {
             case photo(URL)
-            case video(url: URL, poster: URL?)
+            case video(url: URL, poster: URL?, metadata: RealPost.Attachment.VideoMetadata?)
             case emoji(String)
         }
 

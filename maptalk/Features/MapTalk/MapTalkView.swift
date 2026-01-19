@@ -13,7 +13,7 @@ struct MapTalkView: View {
     @State private var selectedStoryId: UUID?
     @State private var activeExperience: ActiveExperience?
     @State private var isExperiencePresented: Bool = false
-    @State private var experienceDetent: PresentationDetent = .fraction(0.3)
+    @State private var experienceDetent: PresentationDetent = .fraction(ControlsLayout.previewFraction)
     @State private var currentRegion: MKCoordinateRegion?
     @State private var pendingRegionCause: RegionChangeCause = .initial
     @State private var reelAlignTrigger: Int = 0
@@ -140,7 +140,7 @@ struct MapTalkView: View {
                 print("[MapTalkView] collapseDetent requested; current detent=\(experienceDetent)")
                 let wasLarge = experienceDetent == .large
                 let wasPresented = isExperiencePresented
-                let target: PresentationDetent = .fraction(0.3)
+                let target: PresentationDetent = .fraction(ControlsLayout.previewFraction)
                 detentRerenderKey &+= 1
                 experienceDetent = target
                 DispatchQueue.main.async {
@@ -362,7 +362,7 @@ struct MapTalkView: View {
                         if isExperiencePresented == false {
                             isExperiencePresented = true
                         }
-                        experienceDetent = .fraction(0.3)
+                        experienceDetent = .fraction(ControlsLayout.previewFraction)
                     }
                 }
             }
@@ -545,7 +545,7 @@ struct MapTalkView: View {
                 }
             }
             .sheet(isPresented: $isExperiencePresented, onDismiss: {
-                        experienceDetent = .fraction(0.3)
+                experienceDetent = .fraction(ControlsLayout.previewFraction)
                 selectedRealId = nil
                 if let journey = focusedJourneyHeader {
                     selectedStoryId = journey.id
@@ -639,7 +639,7 @@ struct MapTalkView: View {
 
                 content
                     .id(detentRerenderKey)
-                    .presentationDetents([.fraction(0.3), .large], selection: $experienceDetent)
+                    .presentationDetents([.fraction(ControlsLayout.previewFraction), .large], selection: $experienceDetent)
                     .presentationBackground(.thinMaterial)
                     .presentationCompactAdaptation(.none)
                     .applyBackgroundInteractionIfAvailable()
@@ -703,7 +703,7 @@ struct MapTalkView: View {
             }
             .onChangeCompat(of: experienceDetent) { detent in
                 print("[MapTalkView] detent changed -> \(detent)")
-                if detent == .fraction(0.3), isExperiencePresented {
+                if detent == .fraction(ControlsLayout.previewFraction), isExperiencePresented {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                         controlsBottomPadding = previewControlsPadding
                     }
@@ -949,7 +949,7 @@ private extension MapTalkView {
             }
             activeExperience = .sequence(nonce: UUID())
             isExperiencePresented = true
-            experienceDetent = .fraction(0.3)
+            experienceDetent = .fraction(ControlsLayout.previewFraction)
             preFocusSnapshot = nil
             return
         }
@@ -964,11 +964,11 @@ private extension MapTalkView {
             currentRegion = region
             activeExperience = .sequence(nonce: UUID())
             isExperiencePresented = true
-            experienceDetent = .fraction(0.3)
+            experienceDetent = .fraction(ControlsLayout.previewFraction)
         } else {
             activeExperience = nil
             isExperiencePresented = false
-            experienceDetent = .fraction(0.3)
+            experienceDetent = .fraction(ControlsLayout.previewFraction)
         }
     }
 }
@@ -1054,7 +1054,7 @@ private enum ControlsLayout {
     static let baseInset: CGFloat = 0.2
     static let baseSafeAreaMultiplier: CGFloat = 0.2
     static let previewGap: CGFloat = 1
-    static let previewFraction: CGFloat = 0.25
+    static let previewFraction: CGFloat = 0.35
     static let controlButtonSize: CGFloat = 54
 
     static func basePadding(for geometry: GeometryProxy) -> CGFloat {

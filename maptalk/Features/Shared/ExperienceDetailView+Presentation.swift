@@ -122,11 +122,12 @@ extension ExperienceDetailView {
             ExperienceDetailView.HeroSection(
                 model: hero,
                 style: .collapsed,
+                userProvider: userProvider,
                 hideMedia: isSplitLayout,
                 useTallLayout: useTallLayout
             )
             .padding(.horizontal, 12)
-            .padding(.top, useTallLayout ? 0 : 12)
+            .padding(.top, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             collapsedPreviewBody(using: data)
@@ -134,13 +135,14 @@ extension ExperienceDetailView {
         }
     }
 
-    private func backgroundVideo(for data: ContentData) -> (url: URL, poster: URL?)? {
+    private func backgroundVideo(for data: ContentData) -> (url: URL, poster: URL?, metadata: RealPost.Attachment.VideoMetadata?)? {
         guard let hero = data.hero else { return nil }
-        return hero.real.attachments.compactMap { attachment -> (URL, URL?)? in
-            guard case let .video(url, poster) = attachment.kind else { return nil }
-            return (url, poster)
+        guard hero.real.attachments.count == 1,
+              let attachment = hero.real.attachments.first,
+              case let .video(url, poster) = attachment.kind else {
+            return nil
         }
-        .first
+        return (url, poster, attachment.videoMetadata)
     }
 
     private func shouldHideMediaTile(for data: ContentData) -> Bool {
@@ -155,7 +157,8 @@ extension ExperienceDetailView {
                 poster: video.poster,
                 accentColor: data.accentColor,
                 mode: .card,
-                showsPlaceholderBadge: false
+                showsPlaceholderBadge: false,
+                usesAspectFit: video.metadata?.isStandardLandscape == false
             )
             .allowsHitTesting(false)
             .ignoresSafeArea()

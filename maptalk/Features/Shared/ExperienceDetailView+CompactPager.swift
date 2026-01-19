@@ -11,6 +11,7 @@ struct CompactRealCard: View {
 
     let real: RealPost
     let user: User?
+    let userProvider: (UUID) -> User?
     let style: Style
     let displayNameOverride: String?
     let avatarCategory: POICategory?
@@ -28,6 +29,7 @@ struct CompactRealCard: View {
         style: Style = .standard,
         displayNameOverride: String? = nil,
         avatarCategory: POICategory? = nil,
+        userProvider: @escaping (UUID) -> User? = { _ in nil },
         suppressContent: Bool = false,
         hideHeader: Bool = false,
         hideMedia: Bool = false,
@@ -35,6 +37,7 @@ struct CompactRealCard: View {
     ) {
         self.real = real
         self.user = user
+        self.userProvider = userProvider
         self.style = style
         self.displayNameOverride = displayNameOverride
         self.avatarCategory = avatarCategory
@@ -53,7 +56,7 @@ struct CompactRealCard: View {
                     .padding(.trailing, 10)
             }
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: style == .collapsed ? 6 : 12) {
                 if showHeader {
                     userNameRow
                 }
@@ -63,6 +66,14 @@ struct CompactRealCard: View {
 
                     if shouldShowMedia {
                         mediaRow
+                    }
+
+                    if let capsule = capsuleJourney {
+                        CapsuleAttachmentCard(
+                            journey: capsule,
+                            userProvider: userProvider,
+                            style: style
+                        )
                     }
                 }
 
@@ -100,7 +111,7 @@ struct CompactRealCard: View {
 
     private var verticalPadding: CGFloat {
         if style == .collapsed {
-            return useSplitLayout ? 6 : 12
+            return 6
         }
         return 22
     }
@@ -109,7 +120,7 @@ struct CompactRealCard: View {
         if hideHeader {
             return 14
         }
-        if useSplitLayout {
+        if style == .collapsed {
             return 14
         }
         return 40
@@ -138,7 +149,10 @@ struct CompactRealCard: View {
             case let .photo(url):
                 return MediaDisplayItem(id: attachment.id, content: .photo(url))
             case let .video(url, poster):
-                return MediaDisplayItem(id: attachment.id, content: .video(url: url, poster: poster))
+                return MediaDisplayItem(
+                    id: attachment.id,
+                    content: .video(url: url, poster: poster, metadata: attachment.videoMetadata)
+                )
             case let .emoji(emoji):
                 return MediaDisplayItem(id: attachment.id, content: .emoji(emoji))
             }
@@ -165,7 +179,7 @@ struct CompactRealCard: View {
     }
 
     private var textLineLimit: Int {
-        style == .collapsed ? 2 : 3
+        style == .collapsed ? 1 : 3
     }
 
     private var userNameRow: some View {
@@ -236,12 +250,17 @@ struct CompactRealCard: View {
         real.attachments.isEmpty == false
     }
 
+    private var capsuleJourney: JourneyPost? {
+        guard let capsuleId = real.capsuleId else { return nil }
+        return PreviewData.journey(for: capsuleId)
+    }
+
     private var shouldShowMedia: Bool {
         hasMedia && hideMedia == false
     }
 
     private var useSplitLayout: Bool {
-        style == .collapsed && (hideMedia || useTallLayout)
+        style == .collapsed && useTallLayout
     }
 
     private var collageSources: [RealPost.Attachment?] {
@@ -529,6 +548,32 @@ struct CompactRealCard: View {
                 .lineLimit(3)
                 .multilineTextAlignment(.leading)
                 .padding(12)
+        }
+    }
+
+    private struct CapsuleAttachmentCard: View {
+        let journey: JourneyPost
+        let userProvider: (UUID) -> User?
+        let style: CompactRealCard.Style
+
+        private let avatarSize: CGFloat = 34
+
+        var body: some View {
+            JourneyAvatarStack(
+                journey: journey,
+                userProvider: userProvider,
+                avatarSize: avatarSize,
+                maxRows: style == .collapsed ? 2 : nil
+            )
+            .padding(.vertical, 10)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            }
+            .contentShape(Rectangle())
         }
     }
 

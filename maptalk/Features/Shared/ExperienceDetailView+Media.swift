@@ -244,8 +244,8 @@ struct MediaCardView: View {
             switch item.content {
             case let .photo(url):
                 imageView(url)
-            case let .video(url, poster):
-                videoView(url: url, poster: poster)
+            case let .video(url, poster, metadata):
+                videoView(url: url, poster: poster, metadata: metadata)
             case let .emoji(emoji):
                 emojiView(emoji)
             }
@@ -300,8 +300,15 @@ struct MediaCardView: View {
         .clipped()
     }
 
-    private func videoView(url: URL, poster: URL?) -> some View {
-        AutoPlayVideoView(url: url, poster: poster, accentColor: accentColor, mode: mode)
+    private func videoView(url: URL, poster: URL?, metadata: RealPost.Attachment.VideoMetadata?) -> some View {
+        let shouldFit = metadata?.isStandardLandscape == false
+        return AutoPlayVideoView(
+            url: url,
+            poster: poster,
+            accentColor: accentColor,
+            mode: mode,
+            usesAspectFit: shouldFit
+        )
     }
 
     private func placeholder(symbol: String) -> some View {
@@ -341,6 +348,7 @@ struct AutoPlayVideoView: View {
     let accentColor: Color
     let mode: MediaCardView.Mode
     let showsPlaceholderBadge: Bool
+    let usesAspectFit: Bool
 
     @State private var isVideoVisible = false
 
@@ -349,20 +357,27 @@ struct AutoPlayVideoView: View {
         poster: URL?,
         accentColor: Color,
         mode: MediaCardView.Mode,
-        showsPlaceholderBadge: Bool = true
+        showsPlaceholderBadge: Bool = true,
+        usesAspectFit: Bool = false
     ) {
         self.url = url
         self.poster = poster
         self.accentColor = accentColor
         self.mode = mode
         self.showsPlaceholderBadge = showsPlaceholderBadge
+        self.usesAspectFit = usesAspectFit
     }
 
     var body: some View {
         ZStack {
             posterLayer
 
-            LoopingVideoPlayerView(url: url, isMuted: true, shouldPlay: isVideoVisible)
+            LoopingVideoPlayerView(
+                url: url,
+                isMuted: true,
+                shouldPlay: isVideoVisible,
+                videoGravity: usesAspectFit ? .resizeAspect : .resizeAspectFill
+            )
                 .opacity(isVideoVisible ? 1 : 0)
                 .onAppear {
                     withAnimation(.easeInOut(duration: 0.25)) {
@@ -389,7 +404,7 @@ struct AutoPlayVideoView: View {
                 case let .success(image):
                     image
                         .resizable()
-                        .scaledToFill()
+                        .aspectRatio(contentMode: usesAspectFit ? .fit : .fill)
                         .overlay { Color.black.opacity(0.15) }
                 case .empty:
                     ProgressView()
@@ -399,6 +414,9 @@ struct AutoPlayVideoView: View {
                     placeholderPoster
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(usesAspectFit ? Color.black : Color.clear)
+            .clipped()
         } else {
             placeholderPoster
         }
@@ -437,16 +455,17 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
     let url: URL
     let isMuted: Bool
     let shouldPlay: Bool
+    let videoGravity: AVLayerVideoGravity
 
     func makeUIView(context: Context) -> PlayerContainerView {
         let view = PlayerContainerView()
-        view.configure(with: url, muted: isMuted)
+        view.configure(with: url, muted: isMuted, videoGravity: videoGravity)
         view.setPlaying(shouldPlay)
         return view
     }
 
     func updateUIView(_ uiView: PlayerContainerView, context: Context) {
-        uiView.configure(with: url, muted: isMuted)
+        uiView.configure(with: url, muted: isMuted, videoGravity: videoGravity)
         uiView.setPlaying(shouldPlay)
     }
 
@@ -470,7 +489,8 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
             return layer
         }
 
-        func configure(with url: URL, muted: Bool) {
+        func configure(with url: URL, muted: Bool, videoGravity: AVLayerVideoGravity) {
+            playerLayer.videoGravity = videoGravity
             guard currentURL != url else {
                 player?.isMuted = muted
                 return
@@ -484,7 +504,7 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
             let looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
 
             playerLayer.player = queuePlayer
-            playerLayer.videoGravity = .resizeAspectFill
+            playerLayer.videoGravity = videoGravity
 
             self.player = queuePlayer
             self.looper = looper

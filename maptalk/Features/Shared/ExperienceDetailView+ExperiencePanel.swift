@@ -29,7 +29,11 @@ struct ExperiencePanel: View {
                             .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                     }
                 } else if let hero = data.hero {
-                    HeroSection(model: hero, style: .standard)
+                    HeroSection(
+                        model: hero,
+                        style: .standard,
+                        userProvider: userProvider
+                    )
                         .padding(.horizontal, 4)
 
                     if data.engagement.hasContent {
@@ -621,17 +625,20 @@ struct EngagementSection: View {
 struct HeroSection: View {
     let model: ExperienceDetailView.HeroSectionModel
     let style: CompactRealCard.Style
+    let userProvider: (UUID) -> User?
     let hideMedia: Bool
     let useTallLayout: Bool
 
     init(
         model: ExperienceDetailView.HeroSectionModel,
         style: CompactRealCard.Style,
+        userProvider: @escaping (UUID) -> User? = { _ in nil },
         hideMedia: Bool = false,
         useTallLayout: Bool = false
     ) {
         self.model = model
         self.style = style
+        self.userProvider = userProvider
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
     }
@@ -643,6 +650,7 @@ struct HeroSection: View {
             style: style,
             displayNameOverride: model.displayNameOverride,
             avatarCategory: model.avatarCategory,
+            userProvider: userProvider,
             suppressContent: model.suppressContent,
             hideHeader: false,
             hideMedia: hideMedia,

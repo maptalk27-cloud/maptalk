@@ -9,6 +9,22 @@ struct RealPost: Identifiable, Hashable {
     }
 
     struct Attachment: Identifiable, Hashable {
+        struct VideoMetadata: Hashable {
+            let width: Int
+            let height: Int
+            let duration: TimeInterval
+
+            var aspectRatio: Double {
+                guard height > 0 else { return 0 }
+                return Double(width) / Double(height)
+            }
+
+            var isStandardLandscape: Bool {
+                guard width > height else { return false }
+                return aspectRatio >= 1.2 && aspectRatio <= 1.8
+            }
+        }
+
         enum Kind: Hashable {
             case photo(URL)
             case video(url: URL, poster: URL?)
@@ -17,10 +33,12 @@ struct RealPost: Identifiable, Hashable {
 
         let id: UUID
         var kind: Kind
+        var videoMetadata: VideoMetadata?
 
-        init(id: UUID = UUID(), kind: Kind) {
+        init(id: UUID = UUID(), kind: Kind, videoMetadata: VideoMetadata? = nil) {
             self.id = id
             self.kind = kind
+            self.videoMetadata = videoMetadata
         }
     }
 
@@ -71,6 +89,7 @@ struct RealPost: Identifiable, Hashable {
     var radiusMeters: CLLocationDistance
     var message: String?
     var attachments: [Attachment]
+    var capsuleId: UUID? = nil
     var likes: [UUID]
     var comments: [Comment]
     var visibility: Visibility

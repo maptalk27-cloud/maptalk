@@ -227,7 +227,7 @@ extension ExperienceDetailView {
         case let .photo(url):
             return MediaDisplayItem(content: .photo(url))
         case let .video(url, poster):
-            return MediaDisplayItem(content: .video(url: url, poster: poster))
+            return MediaDisplayItem(content: .video(url: url, poster: poster, metadata: nil))
         }
     }
 

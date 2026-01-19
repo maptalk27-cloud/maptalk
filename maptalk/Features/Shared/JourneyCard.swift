@@ -173,7 +173,7 @@ struct JourneyCard: View {
 
 }
 
-private struct JourneyAvatarStack: View {
+struct JourneyAvatarStack: View {
     let journey: JourneyPost
     let userProvider: (UUID) -> User?
     let avatarSize: CGFloat

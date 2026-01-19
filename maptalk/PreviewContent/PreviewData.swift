@@ -536,6 +536,39 @@ enum PreviewData {
             favoritesCount: 11
         )
 
+        let portraitVideoURL = Bundle.main.url(
+            forResource: "istockphoto-1467181036-640_adpp_is",
+            withExtension: "mp4"
+        ) ?? Bundle.main.url(
+            forResource: "istockphoto-1467181036-640_adpp_is",
+            withExtension: "mp4",
+            subdirectory: "Mock"
+        ) ?? URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!
+
+        let portraitVideoReal = RealPost(
+            id: uuid(9118),
+            userId: currentUser.id,
+            center: .init(latitude: 35.0116, longitude: 135.7681),
+            radiusMeters: 520,
+            message: "Kyoto alley light trail shot in slow motion.",
+            attachments: [
+                .init(
+                    id: uuid(9119),
+                    kind: .video(
+                        url: portraitVideoURL,
+                        poster: URL(string: "https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=720&h=1280&q=60")
+                    ),
+                    videoMetadata: .init(width: 360, height: 640, duration: 12)
+                )
+            ],
+            likes: [aurora.id, night.id, skyline.id],
+            comments: [],
+            visibility: .friendsOnly,
+            createdAt: referenceDate.addingTimeInterval(180),
+            expiresAt: referenceDate.addingTimeInterval(20 * 3600)
+        )
+        registerLocationLabel("Kyoto, Japan", for: portraitVideoReal.id)
+
         let lagosNightReal = RealPost(
             id: uuid(9120),
             userId: currentUser.id,
@@ -548,7 +581,8 @@ enum PreviewData {
                     kind: .video(
                         url: URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!,
                         poster: URL(string: "https://images.unsplash.com/photo-1523419409543-0c1df022bddb?auto=format&fit=crop&w=1100&q=60")
-                    )
+                    ),
+                    videoMetadata: .init(width: 1920, height: 1080, duration: 15)
                 )
             ],
             likes: [aurora.id, night.id, skyline.id],
@@ -852,6 +886,7 @@ enum PreviewData {
             user: currentUser,
             pois: [recentFootprint, marketFootprint, pastFootprint, laFootprint, londonFootprint, bangkokFootprint],
             reels: [
+                portraitVideoReal,
                 lagosNightReal,
                 nairobiSunriseReal,
                 droneCountdownReal,
@@ -1573,8 +1608,26 @@ enum PreviewData {
         let bund = sampleFriends[3]
         let hundredFriends = Array(sampleFriends.prefix(100))
         let megaLikeList = hundredFriends.map(\.id)
+        let capsuleJourneyId = uuid(3001)
 
         var reals: [RealPost] = [
+            .init(
+                id: uuid(150),
+                userId: currentUser.id,
+                center: .init(latitude: 47.608, longitude: -122.337),
+                radiusMeters: 520,
+                message: "Capsule test drop near Pike Place neon.",
+                attachments: [
+                    .init(id: uuid(1510), kind: .photo(URL(string: "https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(1511), kind: .photo(URL(string: "https://images.unsplash.com/photo-1505764706515-aa95265c5abc?auto=format&fit=crop&w=900&q=60")!))
+                ],
+                capsuleId: capsuleJourneyId,
+                likes: [aurora.id, night.id],
+                comments: [],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-1_800),
+                expiresAt: now.addingTimeInterval(20 * 3600)
+            ),
             .init(
                 id: uuid(101),
                 userId: currentUser.id,
@@ -2711,6 +2764,18 @@ enum PreviewData {
 
         return [journeyOne, journeyTwo]
     }()
+
+    static func journey(for id: UUID) -> JourneyPost? {
+        if let match = sampleJourneys.first(where: { $0.id == id }) {
+            return match
+        }
+        for journeys in nestedJourneys.values {
+            if let match = journeys.first(where: { $0.id == id }) {
+                return match
+            }
+        }
+        return nil
+    }
 
     static func user(for id: UUID) -> User? {
         if currentUser.id == id {
