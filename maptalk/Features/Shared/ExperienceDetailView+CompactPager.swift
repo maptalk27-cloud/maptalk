@@ -174,6 +174,17 @@ struct CompactRealCard: View {
         style == .collapsed ? 3 : 9
     }
 
+    private var isSinglePhoto: Bool {
+        guard real.attachments.count == 1,
+              let attachment = real.attachments.first,
+              case .photo = attachment.kind else {
+            return false
+        }
+        return true
+    }
+
+    private var singlePhotoHeight: CGFloat { 160 }
+
     private var overflowCount: Int {
         max(0, real.attachments.count - maxVisibleMediaCount)
     }
@@ -281,10 +292,42 @@ struct CompactRealCard: View {
 
     @ViewBuilder
     private var mediaRow: some View {
-        if style == .collapsed {
+        if isSinglePhoto {
+            singlePhotoRow
+        } else if style == .collapsed {
             collapsedMediaStrip
         } else {
             standardMediaGrid
+        }
+    }
+
+    private var singlePhotoRow: some View {
+        Group {
+            if let attachment = real.attachments.first {
+                if case let .photo(url) = attachment.kind {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFit()
+                        case .empty:
+                            ProgressView()
+                        case .failure:
+                            previewFallback(symbol: "photo")
+                        @unknown default:
+                            previewFallback(symbol: "photo")
+                        }
+                    }
+                    .frame(height: singlePhotoHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        handleMediaTap(for: attachment)
+                    }
+                }
+            }
         }
     }
 
