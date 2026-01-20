@@ -34,7 +34,7 @@ struct ExperiencePanel: View {
                         style: .standard,
                         userProvider: userProvider
                     )
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, isSingleVideoHero ? 0 : 4)
 
                     if data.engagement.hasContent {
                         EngagementSection(model: data.engagement, accentColor: data.accentColor)
@@ -45,10 +45,20 @@ struct ExperiencePanel: View {
                 }
             }
             .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
-            .padding(.top, 40)
+            .padding(.top, isSingleVideoHero ? 0 : 40)
             .padding(.bottom, 60)
         }
         .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
+    }
+
+    private var isSingleVideoHero: Bool {
+        guard let hero = data.hero else { return false }
+        guard hero.real.attachments.count == 1,
+              let attachment = hero.real.attachments.first,
+              case .video = attachment.kind else {
+            return false
+        }
+        return true
     }
 
     @ViewBuilder

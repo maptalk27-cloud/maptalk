@@ -349,6 +349,7 @@ struct AutoPlayVideoView: View {
     let mode: MediaCardView.Mode
     let showsPlaceholderBadge: Bool
     let usesAspectFit: Bool
+    let isMuted: Bool
 
     @State private var isVideoVisible = false
 
@@ -358,7 +359,8 @@ struct AutoPlayVideoView: View {
         accentColor: Color,
         mode: MediaCardView.Mode,
         showsPlaceholderBadge: Bool = true,
-        usesAspectFit: Bool = false
+        usesAspectFit: Bool = false,
+        isMuted: Bool = true
     ) {
         self.url = url
         self.poster = poster
@@ -366,6 +368,7 @@ struct AutoPlayVideoView: View {
         self.mode = mode
         self.showsPlaceholderBadge = showsPlaceholderBadge
         self.usesAspectFit = usesAspectFit
+        self.isMuted = isMuted
     }
 
     var body: some View {
@@ -374,7 +377,7 @@ struct AutoPlayVideoView: View {
 
             LoopingVideoPlayerView(
                 url: url,
-                isMuted: true,
+                isMuted: isMuted,
                 shouldPlay: isVideoVisible,
                 videoGravity: usesAspectFit ? .resizeAspect : .resizeAspectFill
             )

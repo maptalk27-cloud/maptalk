@@ -50,19 +50,21 @@ struct CompactRealCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            if showHeader {
+            if showHeader && isSingleVideoDetail == false {
                 avatarView
                     .alignmentGuide(.top) { $0[.top] }
                     .padding(.trailing, 10)
             }
 
             VStack(alignment: .leading, spacing: style == .collapsed ? 6 : 12) {
-                if showHeader {
+                if showHeader && isSingleVideoDetail == false {
                     userNameRow
                 }
 
                 if suppressContent == false {
-                    contentText
+                    if isSingleVideoDetail == false {
+                        contentText
+                    }
 
                     if shouldShowMedia {
                         mediaRow
@@ -81,7 +83,9 @@ struct CompactRealCard: View {
                     Spacer(minLength: 0)
                 }
 
-                footerRow
+                if isSingleVideoDetail == false {
+                    footerRow
+                }
             }
             .frame(maxHeight: useSplitLayout ? .infinity : nil, alignment: .top)
         }
@@ -110,6 +114,9 @@ struct CompactRealCard: View {
     }
 
     private var verticalPadding: CGFloat {
+        if isSingleVideoDetail {
+            return 0
+        }
         if style == .collapsed {
             return 6
         }
@@ -117,6 +124,9 @@ struct CompactRealCard: View {
     }
 
     private var headerTopPadding: CGFloat {
+        if isSingleVideoDetail {
+            return 0
+        }
         if hideHeader {
             return 14
         }
@@ -183,7 +193,29 @@ struct CompactRealCard: View {
         return true
     }
 
+    private var isSingleVideo: Bool {
+        guard real.attachments.count == 1,
+              let attachment = real.attachments.first,
+              case .video = attachment.kind else {
+            return false
+        }
+        return true
+    }
+
+    private var isSingleVideoDetail: Bool {
+        style == .standard && isSingleVideo
+    }
+
     private var singlePhotoHeight: CGFloat { 160 }
+
+    private var singleVideoLeadingInset: CGFloat {
+        if isSingleVideoDetail {
+            return horizontalPadding
+        }
+        return showHeader ? (avatarSize + 10 + horizontalPadding) : horizontalPadding
+    }
+
+    private var singleVideoTrailingInset: CGFloat { horizontalPadding }
 
     private var overflowCount: Int {
         max(0, real.attachments.count - maxVisibleMediaCount)
@@ -292,7 +324,9 @@ struct CompactRealCard: View {
 
     @ViewBuilder
     private var mediaRow: some View {
-        if isSinglePhoto {
+        if isSingleVideoDetail {
+            singleVideoRow
+        } else if isSinglePhoto {
             singlePhotoRow
         } else if style == .collapsed {
             collapsedMediaStrip
@@ -329,6 +363,68 @@ struct CompactRealCard: View {
                 }
             }
         }
+    }
+
+    private var singleVideoRow: some View {
+        Group {
+            if let attachment = real.attachments.first,
+               case let .video(url, poster) = attachment.kind {
+                let containerAspectRatio: CGFloat = 9.0 / 16.0
+                let ratioValue = CGFloat(attachment.videoMetadata?.aspectRatio ?? 0)
+                let videoAspectRatio = ratioValue > 0 ? ratioValue : (16.0 / 9.0)
+                let shouldFit = videoAspectRatio > containerAspectRatio
+                ExperienceDetailView.AutoPlayVideoView(
+                    url: url,
+                    poster: poster,
+                    accentColor: lightboxAccentColor,
+                    mode: ExperienceDetailView.MediaCardView.Mode.card,
+                    usesAspectFit: shouldFit,
+                    isMuted: false
+                )
+                .frame(maxWidth: .infinity)
+                .aspectRatio(containerAspectRatio, contentMode: .fit)
+                .background(Color.white)
+                .clipped()
+                .padding(.leading, -singleVideoLeadingInset)
+                .padding(.trailing, -singleVideoTrailingInset)
+                .overlay(singleVideoOverlay)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    handleMediaTap(for: attachment)
+                }
+            }
+        }
+    }
+
+    private var singleVideoOverlay: some View {
+        let textLeadingInset = showHeader ? (avatarSize + 10) : 0
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                if showHeader {
+                    avatarView
+                        .padding(.leading, -singleVideoLeadingInset)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(displayName)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                    if suppressContent == false {
+                        contentText
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+            footerRow
+                .padding(.leading, textLeadingInset)
+        }
+        .padding(.top, 12)
+        .padding(.bottom, 12)
+        .padding(.leading, singleVideoLeadingInset)
+        .padding(.trailing, singleVideoTrailingInset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(false)
     }
 
     private var collapsedMediaStrip: some View {
@@ -377,12 +473,12 @@ struct CompactRealCard: View {
     }
 
     private var footerRow: some View {
-        HStack(spacing: 14) {
+        HStack {
             Text(real.createdAt.formatted(.relative(presentation: .named)))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
 
-            Spacer(minLength: 12)
+            Spacer()
 
             HStack(spacing: 10) {
                 metricsPill(
@@ -395,11 +491,7 @@ struct CompactRealCard: View {
                 )
             }
         }
-        .padding(.trailing, metricsTrailingPadding)
-    }
-
-    private var metricsTrailingPadding: CGFloat {
-        style == .collapsed ? 18 : 26
+        .frame(maxWidth: .infinity)
     }
 
     private func handleMediaTap(for attachment: RealPost.Attachment?) {
