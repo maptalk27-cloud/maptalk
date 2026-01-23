@@ -178,17 +178,20 @@ struct JourneyAvatarStack: View {
     let userProvider: (UUID) -> User?
     let avatarSize: CGFloat
     let maxRows: Int?
+    let maxVisibleCount: Int?
 
     init(
         journey: JourneyPost,
         userProvider: @escaping (UUID) -> User?,
         avatarSize: CGFloat,
-        maxRows: Int? = nil
+        maxRows: Int? = nil,
+        maxVisibleCount: Int? = nil
     ) {
         self.journey = journey
         self.userProvider = userProvider
         self.avatarSize = avatarSize
         self.maxRows = maxRows
+        self.maxVisibleCount = maxVisibleCount
     }
 
     var body: some View {
@@ -197,6 +200,21 @@ struct JourneyAvatarStack: View {
             Text("No stops yet")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.6))
+        } else if let maxVisibleCount {
+            let visibleEvents = Array(events.prefix(maxVisibleCount))
+            let remainingCount = max(events.count - visibleEvents.count, 0)
+
+            HStack(spacing: -10) {
+                ForEach(visibleEvents) { event in
+                    avatar(for: event)
+                }
+                if remainingCount > 0 {
+                    Text("+\(remainingCount)")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .padding(.leading, 10)
+                }
+            }
         } else {
             let rows = chunked(events, size: 13)
             let visibleRows = maxRows.map { Array(rows.prefix($0)) } ?? rows

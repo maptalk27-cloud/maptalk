@@ -330,6 +330,7 @@ enum PreviewData {
         let bund = sampleFriends[3]
         let hundredFriends = Array(sampleFriends.prefix(100))
         let megaLikeList = hundredFriends.map(\.id)
+        let capsuleJourneyId = uuid(3001)
 
         let neonPier = POI(
             id: uuid(7001),
@@ -561,6 +562,7 @@ enum PreviewData {
                     videoMetadata: .init(width: 360, height: 640, duration: 12)
                 )
             ],
+            capsuleId: capsuleJourneyId,
             likes: [aurora.id, night.id, skyline.id],
             comments: [],
             visibility: .friendsOnly,
@@ -585,6 +587,7 @@ enum PreviewData {
                     videoMetadata: .init(width: 1920, height: 1080, duration: 15)
                 )
             ],
+            capsuleId: capsuleJourneyId,
             likes: [aurora.id, night.id, skyline.id],
             comments: [],
             visibility: .friendsOnly,

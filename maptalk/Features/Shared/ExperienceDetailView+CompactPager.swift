@@ -70,7 +70,7 @@ struct CompactRealCard: View {
                         mediaRow
                     }
 
-                    if let capsule = capsuleJourney {
+                    if let capsule = capsuleJourney, usesCompactCapsule == false {
                         CapsuleAttachmentCard(
                             journey: capsule,
                             userProvider: userProvider,
@@ -83,6 +83,17 @@ struct CompactRealCard: View {
                     Spacer(minLength: 0)
                 }
 
+                if isSingleVideoCollapsed, let capsule = capsuleJourney {
+                    CapsuleAttachmentCard(
+                        journey: capsule,
+                        userProvider: userProvider,
+                        style: style,
+                        isCompact: true,
+                        maxVisibleCount: 3
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 6)
+                }
                 if isSingleVideoDetail == false {
                     footerRow
                 }
@@ -204,6 +215,14 @@ struct CompactRealCard: View {
 
     private var isSingleVideoDetail: Bool {
         style == .standard && isSingleVideo
+    }
+
+    private var isSingleVideoCollapsed: Bool {
+        style == .collapsed && isSingleVideo && useSplitLayout
+    }
+
+    private var usesCompactCapsule: Bool {
+        isSingleVideoDetail || isSingleVideoCollapsed
     }
 
     private var singlePhotoHeight: CGFloat { 160 }
@@ -369,7 +388,7 @@ struct CompactRealCard: View {
         Group {
             if let attachment = real.attachments.first,
                case let .video(url, poster) = attachment.kind {
-                let containerAspectRatio: CGFloat = 9.0 / 16.0
+                let containerAspectRatio: CGFloat = 3.0 / 4.0
                 let ratioValue = CGFloat(attachment.videoMetadata?.aspectRatio ?? 0)
                 let videoAspectRatio = ratioValue > 0 ? ratioValue : (16.0 / 9.0)
                 let shouldFit = videoAspectRatio > containerAspectRatio
@@ -397,7 +416,7 @@ struct CompactRealCard: View {
     }
 
     private var singleVideoOverlay: some View {
-        let textLeadingInset = showHeader ? (avatarSize + 10) : 0
+        let textLeadingInset: CGFloat = 0
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
                 if showHeader {
@@ -416,6 +435,16 @@ struct CompactRealCard: View {
             }
 
             Spacer(minLength: 0)
+            if let capsule = capsuleJourney {
+                CapsuleAttachmentCard(
+                    journey: capsule,
+                    userProvider: userProvider,
+                    style: style,
+                    isCompact: true,
+                    maxVisibleCount: 3
+                )
+                .padding(.leading, textLeadingInset)
+            }
             footerRow
                 .padding(.leading, textLeadingInset)
         }
@@ -690,23 +719,52 @@ struct CompactRealCard: View {
         let journey: JourneyPost
         let userProvider: (UUID) -> User?
         let style: CompactRealCard.Style
+        let isCompact: Bool
+        let maxVisibleCount: Int?
 
-        private let avatarSize: CGFloat = 34
+        init(
+            journey: JourneyPost,
+            userProvider: @escaping (UUID) -> User?,
+            style: CompactRealCard.Style,
+            isCompact: Bool = false,
+            maxVisibleCount: Int? = nil
+        ) {
+            self.journey = journey
+            self.userProvider = userProvider
+            self.style = style
+            self.isCompact = isCompact
+            self.maxVisibleCount = maxVisibleCount
+        }
+
+        private var avatarSize: CGFloat { isCompact ? 26 : 34 }
+        private var verticalPadding: CGFloat { isCompact ? 6 : 10 }
+        private var horizontalPadding: CGFloat { isCompact ? 6 : 8 }
+        private var leadingPadding: CGFloat { isCompact ? 0 : horizontalPadding }
+        private var trailingPadding: CGFloat { horizontalPadding }
+        private var maxRows: Int? { isCompact ? 1 : (style == .collapsed ? 2 : nil) }
+        private var backgroundBleed: CGFloat { isCompact ? 8 : 0 }
 
         var body: some View {
             JourneyAvatarStack(
                 journey: journey,
                 userProvider: userProvider,
                 avatarSize: avatarSize,
-                maxRows: style == .collapsed ? 2 : nil
+                maxRows: maxRows,
+                maxVisibleCount: maxVisibleCount
             )
-            .padding(.vertical, 10)
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(.vertical, verticalPadding)
+            .padding(.leading, leadingPadding)
+            .padding(.trailing, trailingPadding)
+            .frame(maxWidth: isCompact ? nil : .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+                    .padding(.leading, -backgroundBleed)
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    .padding(.leading, -backgroundBleed)
             }
             .contentShape(Rectangle())
         }
