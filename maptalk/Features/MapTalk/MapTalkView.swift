@@ -86,32 +86,7 @@ struct MapTalkView: View {
             let storyItemIds = storyItems.map(\.id)
             let nestedJourneys = focusedJourneyHeader.flatMap { PreviewData.nestedJourneys[$0.id] } ?? []
             let sequenceItems: [ExperienceDetailView.SequencePager.Item] = {
-                if let journey = focusedJourneyHeader {
-                    let journeyItem = ExperienceDetailView.SequencePager.Item(
-                        id: journey.id,
-                        mode: .journey(journey)
-                    )
-                    let others = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
-                        switch item.source {
-                        case let .real(real):
-                            return ExperienceDetailView.SequencePager.Item(
-                                id: real.id,
-                                mode: .real(real, viewModel.user(for: real.userId))
-                            )
-                        case let .poi(group):
-                            return ExperienceDetailView.SequencePager.Item(
-                                id: group.id,
-                                mode: .poi(group.ratedPOI)
-                            )
-                        case let .journey(journey):
-                            return ExperienceDetailView.SequencePager.Item(
-                                id: journey.id,
-                                mode: .journey(journey)
-                            )
-                        }
-                    }
-                    return [journeyItem] + others
-                } else {
+                if focusedJourneyHeader != nil {
                     return storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
                         switch item.source {
                         case let .real(real):
@@ -132,8 +107,26 @@ struct MapTalkView: View {
                         }
                     }
                 }
+                return storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
+                    switch item.source {
+                    case let .real(real):
+                        return ExperienceDetailView.SequencePager.Item(
+                            id: real.id,
+                            mode: .real(real, viewModel.user(for: real.userId))
+                        )
+                    case let .poi(group):
+                        return ExperienceDetailView.SequencePager.Item(
+                            id: group.id,
+                            mode: .poi(group.ratedPOI)
+                        )
+                    case let .journey(journey):
+                        return ExperienceDetailView.SequencePager.Item(
+                            id: journey.id,
+                            mode: .journey(journey)
+                        )
+                    }
+                }
             }()
-            let primaryJourneyId = focusedJourneyHeader?.id
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
             let collapseDetent = {
@@ -304,11 +297,6 @@ struct MapTalkView: View {
                 presentSequenceIfNeeded(shouldPresent)
             }
 
-            let presentReal: (RealPost) -> Void = { real in
-                guard let item = storyItemForReal(real) else { return }
-                selectStoryItem(item, true, false, nil)
-            }
-
             let handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void = { journey, presentSheet, parent in
                 let isTappingCurrentFocusedJourney = (focusedJourneyHeader?.id == journey.id)
                 if isExperiencePresented, experienceDetent == .large, isTappingCurrentFocusedJourney == false {
@@ -401,39 +389,6 @@ struct MapTalkView: View {
                         journeys: focusedJourneyHeader == nil ? baseJourneys : nestedJourneys,
                         userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
                         currentUser: PreviewData.currentUser,
-                        onSelectPOI: { rated in
-#if DEBUG
-                            let handle = rated.checkIns.first?.userId
-                            print("[MapTalkView] Pin tap poi=\(rated.poi.name) id=\(rated.id) hasRecent=\(rated.hasRecentPhotoShare) firstCheckInUser=\(handle?.uuidString ?? "nil")")
-#endif
-                            let targetRegion = viewModel.region(for: rated)
-                            let cause: RegionChangeCause
-                            if let region = currentRegion,
-                               region.center.distance(to: targetRegion.center) < 1_000 {
-                                cause = .other
-                            } else {
-                                cause = .poi
-                            }
-                            if let item = storyItemForPOI(rated) {
-                                selectStoryItem(item, true, false, cause)
-                            } else {
-                                pendingRegionCause = cause
-                                selectedStoryId = nil
-                                selectedRealId = nil
-                                activeExperience = .poi(rated: rated, nonce: UUID())
-                                if isExperiencePresented == false {
-                                    isExperiencePresented = true
-                                }
-                                collapseDetent()
-                            }
-                        },
-                        onSelectReal: { real in
-                            presentReal(real)
-                        },
-                        onSelectJourney: { journey in
-                            handleJourneyTap(journey, true, focusedJourneyHeader)
-                        },
-                        onSelectUser: { },
                         heroNamespace: journeyNamespace,
                         useTimelineStyle: focusedJourneyHeader != nil
                     )
@@ -448,13 +403,9 @@ struct MapTalkView: View {
 
                     if let journeyHeader = focusedJourneyHeader {
                         let journeyPath = journeyStack + [journeyHeader]
-                        let isHeaderHighlighted = (focusedJourneyHeader?.id == journeyHeader.id) &&
-                            isExperiencePresented &&
-                            (selectedStoryId == journeyHeader.id)
                         journeyHeaderView(
                             path: journeyPath,
                             selectedJourneyId: journeyHeader.id,
-                            isActive: isHeaderHighlighted,
                             onSelect: { journey in
                                 focusJourneyFromBreadcrumb(journey)
                             },
@@ -560,10 +511,7 @@ struct MapTalkView: View {
                     switch activeExperience {
                     case .sequence:
                         if sequenceItems.isEmpty == false {
-                            let pager = ExperienceDetailView.SequencePager(
-                                items: sequenceItems,
-                                primaryJourneyId: primaryJourneyId
-                            )
+                            let pager = ExperienceDetailView.SequencePager(items: sequenceItems)
                             let selectionBinding: Binding<UUID>
                             if focusedJourneyHeader != nil {
                             selectionBinding = Binding<UUID>(
@@ -781,7 +729,6 @@ private extension MapTalkView {
     func journeyHeaderView(
         path: [JourneyPost],
         selectedJourneyId: UUID?,
-        isActive: Bool,
         onSelect: @escaping (JourneyPost) -> Void,
         onExit: @escaping () -> Void
     ) -> some View {
@@ -805,8 +752,7 @@ private extension MapTalkView {
                                 title: title,
                                 subtitle: "Journey",
                                 leadingSymbol: String(title.prefix(1)).uppercased(),
-                                isSelected: journey.id == selectedJourneyId,
-                                isActive: isActive && journey.id == selectedJourneyId
+                                isSelected: journey.id == selectedJourneyId
                             )
                             .id(journey.id)
                             .onTapGesture {
@@ -843,7 +789,6 @@ private extension MapTalkView {
         let subtitle: String
         let leadingSymbol: String
         let isSelected: Bool
-        let isActive: Bool
 
         var body: some View {
             ZStack(alignment: .leading) {
@@ -858,11 +803,6 @@ private extension MapTalkView {
             }
             .frame(width: isSelected ? 260 : 60, height: 56)
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .shadow(
-                color: isSelected && isActive ? Theme.neonPrimary.opacity(0.15) : .clear,
-                radius: isSelected && isActive ? 4 : 0,
-                y: isSelected && isActive ? 1 : 0
-            )
             .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isSelected)
         }
 
@@ -890,7 +830,7 @@ private extension MapTalkView {
         }
 
         private var backgroundFill: AnyShapeStyle {
-            if isSelected, isActive {
+            if isSelected {
                 return AnyShapeStyle(
                     LinearGradient(
                         colors: [Theme.neonPrimary.opacity(0.28), Color.black.opacity(0.82)],
@@ -899,25 +839,12 @@ private extension MapTalkView {
                     )
                 )
             }
-            if isSelected {
-                return AnyShapeStyle(Color.black.opacity(0.6))
-            }
             return AnyShapeStyle(Color.black.opacity(0.35))
         }
 
         private var borderStyle: AnyShapeStyle {
-            if isSelected, isActive {
-                return AnyShapeStyle(
-                    LinearGradient(
-                        colors: [
-                            Theme.neonPrimary.opacity(0.35),
-                            Theme.neonPrimary.opacity(0.12),
-                            .clear
-                        ],
-                        startPoint: .topTrailing,
-                        endPoint: .bottomLeading
-                    )
-                )
+            if isSelected {
+                return AnyShapeStyle(Color.white.opacity(0.3))
             }
             return AnyShapeStyle(Color.white.opacity(0.22))
         }

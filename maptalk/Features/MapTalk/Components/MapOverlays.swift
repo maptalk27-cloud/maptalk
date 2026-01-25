@@ -7,10 +7,6 @@ struct MapOverlays: MapContent {
     let journeys: [JourneyPost]
     let userCoordinate: CLLocationCoordinate2D?
     let currentUser: User
-    let onSelectPOI: (RatedPOI) -> Void
-    let onSelectReal: (RealPost) -> Void
-    let onSelectJourney: (JourneyPost) -> Void
-    let onSelectUser: () -> Void
     let heroNamespace: Namespace.ID?
     let useTimelineStyle: Bool
 
@@ -23,30 +19,25 @@ struct MapOverlays: MapContent {
 
         ForEach(reals) { real in
             Annotation("", coordinate: real.center) {
-                Button {
-                    onSelectReal(real)
-                } label: {
-                    let baseMarker: AnyView = {
-                        if useTimelineStyle {
-                            return AnyView(
-                                RealMapThumbnail(
-                                    real: real,
-                                    user: PreviewData.user(for: real.userId),
-                                    size: 40
-                                )
+                let baseMarker: AnyView = {
+                    if useTimelineStyle {
+                        return AnyView(
+                            RealMapThumbnail(
+                                real: real,
+                                user: PreviewData.user(for: real.userId),
+                                size: 40
                             )
-                        } else {
-                            return AnyView(RealAvatarMarker(user: PreviewData.user(for: real.userId)))
-                        }
-                    }()
-                    if let heroNamespace {
-                        baseMarker
-                            .matchedGeometryEffect(id: "real-\(real.id)", in: heroNamespace, isSource: true)
+                        )
                     } else {
-                        baseMarker
+                        return AnyView(RealAvatarMarker(user: PreviewData.user(for: real.userId)))
                     }
+                }()
+                if let heroNamespace {
+                    baseMarker
+                        .matchedGeometryEffect(id: "real-\(real.id)", in: heroNamespace, isSource: true)
+                } else {
+                    baseMarker
                 }
-                .buttonStyle(.plain)
             }
         }
 
@@ -54,47 +45,32 @@ struct MapOverlays: MapContent {
         ForEach(ratedPOIs) { rated in
             let isRecent = rated.hasRecentPhotoShare
             Annotation("", coordinate: rated.poi.coordinate) {
-                Button {
-                    onSelectPOI(rated)
-                } label: {
-                    if useTimelineStyle {
-                        UserMapMarker(category: rated.poi.category)
-                            .frame(width: 24, height: 26)
-                    } else {
-                        POICategoryMarker(
-                            category: rated.poi.category,
-                            count: rated.checkIns.count,
-                            isRecentHighlight: isRecent
-                        )
-                    }
+                if useTimelineStyle {
+                    UserMapMarker(category: rated.poi.category)
+                        .frame(width: 24, height: 26)
+                } else {
+                    POICategoryMarker(
+                        category: rated.poi.category,
+                        count: rated.checkIns.count,
+                        isRecentHighlight: isRecent
+                    )
                 }
-                .buttonStyle(.plain)
             }
         }
 
         ForEach(journeys) { journey in
             Annotation("", coordinate: journey.coordinate) {
-                Button {
-                    onSelectJourney(journey)
-                } label: {
-                    JourneyMapMarker(
-                        user: PreviewData.user(for: journey.userId),
-                        label: "journey",
-                        size: 52
-                    )
-                }
-                .buttonStyle(.plain)
+                JourneyMapMarker(
+                    user: PreviewData.user(for: journey.userId),
+                    label: "journey",
+                    size: 52
+                )
             }
         }
 
         if let userCoordinate {
             Annotation("", coordinate: userCoordinate) {
-                Button {
-                    onSelectUser()
-                } label: {
-                    UserAvatarView(user: currentUser, size: 48)
-                }
-                .buttonStyle(.plain)
+                UserAvatarView(user: currentUser, size: 48)
             }
         }
     }

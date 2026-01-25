@@ -16,11 +16,9 @@ struct ExperienceDetailView: View {
         }
 
         let items: [Item]
-        let primaryJourneyId: UUID?
 
-        init(items: [Item], primaryJourneyId: UUID? = nil) {
+        init(items: [Item]) {
             self.items = items
-            self.primaryJourneyId = primaryJourneyId
         }
     }
 
