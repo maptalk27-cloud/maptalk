@@ -2969,11 +2969,15 @@ enum PreviewData {
             ]
         )
 
-        let atlasBaseOffset: Double = 4_800
-        let atlasStep: Double = 150
+        let atlasReelOffsets: [Double] = [
+            4_800, 5_050, 4_520, 5_300, 4_680, 5_120,
+            4_400, 4_950, 5_200, 4_580, 5_400, 4_750
+        ]
+        let atlasPoiOffsets: [Double] = [
+            4_900, 4_450, 5_250, 4_650, 5_150, 4_350
+        ]
         let atlasReels: [RealPost] = (0..<12).map { index in
             let offset = Double(index) * 0.004
-            let sequenceIndex = index * 2
             return RealPost(
                 id: uuid(6200 + index),
                 userId: sampleFriends[index % sampleFriends.count].id,
@@ -2986,14 +2990,13 @@ enum PreviewData {
                 likes: journeyLikesTwo,
                 comments: [],
                 visibility: .publicAll,
-                createdAt: now.addingTimeInterval(-(atlasBaseOffset + Double(sequenceIndex) * atlasStep)),
+                createdAt: now.addingTimeInterval(-atlasReelOffsets[index]),
                 expiresAt: now.addingTimeInterval(24 * 3600)
             )
         }
 
         let atlasPOIs: [RatedPOI] = (0..<6).map { index in
             let offset = Double(index) * 0.006
-            let sequenceIndex = index * 2 + 1
             return RatedPOI(
                 poi: .init(
                     id: uuid(6400 + index),
@@ -3010,7 +3013,7 @@ enum PreviewData {
                     .init(
                         id: uuid(6600 + index),
                         userId: chengsi.id,
-                        createdAt: now.addingTimeInterval(-(atlasBaseOffset + Double(sequenceIndex) * atlasStep)),
+                        createdAt: now.addingTimeInterval(-atlasPoiOffsets[index]),
                         endorsement: .solid,
                         media: [],
                         tag: .social

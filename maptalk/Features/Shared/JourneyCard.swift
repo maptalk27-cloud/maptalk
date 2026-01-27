@@ -256,10 +256,8 @@ struct JourneyAvatarStack: View {
             )
         }
         return (reelEvents + poiEvents).sorted { lhs, rhs in
-            let lhsPriority = lhs.priority.rawValue
-            let rhsPriority = rhs.priority.rawValue
-            if lhsPriority != rhsPriority {
-                return lhsPriority < rhsPriority
+            if lhs.date == rhs.date {
+                return lhs.id.uuidString < rhs.id.uuidString
             }
             return lhs.date > rhs.date
         }
