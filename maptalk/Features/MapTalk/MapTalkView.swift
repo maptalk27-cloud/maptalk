@@ -444,7 +444,7 @@ struct MapTalkView: View {
 
                 let content: AnyView = {
                     switch activeExperience {
-                    case .sequence:
+                    case let .sequence(nonce):
                         if sequenceItems.isEmpty == false {
                             let pager = ExperienceDetailView.SequencePager(items: sequenceItems)
                             let selectionBinding: Binding<UUID>
@@ -504,6 +504,7 @@ struct MapTalkView: View {
                                     },
                                     userProvider: viewModel.user(for:)
                                 )
+                                .id(nonce)
                             )
                         } else {
                             return AnyView(EmptyView())

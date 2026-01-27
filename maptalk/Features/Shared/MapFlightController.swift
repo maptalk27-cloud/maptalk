@@ -40,9 +40,25 @@ final class MapFlightController: ObservableObject {
         }
 
         let travelDistance = existingRegion.center.distance(to: targetRegion.center)
+        let currentSpan = existingRegion.dominantSpanMeters
+        let targetSpan = targetRegion.dominantSpanMeters
 
         if existingRegion.contains(targetRegion.center, insetFraction: 0.92) &&
-            targetRegion.dominantSpanMeters <= existingRegion.dominantSpanMeters * 1.15 {
+            targetSpan <= currentSpan * 1.15 {
+            let preserved = MKCoordinateRegion(center: targetRegion.center, span: existingRegion.span)
+            let duration = min(0.25 + (travelDistance / 180_000.0), 0.45)
+            withAnimation(smoothAnimation(duration: duration)) {
+                cameraPosition.wrappedValue = .region(preserved)
+            }
+            onRegionUpdate(preserved)
+            return
+        }
+
+        if cause != .initial,
+           cause != .other,
+           travelDistance < currentSpan * 2,
+           targetSpan > currentSpan * 1.3 {
+            // Keep tight zoom for nearby hops instead of zooming out to the target span.
             let preserved = MKCoordinateRegion(center: targetRegion.center, span: existingRegion.span)
             let duration = min(0.25 + (travelDistance / 180_000.0), 0.45)
             withAnimation(smoothAnimation(duration: duration)) {

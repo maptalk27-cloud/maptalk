@@ -1356,6 +1356,7 @@ enum PreviewData {
         let hawaiiCapsuleJourneyId = uuid(3001)
         let floridaCapsuleJourneyId = uuid(3002)
         let seattleCapsuleJourneyId = uuid(3103)
+        let atlasCapsuleJourneyId = uuid(3205)
 
         var reals: [RealPost] = [
             .init(
@@ -1373,6 +1374,30 @@ enum PreviewData {
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-2_200),
                 expiresAt: now.addingTimeInterval(20 * 3600)
+            ),
+            .init(
+                id: uuid(9400),
+                userId: currentUser.id,
+                center: .init(latitude: 37.7749, longitude: -122.4194),
+                radiusMeters: 520,
+                message: "Atlas grid capsule test with nine frames.",
+                attachments: [
+                    .init(id: uuid(9401), kind: .photo(URL(string: "https://images.unsplash.com/photo-1521737604893-d14cc237f11d?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9402), kind: .photo(URL(string: "https://images.unsplash.com/photo-1526498460520-4c246339dccb?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9403), kind: .photo(URL(string: "https://images.unsplash.com/photo-1526481280695-3c469df1cb0d?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9404), kind: .photo(URL(string: "https://images.unsplash.com/photo-1452587925148-ce544e77e70d?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9405), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9406), kind: .photo(URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9407), kind: .photo(URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9408), kind: .photo(URL(string: "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=900&q=60")!)),
+                    .init(id: uuid(9409), kind: .photo(URL(string: "https://images.unsplash.com/photo-1505761671935-60b3a7427bad?auto=format&fit=crop&w=900&q=60")!))
+                ],
+                capsuleId: atlasCapsuleJourneyId,
+                likes: [aurora.id, night.id, skyline.id],
+                comments: [],
+                visibility: .friendsOnly,
+                createdAt: now.addingTimeInterval(-1_400),
+                expiresAt: now.addingTimeInterval(22 * 3600)
             ),
             .init(
                 id: uuid(9304),
@@ -1963,6 +1988,17 @@ enum PreviewData {
         let journeyLikesThree = Array(sampleFriends.dropFirst(4).prefix(8)).map(\.id)
         let journeyLikesFour = Array(sampleFriends.dropFirst(6).prefix(8)).map(\.id)
         let kyotoPocketJourneyId = uuid(3104)
+        let atlasPhotoURLs: [URL] = [
+            URL(string: "https://images.unsplash.com/photo-1521737604893-d14cc237f11d?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1526498460520-4c246339dccb?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1526481280695-3c469df1cb0d?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1452587925148-ce544e77e70d?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1469474968028-56623f02e42e?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=900&q=60")!,
+            URL(string: "https://images.unsplash.com/photo-1505761671935-60b3a7427bad?auto=format&fit=crop&w=900&q=60")!
+        ]
 
         // Hawaii journey (Chengsi) — Oahu focus
         let hawaiiReels: [RealPost] = [
@@ -2933,7 +2969,85 @@ enum PreviewData {
             ]
         )
 
-        return [journeyOne, journeyTwo, kyotoJourney, kyotoPocketJourney, lagosJourney, seattleJourney]
+        let atlasBaseOffset: Double = 4_800
+        let atlasStep: Double = 150
+        let atlasReels: [RealPost] = (0..<12).map { index in
+            let offset = Double(index) * 0.004
+            let sequenceIndex = index * 2
+            return RealPost(
+                id: uuid(6200 + index),
+                userId: sampleFriends[index % sampleFriends.count].id,
+                center: .init(latitude: 37.7749 + offset, longitude: -122.4194 - offset),
+                radiusMeters: 200 + Double(index) * 12,
+                message: "Atlas reel stop \(index + 1).",
+                attachments: [
+                    .init(id: uuid(6300 + index), kind: .photo(atlasPhotoURLs[index % atlasPhotoURLs.count]))
+                ],
+                likes: journeyLikesTwo,
+                comments: [],
+                visibility: .publicAll,
+                createdAt: now.addingTimeInterval(-(atlasBaseOffset + Double(sequenceIndex) * atlasStep)),
+                expiresAt: now.addingTimeInterval(24 * 3600)
+            )
+        }
+
+        let atlasPOIs: [RatedPOI] = (0..<6).map { index in
+            let offset = Double(index) * 0.006
+            let sequenceIndex = index * 2 + 1
+            return RatedPOI(
+                poi: .init(
+                    id: uuid(6400 + index),
+                    name: "Atlas stop \(index + 1)",
+                    coordinate: .init(latitude: 37.765 + offset, longitude: -122.44 + offset),
+                    category: index.isMultiple(of: 2) ? .coffee : .viewpoint
+                ),
+                highlight: "Tight loop stop \(index + 1).",
+                secondary: "Quick pulse check-in.",
+                media: [
+                    .init(id: uuid(6500 + index), kind: .photo(atlasPhotoURLs[(index + 2) % atlasPhotoURLs.count]))
+                ],
+                checkIns: [
+                    .init(
+                        id: uuid(6600 + index),
+                        userId: chengsi.id,
+                        createdAt: now.addingTimeInterval(-(atlasBaseOffset + Double(sequenceIndex) * atlasStep)),
+                        endorsement: .solid,
+                        media: [],
+                        tag: .social
+                    )
+                ],
+                comments: [],
+                endorsements: .init(hype: 2, solid: 1, meh: 0, questionable: 0),
+                tags: [
+                    .init(tag: .social, count: 3),
+                    .init(tag: .detour, count: 2)
+                ],
+                isFavoritedByCurrentUser: index.isMultiple(of: 2),
+                favoritesCount: 10 + index
+            )
+        }
+
+        let atlasJourney = JourneyPost(
+            id: uuid(3205),
+            userId: chengsi.id,
+            title: "Atlas capsule grid",
+            content: "Eighteen clustered stops for capsule stress test.",
+            coordinate: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
+            createdAt: now.addingTimeInterval(-3_200),
+            reels: atlasReels,
+            pois: atlasPOIs,
+            likes: journeyLikesThree,
+            comments: [
+                JourneyPost.Comment(
+                    id: uuid(3261),
+                    userId: sampleFriends[2].id,
+                    text: "This is a dense loop.",
+                    createdAt: now.addingTimeInterval(-42 * 60)
+                )
+            ]
+        )
+
+        return [journeyOne, journeyTwo, kyotoJourney, kyotoPocketJourney, lagosJourney, seattleJourney, atlasJourney]
     }()
 
     static func journey(for id: UUID) -> JourneyPost? {

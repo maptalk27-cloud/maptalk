@@ -23,6 +23,7 @@ struct CompactRealCard: View {
 
     @State private var isLightboxPresented = false
     @State private var lightboxSelection: UUID
+    @State private var capsuleOverlayHeight: CGFloat = 0
 
     init(
         real: RealPost,
@@ -80,6 +81,7 @@ struct CompactRealCard: View {
                             style: style,
                             onTap: onCapsuleTap
                         )
+                        .frame(maxWidth: style == .standard ? 280 : nil, alignment: .leading)
                     }
                 }
 
@@ -100,7 +102,11 @@ struct CompactRealCard: View {
                     .padding(.top, 6)
                 }
                 if isSingleVideoDetail == false {
-                    footerRow
+                    if shouldOverlayCapsuleOnSinglePhoto {
+                        footerRowWithCapsuleOverlay
+                    } else {
+                        footerRow
+                    }
                 }
             }
             .frame(maxHeight: useSplitLayout ? .infinity : nil, alignment: .top)
@@ -227,7 +233,11 @@ struct CompactRealCard: View {
     }
 
     private var usesCompactCapsule: Bool {
-        isSingleVideoDetail || isSingleVideoCollapsed
+        isSingleVideoDetail || isSingleVideoCollapsed || shouldOverlayCapsuleOnSinglePhoto
+    }
+
+    private var shouldOverlayCapsuleOnSinglePhoto: Bool {
+        isSinglePhoto && capsuleJourney != nil && style == .collapsed
     }
 
     private var singlePhotoHeight: CGFloat { 160 }
@@ -379,11 +389,11 @@ struct CompactRealCard: View {
                     }
                     .frame(height: singlePhotoHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         handleMediaTap(for: attachment)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -526,6 +536,45 @@ struct CompactRealCard: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var footerRowWithCapsuleOverlay: some View {
+        footerRow
+            .overlay(alignment: .topTrailing) {
+            if let capsule = capsuleJourney {
+                CapsuleAttachmentCard(
+                    journey: capsule,
+                    userProvider: userProvider,
+                    style: style,
+                    isCompact: true,
+                    maxVisibleCount: 3,
+                    onTap: onCapsuleTap
+                )
+                .background(CapsuleOverlayHeightReader())
+                .offset(y: -(max(capsuleOverlayHeight, 0) + 4))
+            }
+        }
+        .onPreferenceChange(CapsuleOverlayHeightPreferenceKey.self) { newValue in
+            if abs(newValue - capsuleOverlayHeight) > 0.5 {
+                capsuleOverlayHeight = newValue
+            }
+        }
+    }
+
+    private struct CapsuleOverlayHeightPreferenceKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+
+    private struct CapsuleOverlayHeightReader: View {
+        var body: some View {
+            GeometryReader { proxy in
+                Color.clear.preference(key: CapsuleOverlayHeightPreferenceKey.self, value: proxy.size.height)
+            }
+        }
     }
 
     private func handleMediaTap(for attachment: RealPost.Attachment?) {
@@ -751,19 +800,39 @@ struct CompactRealCard: View {
         private var trailingPadding: CGFloat { horizontalPadding }
         private var maxRows: Int? { isCompact ? 1 : (style == .collapsed ? 2 : nil) }
         private var backgroundBleed: CGFloat { isCompact ? 8 : 0 }
+        private var overlapSpacing: CGFloat { 10 }
+        private var maxCapsuleWidth: CGFloat? { isCompact ? nil : 280 }
+
+        private var effectiveMaxVisibleCount: Int? {
+            if let maxVisibleCount {
+                return maxVisibleCount
+            }
+            guard let maxCapsuleWidth else { return nil }
+            let eventCount = journey.reels.count + journey.pois.count
+            let availableWidth = max(maxCapsuleWidth - leadingPadding - trailingPadding, avatarSize)
+            let step = max(avatarSize - overlapSpacing, 1)
+            let baseOffset = overlapSpacing
+            let maxWithoutPlus = max(1, Int((availableWidth - baseOffset) / step))
+            if eventCount > maxWithoutPlus {
+                let plusWidth = max(avatarSize * 0.8, 18)
+                let maxWithPlus = max(1, Int((availableWidth - baseOffset - plusWidth) / step))
+                return maxWithPlus
+            }
+            return maxWithoutPlus
+        }
 
         var body: some View {
             JourneyAvatarStack(
                 journey: journey,
                 userProvider: userProvider,
                 avatarSize: avatarSize,
-                maxRows: maxRows,
-                maxVisibleCount: maxVisibleCount
+                maxRows: effectiveMaxVisibleCount == nil ? maxRows : nil,
+                maxVisibleCount: effectiveMaxVisibleCount
             )
             .padding(.vertical, verticalPadding)
             .padding(.leading, leadingPadding)
             .padding(.trailing, trailingPadding)
-            .frame(maxWidth: isCompact ? nil : .infinity, alignment: .leading)
+            .frame(maxWidth: maxCapsuleWidth, alignment: .leading)
             .background {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.white.opacity(0.08))
