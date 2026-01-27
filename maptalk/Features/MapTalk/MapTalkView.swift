@@ -19,8 +19,9 @@ struct MapTalkView: View {
     @State private var reelAlignTrigger: Int = 0
     @State private var controlsBottomPadding: CGFloat = 0
     @State private var focusedJourneyHeader: JourneyPost?
-    @State private var preFocusSnapshot: (camera: MapCameraPosition, region: MKCoordinateRegion?, selectedId: UUID?)?
+    @State private var journeyEntryStoryId: UUID?
     @State private var journeyStack: [JourneyPost] = []
+    @State private var suppressJourneySelectionUpdate: Bool = false
     @State private var detentRerenderKey: Int = 0
     @Namespace private var heroNamespace
 
@@ -54,37 +55,32 @@ struct MapTalkView: View {
                     latestTimestamp: sharers.first?.timestamp ?? (rated.checkIns.map(\.createdAt).max() ?? Date())
                 )
             }
+            let journeyStoryItems: (JourneyPost) -> [RealStoriesRow.StoryItem] = { journey in
+                let journeyPOIs = journey.pois.compactMap { rated in
+                    makePOIGroup(rated, false)
+                }
+                let items = (
+                    journey.reels.sorted { $0.createdAt > $1.createdAt }.map { RealStoriesRow.StoryItem(real: $0) } +
+                    journeyPOIs.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
+                )
+                return items.sorted { $0.timestamp > $1.timestamp }
+            }
 
             let sortedReals = viewModel.reals.sorted { $0.createdAt > $1.createdAt }
-            let baseJourneys = PreviewData.sampleJourneys
             let poiGroups = viewModel.ratedPOIs.compactMap { rated in
                 makePOIGroup(rated, true)
             }
             let baseStoryItems = (
                 sortedReals.map { RealStoriesRow.StoryItem(real: $0) } +
-                baseJourneys.map { RealStoriesRow.StoryItem(journey: $0) } +
                 poiGroups.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
             )
             .sorted { $0.timestamp > $1.timestamp }
 
-            let focusedStoryItems: [RealStoriesRow.StoryItem] = {
-                guard let journey = focusedJourneyHeader else { return [] }
-                let journeyPOIs = journey.pois.compactMap { rated in
-                    makePOIGroup(rated, false)
-                }
-                let subJourneys = PreviewData.nestedJourneys[journey.id] ?? []
-                let items = (
-                    journey.reels.sorted { $0.createdAt > $1.createdAt }.map { RealStoriesRow.StoryItem(real: $0) } +
-                    journeyPOIs.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) } +
-                    subJourneys.map { RealStoriesRow.StoryItem(journey: $0) }
-                )
-                return items.sorted { $0.timestamp > $1.timestamp }
-            }()
+            let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
 
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
 
             let storyItemIds = storyItems.map(\.id)
-            let nestedJourneys = focusedJourneyHeader.flatMap { PreviewData.nestedJourneys[$0.id] } ?? []
             let sequenceItems: [ExperienceDetailView.SequencePager.Item] = {
                 if focusedJourneyHeader != nil {
                     return storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
@@ -153,54 +149,6 @@ struct MapTalkView: View {
                     }
                 }
             }
-            let journeyBoundingTarget: (JourneyPost) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? = { journey in
-                let reelCoords = journey.reels.map(\.center)
-                let poiCoords = journey.pois.map { $0.poi.coordinate }
-                let coords = reelCoords + poiCoords
-                guard coords.isEmpty == false else { return nil }
-
-                if coords.count == 1, let coord = coords.first {
-                    let region = MKCoordinateRegion(
-                        center: coord,
-                        latitudinalMeters: 800,
-                        longitudinalMeters: 800
-                    )
-                    return (region, 800)
-                }
-
-                var mapRect = MKMapRect.null
-                for coord in coords {
-                    let point = MKMapPoint(coord)
-                    let eventRect = MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0))
-                    mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
-                }
-
-                let fallbackSize = CGSize(width: 430, height: 932)
-                let baseSize = geometry.size == .zero ? fallbackSize : geometry.size
-                let mapView = MKMapView(frame: CGRect(origin: .zero, size: baseSize))
-                // Reserve space for the header + stories row so the fitted region stays below them.
-                let headerHeight = 52.0    // title bar
-                let spacing: Double = 14.0 // spacing between title and row
-                let rowHeight = 108.0      // RealStoriesRow fixed height
-                let topInset = headerHeight + spacing + rowHeight + 8.0
-                // Bottom inset: reserve space for the collapsed card.
-                let bottomInset = 200.0
-                let edgePadding = UIEdgeInsets(
-                    top: topInset,
-                    left: 40,
-                    bottom: bottomInset,
-                    right: 40
-                )
-                let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
-                let fittedRegion = MKCoordinateRegion(fittedRect)
-
-                let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
-                let multiplier: Double = coords.count == 2 ? 3.4 : 2.2
-                let distance = max(spanMeters * multiplier, 800)
-
-                return (fittedRegion, distance)
-            }
-
             let storyItemForReal: (RealPost) -> RealStoriesRow.StoryItem? = { real in
                 storyItems.first { item in
                     if case let .real(candidate) = item.source {
@@ -217,20 +165,9 @@ struct MapTalkView: View {
                     return false
                 }
             }
-            let storyItemForJourney: (JourneyPost) -> RealStoriesRow.StoryItem? = { journey in
-                storyItems.first { item in
-                    if case let .journey(candidate) = item.source {
-                        return candidate.id == journey.id
-                    }
-                    return false
-                } ?? RealStoriesRow.StoryItem(journey: journey)
-            }
             let storyItemForId: (UUID) -> RealStoriesRow.StoryItem? = { id in
                 if let match = storyItems.first(where: { $0.id == id }) {
                     return match
-                }
-                if let journey = focusedJourneyHeader, journey.id == id {
-                    return RealStoriesRow.StoryItem(journey: journey)
                 }
                 return nil
             }
@@ -307,18 +244,20 @@ struct MapTalkView: View {
                     }
                 }
                 if focusedJourneyHeader == nil {
-                    preFocusSnapshot = (
-                        camera: cameraPosition,
-                        region: currentRegion,
-                        selectedId: selectedStoryId
-                    )
+                    journeyEntryStoryId = selectedStoryId ?? selectedRealId
                 }
                 if let parent, parent.id != journey.id {
                     journeyStack.append(parent)
                 }
                 focusedJourneyHeader = journey
-                selectedStoryId = journey.id
-                if let target = journeyBoundingTarget(journey) {
+                selectedStoryId = journeyStoryItems(journey).first?.id
+                suppressJourneySelectionUpdate = true
+                reelAlignTrigger &+= 1
+                if let target = journeyBoundingTarget(
+                    for: journey,
+                    size: geometry.size,
+                    safeAreaBottom: geometry.safeAreaInsets.bottom
+                ) {
                     pendingRegionCause = .journey
                     flightController.cancelActiveTransition()
                     withAnimation(.easeInOut(duration: 0.35)) {
@@ -332,12 +271,6 @@ struct MapTalkView: View {
                         )
                     }
                     currentRegion = target.region
-                    let preservedId = preFocusSnapshot?.selectedId ?? selectedStoryId
-                    preFocusSnapshot = (
-                        camera: cameraPosition,
-                        region: currentRegion,
-                        selectedId: preservedId
-                    )
                 } else {
                     viewModel.focus(on: journey)
                 }
@@ -386,11 +319,19 @@ struct MapTalkView: View {
                     MapOverlays(
                         ratedPOIs: focusedJourneyHeader?.pois ?? viewModel.ratedPOIs,
                         reals: focusedJourneyHeader?.reels ?? viewModel.reals,
-                        journeys: focusedJourneyHeader == nil ? baseJourneys : nestedJourneys,
+                        journeys: [],
                         userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
                         currentUser: PreviewData.currentUser,
                         heroNamespace: journeyNamespace,
-                        useTimelineStyle: focusedJourneyHeader != nil
+                        useTimelineStyle: focusedJourneyHeader != nil,
+                        onTapReal: { real in
+                            guard let item = storyItemForReal(real) else { return }
+                            selectStoryItem(item, true, false, nil)
+                        },
+                        onTapPOI: { rated in
+                            guard let item = storyItemForPOI(rated) else { return }
+                            selectStoryItem(item, true, false, nil)
+                        }
                     )
                 }
                 .ignoresSafeArea()
@@ -410,7 +351,10 @@ struct MapTalkView: View {
                                 focusJourneyFromBreadcrumb(journey)
                             },
                             onExit: {
-                                exitJourneyFocus()
+                                exitJourneyFocus(
+                                    size: geometry.size,
+                                    safeAreaBottom: geometry.safeAreaInsets.bottom
+                                )
                             }
                         )
                         .padding(.horizontal, 16)
@@ -433,12 +377,7 @@ struct MapTalkView: View {
                                     selectStoryItem(item, true, true, nil)
                                 }
                             },
-                            onSelectJourney: { journey in
-                                if let item = storyItemForJourney(journey) {
-                                    // Only focus/fly, do not open the sheet from the row.
-                                    selectStoryItem(item, true, true, .journey)
-                                }
-                            },
+                            onSelectJourney: { _ in },
                             userProvider: viewModel.user(for:),
                             alignTrigger: reelAlignTrigger
                         )
@@ -498,11 +437,7 @@ struct MapTalkView: View {
             .sheet(isPresented: $isExperiencePresented, onDismiss: {
                 experienceDetent = .fraction(ControlsLayout.previewFraction)
                 selectedRealId = nil
-                if let journey = focusedJourneyHeader {
-                    selectedStoryId = journey.id
-                } else {
-                    selectedStoryId = nil
-                }
+                selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
             }) {
                 let isExpanded = experienceDetent == .large
                 let shouldAnimateSelection = isExpanded == false
@@ -523,10 +458,12 @@ struct MapTalkView: View {
                                     return sequenceItems.first!.id
                                 },
                                 set: { newValue in
+                                    if suppressJourneySelectionUpdate {
+                                        suppressJourneySelectionUpdate = false
+                                        return
+                                    }
                                     selectedStoryId = newValue
-                                    if let journey = focusedJourneyHeader, newValue == journey.id {
-                                        handleJourneyTap(journey, false, nil)
-                                    } else if let item = storyItemForId(newValue) {
+                                    if let item = storyItemForId(newValue) {
                                         selectStoryItem(item, false, true, nil)
                                     }
                                     reelAlignTrigger += 1
@@ -615,11 +552,6 @@ struct MapTalkView: View {
                 }
             }
             .onChangeCompat(of: storyItemIds) { ids in
-                if let focused = focusedJourneyHeader {
-                    if selectedStoryId == focused.id {
-                        return
-                    }
-                }
                 if ids.isEmpty {
                     selectedRealId = nil
                     selectedStoryId = nil
@@ -637,10 +569,17 @@ struct MapTalkView: View {
                     selectedRealId = nil
                 }
             }
-            .onChangeCompat(of: selectedStoryId) { identifier in
-                if focusedJourneyHeader != nil {
+            .onChangeCompat(of: focusedJourneyHeader?.id) { identifier in
+                if identifier != nil {
                     return
                 }
+                guard let entryId = journeyEntryStoryId else { return }
+                if let item = storyItemForId(entryId) {
+                    selectStoryItem(item, true, true, nil)
+                } else {
+                    selectedStoryId = entryId
+                }
+                journeyEntryStoryId = nil
             }
             .onChangeCompat(of: isExperiencePresented) { isActive in
                 let target = isActive ? previewControlsPadding : baseControlsPadding
@@ -683,23 +622,26 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
-    func region(for item: RealStoriesRow.StoryItem) -> MKCoordinateRegion? {
-        switch item.source {
-        case let .real(real):
-            return viewModel.region(for: real)
-        case let .poi(group):
-            return viewModel.region(for: group.ratedPOI)
-        case let .journey(journey):
-            return viewModel.region(for: journey)
-        }
+    func journeyBottomInset(for size: CGSize, safeAreaBottom: CGFloat) -> CGFloat {
+        size.height * ControlsLayout.previewFraction + safeAreaBottom
     }
 
-    func journeyFallbackTarget(for journey: JourneyPost) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
-        let coords = journey.reels.map(\.center) + journey.pois.map { $0.poi.coordinate }
+    func journeyBoundingTarget(
+        for journey: JourneyPost,
+        size: CGSize,
+        safeAreaBottom: CGFloat
+    ) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
+        let reelCoords = journey.reels.map(\.center)
+        let poiCoords = journey.pois.map { $0.poi.coordinate }
+        let coords = reelCoords + poiCoords
         guard coords.isEmpty == false else { return nil }
 
         if coords.count == 1, let coord = coords.first {
-            let region = MKCoordinateRegion(center: coord, latitudinalMeters: 800, longitudinalMeters: 800)
+            let region = MKCoordinateRegion(
+                center: coord,
+                latitudinalMeters: 800,
+                longitudinalMeters: 800
+            )
             return (region, 800)
         }
 
@@ -710,19 +652,36 @@ private extension MapTalkView {
             mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
         }
 
-        let baseSize = CGSize(width: 430, height: 932)
+        let fallbackSize = CGSize(width: 430, height: 932)
+        let baseSize = size == .zero ? fallbackSize : size
         let mapView = MKMapView(frame: CGRect(origin: .zero, size: baseSize))
-        let topInset = 52.0 + 14.0 + 108.0 + 8.0
-        let bottomInset = 200.0
+        // Reserve space for the header + stories row so the fitted region stays below them.
+        let headerHeight = 52.0    // title bar
+        let spacing: Double = 14.0 // spacing between title and row
+        let rowHeight = 108.0      // RealStoriesRow fixed height
+        let topInset = headerHeight + spacing + rowHeight + 20.0
+        // Bottom inset: reserve space for the collapsed card.
+        let bottomInset = max(0, journeyBottomInset(for: baseSize, safeAreaBottom: safeAreaBottom) - 48.0)
         let edgePadding = UIEdgeInsets(top: topInset, left: 40, bottom: bottomInset, right: 40)
         let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
         let fittedRegion = MKCoordinateRegion(fittedRect)
 
         let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
-        let multiplier: Double = coords.count == 2 ? 2.0 : 2.2
-        let distance = max(spanMeters * multiplier, 240)
+        let multiplier: Double = coords.count == 2 ? 3.4 : 2.2
+        let distance = max(spanMeters * multiplier, 800)
 
         return (fittedRegion, distance)
+    }
+
+    func region(for item: RealStoriesRow.StoryItem) -> MKCoordinateRegion? {
+        switch item.source {
+        case let .real(real):
+            return viewModel.region(for: real)
+        case let .poi(group):
+            return viewModel.region(for: group.ratedPOI)
+        case let .journey(journey):
+            return viewModel.region(for: journey)
+        }
     }
 
     @ViewBuilder
@@ -850,12 +809,15 @@ private extension MapTalkView {
         }
     }
 
-    func exitJourneyFocus() {
+    func exitJourneyFocus(size: CGSize, safeAreaBottom: CGFloat) {
         let currentJourney = focusedJourneyHeader
         if let parent = journeyStack.popLast() {
             focusedJourneyHeader = parent
-            selectedStoryId = parent.id
-            if let target = journeyFallbackTarget(for: parent) {
+            if let target = journeyBoundingTarget(
+                for: parent,
+                size: size,
+                safeAreaBottom: safeAreaBottom
+            ) {
                 withAnimation(.easeInOut(duration: 0.35)) {
                     cameraPosition = .camera(
                         MapCamera(
@@ -877,22 +839,10 @@ private extension MapTalkView {
             activeExperience = .sequence(nonce: UUID())
             isExperiencePresented = true
             experienceDetent = .fraction(ControlsLayout.previewFraction)
-            preFocusSnapshot = nil
             return
         }
         focusedJourneyHeader = nil
-        preFocusSnapshot = nil
-        if let journey = currentJourney {
-            selectedStoryId = journey.id
-            let region = viewModel.region(for: journey)
-            withAnimation(.easeInOut(duration: 0.35)) {
-                cameraPosition = .region(region)
-            }
-            currentRegion = region
-            activeExperience = .sequence(nonce: UUID())
-            isExperiencePresented = true
-            experienceDetent = .fraction(ControlsLayout.previewFraction)
-        } else {
+        if journeyEntryStoryId == nil, currentJourney == nil {
             activeExperience = nil
             isExperiencePresented = false
             experienceDetent = .fraction(ControlsLayout.previewFraction)

@@ -124,7 +124,8 @@ extension ExperienceDetailView {
                 style: .collapsed,
                 userProvider: userProvider,
                 hideMedia: isSplitLayout,
-                useTallLayout: useTallLayout
+                useTallLayout: useTallLayout,
+                onCapsuleTap: onJourneyAvatarStackTap
             )
             .padding(.horizontal, 12)
             .padding(.top, 12)

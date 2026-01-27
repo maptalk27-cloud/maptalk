@@ -9,6 +9,8 @@ struct MapOverlays: MapContent {
     let currentUser: User
     let heroNamespace: Namespace.ID?
     let useTimelineStyle: Bool
+    let onTapReal: ((RealPost) -> Void)?
+    let onTapPOI: ((RatedPOI) -> Void)?
 
     var body: some MapContent {
         ForEach(reals) { real in
@@ -32,11 +34,27 @@ struct MapOverlays: MapContent {
                         return AnyView(RealAvatarMarker(user: PreviewData.user(for: real.userId)))
                     }
                 }()
-                if let heroNamespace {
-                    baseMarker
-                        .matchedGeometryEffect(id: "real-\(real.id)", in: heroNamespace, isSource: true)
+                let marker: AnyView = {
+                    if let heroNamespace {
+                        return AnyView(
+                            baseMarker.matchedGeometryEffect(
+                                id: "real-\(real.id)",
+                                in: heroNamespace,
+                                isSource: true
+                            )
+                        )
+                    }
+                    return baseMarker
+                }()
+
+                if let onTapReal {
+                    marker
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onTapReal(real)
+                        }
                 } else {
-                    baseMarker
+                    marker
                 }
             }
         }
@@ -45,15 +63,31 @@ struct MapOverlays: MapContent {
         ForEach(ratedPOIs) { rated in
             let isRecent = rated.hasRecentPhotoShare
             Annotation("", coordinate: rated.poi.coordinate) {
-                if useTimelineStyle {
-                    UserMapMarker(category: rated.poi.category)
-                        .frame(width: 24, height: 26)
+                let marker: AnyView = {
+                    if useTimelineStyle {
+                        return AnyView(
+                            UserMapMarker(category: rated.poi.category)
+                                .frame(width: 24, height: 26)
+                        )
+                    } else {
+                        return AnyView(
+                            POICategoryMarker(
+                                category: rated.poi.category,
+                                count: rated.checkIns.count,
+                                isRecentHighlight: isRecent
+                            )
+                        )
+                    }
+                }()
+
+                if let onTapPOI {
+                    marker
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            onTapPOI(rated)
+                        }
                 } else {
-                    POICategoryMarker(
-                        category: rated.poi.category,
-                        count: rated.checkIns.count,
-                        isRecentHighlight: isRecent
-                    )
+                    marker
                 }
             }
         }

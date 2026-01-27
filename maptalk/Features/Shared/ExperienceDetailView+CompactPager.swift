@@ -19,6 +19,7 @@ struct CompactRealCard: View {
     let hideHeader: Bool
     let hideMedia: Bool
     let useTallLayout: Bool
+    let onCapsuleTap: ((JourneyPost) -> Void)?
 
     @State private var isLightboxPresented = false
     @State private var lightboxSelection: UUID
@@ -33,7 +34,8 @@ struct CompactRealCard: View {
         suppressContent: Bool = false,
         hideHeader: Bool = false,
         hideMedia: Bool = false,
-        useTallLayout: Bool = false
+        useTallLayout: Bool = false,
+        onCapsuleTap: ((JourneyPost) -> Void)? = nil
     ) {
         self.real = real
         self.user = user
@@ -45,6 +47,7 @@ struct CompactRealCard: View {
         self.hideHeader = hideHeader
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.onCapsuleTap = onCapsuleTap
         _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
 
@@ -74,7 +77,8 @@ struct CompactRealCard: View {
                         CapsuleAttachmentCard(
                             journey: capsule,
                             userProvider: userProvider,
-                            style: style
+                            style: style,
+                            onTap: onCapsuleTap
                         )
                     }
                 }
@@ -89,7 +93,8 @@ struct CompactRealCard: View {
                         userProvider: userProvider,
                         style: style,
                         isCompact: true,
-                        maxVisibleCount: 3
+                        maxVisibleCount: 3,
+                        onTap: onCapsuleTap
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 6)
@@ -721,19 +726,22 @@ struct CompactRealCard: View {
         let style: CompactRealCard.Style
         let isCompact: Bool
         let maxVisibleCount: Int?
+        let onTap: ((JourneyPost) -> Void)?
 
         init(
             journey: JourneyPost,
             userProvider: @escaping (UUID) -> User?,
             style: CompactRealCard.Style,
             isCompact: Bool = false,
-            maxVisibleCount: Int? = nil
+            maxVisibleCount: Int? = nil,
+            onTap: ((JourneyPost) -> Void)? = nil
         ) {
             self.journey = journey
             self.userProvider = userProvider
             self.style = style
             self.isCompact = isCompact
             self.maxVisibleCount = maxVisibleCount
+            self.onTap = onTap
         }
 
         private var avatarSize: CGFloat { isCompact ? 26 : 34 }
@@ -767,6 +775,10 @@ struct CompactRealCard: View {
                     .padding(.leading, -backgroundBleed)
             }
             .contentShape(Rectangle())
+            .onTapGesture {
+                onTap?(journey)
+            }
+            .accessibilityAddTraits(.isButton)
         }
     }
 

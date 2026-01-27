@@ -32,7 +32,8 @@ struct ExperiencePanel: View {
                     HeroSection(
                         model: hero,
                         style: .standard,
-                        userProvider: userProvider
+                        userProvider: userProvider,
+                        onCapsuleTap: onJourneyAvatarStackTap
                     )
                         .padding(.horizontal, isSingleVideoHero ? 0 : 4)
 
@@ -638,19 +639,22 @@ struct HeroSection: View {
     let userProvider: (UUID) -> User?
     let hideMedia: Bool
     let useTallLayout: Bool
+    let onCapsuleTap: ((JourneyPost) -> Void)?
 
     init(
         model: ExperienceDetailView.HeroSectionModel,
         style: CompactRealCard.Style,
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         hideMedia: Bool = false,
-        useTallLayout: Bool = false
+        useTallLayout: Bool = false,
+        onCapsuleTap: ((JourneyPost) -> Void)? = nil
     ) {
         self.model = model
         self.style = style
         self.userProvider = userProvider
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.onCapsuleTap = onCapsuleTap
     }
 
     var body: some View {
@@ -664,7 +668,8 @@ struct HeroSection: View {
             suppressContent: model.suppressContent,
             hideHeader: false,
             hideMedia: hideMedia,
-            useTallLayout: useTallLayout
+            useTallLayout: useTallLayout,
+            onCapsuleTap: onCapsuleTap
         )
     }
 }
