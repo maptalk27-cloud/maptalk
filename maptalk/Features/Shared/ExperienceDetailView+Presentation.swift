@@ -30,7 +30,10 @@ extension ExperienceDetailView {
                                 openRecentSharer(at: index, using: data)
                             },
                             userProvider: userProvider,
-                            onJourneyAvatarStackTap: onJourneyAvatarStackTap
+                            onJourneyAvatarStackTap: onJourneyAvatarStackTap,
+                            onUserSelected: openProfile,
+                            onPOIContributorViewed: onPOIContributorViewed,
+                            isPOIContributorUnseen: isPOIContributorUnseen
                         )
                         .tag(item.id)
                     }
@@ -43,7 +46,10 @@ extension ExperienceDetailView {
                         openRecentSharer(at: index, using: content)
                     },
                     userProvider: userProvider,
-                    onJourneyAvatarStackTap: onJourneyAvatarStackTap
+                    onJourneyAvatarStackTap: onJourneyAvatarStackTap,
+                    onUserSelected: openProfile,
+                    onPOIContributorViewed: onPOIContributorViewed,
+                    isPOIContributorUnseen: isPOIContributorUnseen
                 )
             }
         }
@@ -87,6 +93,7 @@ extension ExperienceDetailView {
                 user: journey.user,
                 style: .collapsed,
                 userProvider: userProvider,
+                onUserTap: openProfile,
                 onAvatarStackTap: {
                     onJourneyAvatarStackTap?(journey.journey)
                 }
@@ -100,7 +107,8 @@ extension ExperienceDetailView {
                 recentSharers: data.recentSharers,
                 onRecentSharerSelected: { index in
                     openRecentSharer(at: index, using: data)
-                }
+                },
+                isContributorUnseen: isPOIContributorUnseen
             )
         } else {
             VStack(spacing: 12) {
@@ -125,6 +133,7 @@ extension ExperienceDetailView {
                 userProvider: userProvider,
                 hideMedia: isSplitLayout,
                 useTallLayout: useTallLayout,
+                onUserSelected: openProfile,
                 onCapsuleTap: onJourneyAvatarStackTap
             )
             .padding(.horizontal, 12)

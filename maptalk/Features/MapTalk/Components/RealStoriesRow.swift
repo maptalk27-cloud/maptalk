@@ -1,10 +1,17 @@
 import SwiftUI
 
 struct RealStoriesRow: View {
+    enum DisplayMode {
+        case people
+        case content
+    }
+
     struct POISharer: Identifiable {
         let id: UUID
         let user: User?
         let timestamp: Date
+        let hasStory: Bool
+        let readKeys: [String]
     }
 
     struct POIStoryGroup: Identifiable {
@@ -16,6 +23,12 @@ struct RealStoriesRow: View {
         var poiName: String { ratedPOI.poi.name }
         var category: POICategory { ratedPOI.poi.category }
         var primarySharers: [POISharer] { sharers }
+
+        var unreadCandidateKeys: [String] {
+            sharers
+                .filter { $0.hasStory && StoryReadKeys.isFresh($0.timestamp) }
+                .flatMap(\.readKeys)
+        }
     }
 
     struct StoryItem: Identifiable {
@@ -62,6 +75,8 @@ struct RealStoriesRow: View {
     let onSelectJourney: (JourneyPost) -> Void
     let userProvider: (UUID) -> User?
     let alignTrigger: Int
+    let displayMode: DisplayMode
+    let isUnseen: (StoryItem) -> Bool
 
     init(
         items: [StoryItem],
@@ -70,7 +85,9 @@ struct RealStoriesRow: View {
         onSelectPOIGroup: @escaping (POIStoryGroup) -> Void,
         onSelectJourney: @escaping (JourneyPost) -> Void,
         userProvider: @escaping (UUID) -> User?,
-        alignTrigger: Int
+        alignTrigger: Int,
+        displayMode: DisplayMode = .people,
+        isUnseen: @escaping (StoryItem) -> Bool = { _ in false }
     ) {
         self.items = items
         self.selectedId = selectedId
@@ -79,6 +96,8 @@ struct RealStoriesRow: View {
         self.onSelectJourney = onSelectJourney
         self.userProvider = userProvider
         self.alignTrigger = alignTrigger
+        self.displayMode = displayMode
+        self.isUnseen = isUnseen
     }
 
     private let spacing: CGFloat = 16
@@ -103,28 +122,26 @@ struct RealStoriesRow: View {
 
     @ViewBuilder
     private func storyButton(for item: StoryItem, isSelected: Bool) -> some View {
+        let itemIsUnseen = isUnseen(item)
         switch item.source {
         case let .real(real):
-            realButton(for: real, isSelected: isSelected)
+            realButton(for: real, isSelected: isSelected, isUnseen: itemIsUnseen)
         case let .poi(group):
-            poiButton(for: group, isSelected: isSelected)
+            poiButton(for: group, isSelected: isSelected, isUnseen: itemIsUnseen)
         case let .journey(journey):
-            journeyButton(for: journey, isSelected: isSelected)
+            journeyButton(for: journey, isSelected: isSelected, isUnseen: itemIsUnseen)
         }
     }
 
-    private func realButton(for real: RealPost, isSelected: Bool) -> some View {
+    private func realButton(for real: RealPost, isSelected: Bool, isUnseen: Bool) -> some View {
         let user = userProvider(real.userId)
         return Button {
             onSelectReal(real)
         } label: {
             VStack(spacing: 6) {
-                RealStoryBadge(
-                    user: user,
-                    isSelected: isSelected
-                )
+                realBadge(for: real, user: user, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
-                Text(user?.handle ?? "you")
+                Text(realLabel(for: real, user: user))
                     .font(.caption2.weight(.thin))
                     .foregroundStyle(.black)
                     .lineLimit(1)
@@ -137,12 +154,12 @@ struct RealStoriesRow: View {
         .buttonStyle(.plain)
     }
 
-    private func poiButton(for group: POIStoryGroup, isSelected: Bool) -> some View {
+    private func poiButton(for group: POIStoryGroup, isSelected: Bool, isUnseen: Bool) -> some View {
         Button {
             onSelectPOIGroup(group)
         } label: {
             VStack(spacing: 6) {
-                POIStoryGroupBadge(group: group, isSelected: isSelected)
+                poiBadge(for: group, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
                 Text(group.poiName)
                     .font(.caption2.weight(.thin))
@@ -157,19 +174,15 @@ struct RealStoriesRow: View {
         .buttonStyle(.plain)
     }
 
-    private func journeyButton(for journey: JourneyPost, isSelected: Bool) -> some View {
+    private func journeyButton(for journey: JourneyPost, isSelected: Bool, isUnseen: Bool) -> some View {
         let user = userProvider(journey.userId)
         return Button {
             onSelectJourney(journey)
         } label: {
             VStack(spacing: 6) {
-                JourneyStoryBadge(
-                    user: user,
-                    label: "journey",
-                    isSelected: isSelected
-                )
+                journeyBadge(for: journey, user: user, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
-                Text(user?.handle ?? "you")
+                Text(journeyLabel(for: journey, user: user))
                     .font(.caption2.weight(.thin))
                     .foregroundStyle(.black)
                     .lineLimit(1)
@@ -180,6 +193,58 @@ struct RealStoriesRow: View {
             .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: isSelected)
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func realBadge(for real: RealPost, user: User?, isSelected: Bool, isUnseen: Bool) -> some View {
+        RealStoryBadge(
+            real: real,
+            user: user,
+            displayMode: displayMode,
+            isSelected: isSelected,
+            isUnseen: isUnseen
+        )
+    }
+
+    @ViewBuilder
+    private func poiBadge(for group: POIStoryGroup, isSelected: Bool, isUnseen: Bool) -> some View {
+        POIStoryGroupBadge(
+            group: group,
+            displayMode: displayMode,
+            isSelected: isSelected,
+            isUnseen: isUnseen
+        )
+    }
+
+    @ViewBuilder
+    private func journeyBadge(for journey: JourneyPost, user: User?, isSelected: Bool, isUnseen: Bool) -> some View {
+        JourneyStoryBadge(
+            journey: journey,
+            user: user,
+            displayMode: displayMode,
+            isSelected: isSelected,
+            isUnseen: isUnseen
+        )
+    }
+
+    private func realLabel(for real: RealPost, user: User?) -> String {
+        switch displayMode {
+        case .people:
+            return user?.handle ?? "you"
+        case .content:
+            let text = real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text?.isEmpty == false ? (text ?? "Reel") : "Reel"
+        }
+    }
+
+    private func journeyLabel(for journey: JourneyPost, user: User?) -> String {
+        switch displayMode {
+        case .people:
+            return user?.handle ?? "you"
+        case .content:
+            let text = journey.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? "Journey" : text
+        }
     }
 
     private func centerOnSelected(using proxy: ScrollViewProxy, animated: Bool) {
@@ -211,65 +276,157 @@ struct RealStoriesRow: View {
 }
 
 private struct RealStoryBadge: View {
+    let real: RealPost?
     let user: User?
+    let displayMode: RealStoriesRow.DisplayMode
     let isSelected: Bool
+    let isUnseen: Bool
+    private let contentDiameter: CGFloat = 60
+    private let ringDiameter: CGFloat = 68
 
     var body: some View {
         ZStack {
-            Circle()
-                .strokeBorder(
-                    AngularGradient(
-                        gradient: Gradient(colors: [
-                            Theme.neonPrimary,
-                            Theme.neonAccent,
-                            Theme.neonWarning,
-                            Theme.neonPrimary
-                        ]),
-                        center: .center
-                    ),
-                    lineWidth: 3
-                )
-                .frame(width: 66, height: 66)
-                .shadow(color: Theme.neonPrimary.opacity(0.6), radius: 12)
+            outerRing
 
             Circle()
                 .fill(.black.opacity(0.45))
-                .frame(width: 62, height: 62)
+                .frame(width: contentDiameter, height: contentDiameter)
                 .overlay {
                     Circle()
                         .stroke(Color.white.opacity(0.25), lineWidth: 1)
                 }
 
-            if let url = user?.avatarURL {
-                AsyncImage(url: url) { image in
+            content
+        }
+        .frame(width: 70, height: 70)
+    }
+
+    private var outerRing: some View {
+        StoryStatusCircleRing(
+            diameter: ringDiameter,
+            isUnseen: isUnseen,
+            unreadLineWidth: 2.6,
+            seenLineWidth: 1.5,
+            unreadShadowRadius: 7
+        )
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch displayMode {
+        case .people:
+            avatar
+        case .content:
+            realPreview
+        }
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        if let url = user?.avatarURL {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case let .success(image):
                     image
                         .resizable()
                         .scaledToFill()
-                } placeholder: {
-                    ProgressView()
+                case .empty:
+                    initialsAvatar
+                        .overlay {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                default:
+                    initialsAvatar
                 }
-                .frame(width: 60, height: 60)
-                .clipShape(Circle())
+            }
+            .frame(width: contentDiameter, height: contentDiameter)
+            .clipShape(Circle())
+        } else {
+            initialsAvatar
+        }
+    }
+
+    private var realPreview: some View {
+        Group {
+            if let real, let url = previewURL(for: real) {
+                remoteImage(url: url)
+            } else if let real, let emoji = firstEmoji(in: real.attachments) {
+                fallback(symbol: emoji, color: Theme.neonPrimary)
             } else {
-                Text(initials)
-                    .font(.headline.bold())
-                    .foregroundStyle(.black)
+                avatar
             }
         }
-        .frame(width: 70, height: 70)
-        .overlay(alignment: .bottomTrailing) {
-            if isSelected {
-                Circle()
-                    .fill(Theme.neonPrimary)
-                    .frame(width: 18, height: 18)
+        .frame(width: contentDiameter, height: contentDiameter)
+        .clipShape(Circle())
+    }
+
+    @ViewBuilder
+    private func remoteImage(url: URL) -> some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case let .success(image):
+                image
+                    .resizable()
+                    .scaledToFill()
+            case .empty:
+                avatar
                     .overlay {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white)
+                        ProgressView()
+                            .controlSize(.mini)
                     }
-                    .offset(x: 4, y: 4)
+            default:
+                avatar
             }
         }
+    }
+
+    private var initialsAvatar: some View {
+        Text(initials)
+            .font(.headline.bold())
+            .foregroundStyle(.black)
+            .frame(width: contentDiameter, height: contentDiameter)
+            .background(Color.white.opacity(0.72), in: Circle())
+    }
+
+    private func fallback(systemImage: String, color: Color) -> some View {
+        ZStack {
+            color.opacity(0.16)
+            Image(systemName: systemImage)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(color)
+        }
+    }
+
+    private func fallback(symbol: String, color: Color) -> some View {
+        ZStack {
+            color.opacity(0.16)
+            Text(symbol)
+                .font(.title2)
+        }
+    }
+
+    private func previewURL(for real: RealPost) -> URL? {
+        for attachment in real.attachments {
+            switch attachment.kind {
+            case let .photo(url):
+                return url
+            case let .video(_, poster):
+                if let poster { return poster }
+            case .emoji:
+                continue
+            }
+        }
+        return nil
+    }
+
+    private func firstEmoji(in attachments: [RealPost.Attachment]) -> String? {
+        attachments.compactMap { attachment in
+            if case let .emoji(emoji) = attachment.kind {
+                return emoji
+            }
+            return nil
+        }.first
     }
 
     private var initials: String {
@@ -279,61 +436,115 @@ private struct RealStoryBadge: View {
 }
 
 private struct JourneyStoryBadge: View {
+    let journey: JourneyPost?
     let user: User?
-    let label: String
+    let displayMode: RealStoriesRow.DisplayMode
     let isSelected: Bool
+    let isUnseen: Bool
+    private let contentDiameter: CGFloat = 60
+    private let ringDiameter: CGFloat = 68
 
     var body: some View {
         ZStack {
+            outerRing
+
             Circle()
                 .fill(.black.opacity(0.45))
-                .frame(width: 62, height: 62)
+                .frame(width: contentDiameter, height: contentDiameter)
                 .overlay {
                     Circle()
                         .stroke(Color.white.opacity(0.2), lineWidth: 1)
                 }
 
-            if let url = user?.avatarURL {
-                AsyncImage(url: url) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    ProgressView()
-                }
-                .frame(width: 60, height: 60)
-                .clipShape(Circle())
-            } else {
-                Text(initials)
-                    .font(.headline.bold())
-                    .foregroundStyle(.black)
-            }
+            content
         }
         .frame(width: 70, height: 70)
         .overlay(alignment: .bottom) {
-            Text(label)
-                .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(Color.black.opacity(0.75), in: Capsule(style: .continuous))
-                .overlay {
-                    Capsule(style: .continuous)
-                        .stroke(Color.white.opacity(0.3), lineWidth: 0.6)
-                }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            if isSelected {
-                Circle()
-                    .fill(Theme.neonPrimary)
-                    .frame(width: 18, height: 18)
+            if let label = bottomLabel {
+                Text(label)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.75), in: Capsule(style: .continuous))
                     .overlay {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white)
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.3), lineWidth: 0.6)
                     }
-                    .offset(x: 6, y: 6)
             }
+        }
+    }
+
+    private var outerRing: some View {
+        StoryStatusCircleRing(
+            diameter: ringDiameter,
+            isUnseen: isUnseen,
+            unreadLineWidth: 2.6,
+            seenLineWidth: 1.5,
+            unreadShadowRadius: 6
+        )
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch displayMode {
+        case .people:
+            avatar
+        case .content:
+            journeyMark
+        }
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        if let url = user?.avatarURL {
+            AsyncImage(url: url) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+            } placeholder: {
+                ProgressView()
+            }
+            .frame(width: contentDiameter, height: contentDiameter)
+            .clipShape(Circle())
+        } else {
+            Text(initials)
+                .font(.headline.bold())
+                .foregroundStyle(.black)
+        }
+    }
+
+    private var journeyMark: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Theme.neonAccent.opacity(0.95),
+                    Theme.neonPrimary.opacity(0.65),
+                    Color.black.opacity(0.55)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            Image(systemName: "map.fill")
+                .font(.title2.weight(.bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+
+            Text(journey?.displayLabel.prefix(1).uppercased() ?? "J")
+                .font(.caption2.weight(.heavy))
+                .foregroundStyle(.white.opacity(0.85))
+                .offset(x: 14, y: 14)
+        }
+        .frame(width: contentDiameter, height: contentDiameter)
+        .clipShape(Circle())
+    }
+
+    private var bottomLabel: String? {
+        switch displayMode {
+        case .people:
+            return "journey"
+        case .content:
+            return nil
         }
     }
 
@@ -345,35 +556,62 @@ private struct JourneyStoryBadge: View {
 
 private struct POIStoryGroupBadge: View {
     let group: RealStoriesRow.POIStoryGroup
+    let displayMode: RealStoriesRow.DisplayMode
     let isSelected: Bool
+    let isUnseen: Bool
 
     var body: some View {
-        let displayedSharers = Array(group.primarySharers.prefix(4))
         ZStack {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: group.category.markerGradientColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
+            switch displayMode {
+            case .people:
+                peopleCluster
+            case .content:
+                poiMark
+            }
+        }
+        .frame(width: 72, height: 72)
+    }
+
+    private var peopleCluster: some View {
+        let displayedSharers = Array(group.primarySharers.prefix(4))
+        return ZStack {
+            ZStack {
+                StoryStatusDiamondRing(
+                    size: 62,
+                    isUnseen: isUnseen,
+                    cornerRadius: 8,
+                    unreadLineWidth: 2.3,
+                    seenLineWidth: 1.1,
+                    unreadShadowRadius: 5
                 )
-                .frame(width: 44, height: 44)
-                .rotationEffect(.degrees(45))
-                .shadow(color: group.category.markerGradientColors.last?.opacity(0.35) ?? .black.opacity(0.35), radius: 6)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
-                        .rotationEffect(.degrees(45))
-                }
-                .offset(y: 8)
-                .overlay {
-                    Image(systemName: group.category.symbolName)
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
-                        .offset(y: 6)
-                }
+
+                RoundedDiamond(cornerRadius: 7)
+                    .fill(
+                        LinearGradient(
+                            colors: group.category.markerGradientColors,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 52, height: 52)
+                    .shadow(
+                        color: isUnseen
+                            ? Theme.unreadRingColor.opacity(0.18)
+                            : (group.category.markerGradientColors.last?.opacity(0.3) ?? .black.opacity(0.3)),
+                        radius: isUnseen ? 6 : 5
+                    )
+
+                RoundedDiamond(cornerRadius: 7)
+                    .stroke(Color.white.opacity(0.26), lineWidth: 1)
+                    .frame(width: 52, height: 52)
+
+                Image(systemName: group.category.symbolName)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                    .offset(y: 2)
+            }
+            .offset(y: 8)
 
             ForEach(Array(displayedSharers.enumerated()), id: \.element.id) { index, sharer in
                 AvatarThumbnail(user: sharer.user)
@@ -393,20 +631,57 @@ private struct POIStoryGroupBadge: View {
                     .offset(x: 22, y: -8)
             }
         }
-                .frame(width: 72, height: 72)
-        .overlay(alignment: .bottomTrailing) {
-            if isSelected {
-                Circle()
-                    .fill(Theme.neonPrimary)
-                    .frame(width: 18, height: 18)
-                    .overlay {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                    .offset(x: 6, y: 6)
-            }
+    }
+
+    private var poiMark: some View {
+        ZStack {
+            StoryStatusDiamondRing(
+                size: 66,
+                isUnseen: isUnseen,
+                cornerRadius: 9,
+                unreadLineWidth: 2.4,
+                seenLineWidth: 1.2,
+                unreadShadowRadius: 5
+            )
+
+            RoundedDiamond(cornerRadius: 8)
+                .fill(
+                    LinearGradient(
+                        colors: group.category.markerGradientColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 56, height: 56)
+                .shadow(color: group.category.markerGradientColors.last?.opacity(0.28) ?? .black.opacity(0.28), radius: 4, y: 3)
+
+            RoundedDiamond(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.32), lineWidth: 1)
+                .frame(width: 56, height: 56)
+
+            Image(systemName: group.category.symbolName)
+                .font(.title2.weight(.bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
         }
+    }
+
+    private var poiRingColor: Color {
+        if isUnseen {
+            return Theme.unreadRingColor.opacity(0.9)
+        }
+        return Color.white.opacity(0.55)
+    }
+
+    private var poiRingWidth: CGFloat {
+        return isUnseen ? 2.4 : 1
+    }
+
+    private var poiShadowColor: Color {
+        if isUnseen {
+            return Theme.unreadRingColor.opacity(0.35)
+        }
+        return group.category.markerGradientColors.last?.opacity(0.2) ?? .black.opacity(0.2)
     }
 
     private func avatarSize(for count: Int) -> CGFloat {

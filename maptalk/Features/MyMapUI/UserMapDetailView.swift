@@ -1233,8 +1233,10 @@ private struct UserMapPOICard: View {
     let mapUser: User
     let userProvider: (UUID) -> User?
 
+    @Environment(\.appEnv) private var environment
     @State private var isStoryViewerPresented = false
     @State private var storyStartIndex: Int = 0
+    @State private var selectedProfileContext: UserMapViewModel.Context?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1334,15 +1336,28 @@ private struct UserMapPOICard: View {
             ExperienceDetailView.POIStoryViewer(
                 contributors: storyContributors,
                 initialIndex: storyStartIndex,
-                accentColor: rated.poi.category.accentColor
+                accentColor: rated.poi.category.accentColor,
+                onUserSelected: openProfile
             ) {
                 isStoryViewerPresented = false
+            }
+        }
+        .fullScreenCover(item: $selectedProfileContext) { context in
+            NavigationStack {
+                UserProfileView(
+                    viewModel: .init(environment: environment, context: context),
+                    showsCloseButton: true
+                )
             }
         }
     }
 
     private var currentUser: User {
         userProvider(mapUser.id) ?? mapUser
+    }
+
+    private func openProfile(for user: User) {
+        selectedProfileContext = .profileContext(for: user)
     }
 
     private var initialContributorIndex: Int {
@@ -1370,7 +1385,13 @@ private struct UserMapPOICard: View {
                         return ExperienceDetailView.POIStoryContributor.Item(
                             id: media.id,
                             media: displayItem,
-                            timestamp: checkIn.createdAt
+                            timestamp: checkIn.createdAt,
+                            readKey: StoryReadKeys.poiStoryPage(
+                                poiId: rated.id,
+                                checkInId: checkIn.id,
+                                mediaId: media.id,
+                                timestamp: checkIn.createdAt
+                            )
                         )
                     }
                 }
@@ -1393,7 +1414,13 @@ private struct UserMapPOICard: View {
             return ExperienceDetailView.POIStoryContributor.Item(
                 id: media.id,
                 media: displayItem,
-                timestamp: Date()
+                timestamp: Date(),
+                readKey: StoryReadKeys.poiStoryPage(
+                    poiId: rated.id,
+                    checkInId: media.id,
+                    mediaId: media.id,
+                    timestamp: Date(timeIntervalSinceReferenceDate: 0)
+                )
             )
         }
         guard mediaItems.isEmpty == false else { return [] }

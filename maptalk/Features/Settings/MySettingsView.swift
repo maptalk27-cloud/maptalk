@@ -12,22 +12,21 @@ struct MySettingsView: View {
         NavigationStack {
             List {
                 Section {
-                    Button {
-                        // Open profile home if needed
+                    NavigationLink {
+                        UserProfileView(
+                            viewModel: .init(environment: environment, context: .me)
+                        )
                     } label: {
                         HStack(spacing: 12) {
                             UserAvatarView(user: user, size: 64)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("@\(user.handle)")
                                     .font(.headline)
-                                    .foregroundColor(.black)
                                 Text("Profile and account")
                                     .font(.subheadline)
-                                    .foregroundColor(.gray)
+                                    .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundColor(.gray.opacity(0.6))
                         }
                         .padding(.vertical, 4)
                     }

@@ -8,6 +8,9 @@ struct ExperiencePanel: View {
     let onRecentSharerSelected: ((Int, ExperienceDetailView.ContentData) -> Void)?
     let userProvider: (UUID) -> User?
     let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
+    let onUserSelected: (User) -> Void
+    let onPOIContributorViewed: ([String]) -> Void
+    let isPOIContributorUnseen: ([String]) -> Bool
 
     var body: some View {
         ScrollView {
@@ -18,6 +21,7 @@ struct ExperiencePanel: View {
                         user: journey.user,
                         style: .standard,
                         userProvider: userProvider,
+                        onUserTap: onUserSelected,
                         onAvatarStackTap: {
                             onJourneyAvatarStackTap?(journey.journey)
                         }
@@ -25,7 +29,13 @@ struct ExperiencePanel: View {
                     .padding(.horizontal, 4)
 
                     if data.engagement.hasContent {
-                        EngagementSection(model: data.engagement, accentColor: data.accentColor)
+                        EngagementSection(
+                            model: data.engagement,
+                            accentColor: data.accentColor,
+                            onUserSelected: onUserSelected,
+                            onPOIContributorViewed: onPOIContributorViewed,
+                            isPOIContributorUnseen: isPOIContributorUnseen
+                        )
                             .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                     }
                 } else if let hero = data.hero {
@@ -33,12 +43,19 @@ struct ExperiencePanel: View {
                         model: hero,
                         style: .standard,
                         userProvider: userProvider,
+                        onUserSelected: onUserSelected,
                         onCapsuleTap: onJourneyAvatarStackTap
                     )
                         .padding(.horizontal, isSingleVideoHero ? 0 : 4)
 
                     if data.engagement.hasContent {
-                        EngagementSection(model: data.engagement, accentColor: data.accentColor)
+                        EngagementSection(
+                            model: data.engagement,
+                            accentColor: data.accentColor,
+                            onUserSelected: onUserSelected,
+                            onPOIContributorViewed: onPOIContributorViewed,
+                            isPOIContributorUnseen: isPOIContributorUnseen
+                        )
                             .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                     }
                 } else {
@@ -73,7 +90,8 @@ struct ExperiencePanel: View {
                     recentSharers: data.recentSharers,
                     onRecentSharerSelected: { index in
                         onRecentSharerSelected?(index, data)
-                    }
+                    },
+                    isContributorUnseen: isPOIContributorUnseen
                 )
                 .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
 
@@ -83,7 +101,13 @@ struct ExperiencePanel: View {
                 }
 
                 if data.engagement.hasContent {
-                    EngagementSection(model: data.engagement, accentColor: data.accentColor)
+                    EngagementSection(
+                        model: data.engagement,
+                        accentColor: data.accentColor,
+                        onUserSelected: onUserSelected,
+                        onPOIContributorViewed: onPOIContributorViewed,
+                        isPOIContributorUnseen: isPOIContributorUnseen
+                    )
                         .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
             }
@@ -111,7 +135,13 @@ struct ExperiencePanel: View {
                 }
 
                 if data.engagement.hasContent {
-                    EngagementSection(model: data.engagement, accentColor: data.accentColor)
+                    EngagementSection(
+                        model: data.engagement,
+                        accentColor: data.accentColor,
+                        onUserSelected: onUserSelected,
+                        onPOIContributorViewed: onPOIContributorViewed,
+                        isPOIContributorUnseen: isPOIContributorUnseen
+                    )
                         .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
             }
@@ -151,6 +181,7 @@ struct POICollapsedHero: View {
     let accentColor: Color
     let recentSharers: [ExperienceDetailView.POIStoryContributor]
     let onRecentSharerSelected: ((Int) -> Void)?
+    let isContributorUnseen: ([String]) -> Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -176,7 +207,8 @@ struct POICollapsedHero: View {
             if recentSharers.isEmpty == false {
                 POIRecentSharersRow(
                     sharers: recentSharers,
-                    accentColor: accentColor
+                    accentColor: accentColor,
+                    isContributorUnseen: isContributorUnseen
                 ) { index in
                     onRecentSharerSelected?(index)
                 }
@@ -198,6 +230,7 @@ struct POIExpandedHero: View {
     let accentColor: Color
     let recentSharers: [ExperienceDetailView.POIStoryContributor]
     let onRecentSharerSelected: ((Int) -> Void)?
+    let isContributorUnseen: ([String]) -> Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -223,7 +256,8 @@ struct POIExpandedHero: View {
             if recentSharers.isEmpty == false {
                 POIRecentSharersRow(
                     sharers: recentSharers,
-                    accentColor: accentColor
+                    accentColor: accentColor,
+                    isContributorUnseen: isContributorUnseen
                 ) { index in
                     onRecentSharerSelected?(index)
                 }
@@ -460,6 +494,7 @@ struct POIAvatar: View {
 struct POIRecentSharersRow: View {
     let sharers: [ExperienceDetailView.POIStoryContributor]
     let accentColor: Color
+    let isContributorUnseen: ([String]) -> Bool
     let onSelect: (Int) -> Void
 
     private let avatarSize: CGFloat = 56
@@ -475,7 +510,8 @@ struct POIRecentSharersRow: View {
                             POISharerAvatarCircle(
                                 contributor: sharer,
                                 accentColor: accentColor,
-                                size: avatarSize
+                                size: avatarSize,
+                                isUnseen: isContributorUnseen(sharer.readKeys)
                             )
                             Text(sharer.user?.handle ?? "Friend")
                                 .font(.caption2.bold())
@@ -504,6 +540,7 @@ private struct POISharerAvatarCircle: View {
     let contributor: ExperienceDetailView.POIStoryContributor
     let accentColor: Color
     let size: CGFloat
+    let isUnseen: Bool
 
     var body: some View {
         let avatar = Group {
@@ -523,18 +560,25 @@ private struct POISharerAvatarCircle: View {
             }
         }
 
-        avatar
-            .frame(width: size, height: size)
-            .clipShape(Circle())
-            .overlay {
-                Circle()
-                    .inset(by: 1.5)
-                    .stroke(Color.white.opacity(0.18), lineWidth: 1.5)
-            }
-            .overlay {
-                Circle()
-                    .stroke(POIHighlightStyle.highlightColor, lineWidth: POIHighlightStyle.avatarLineWidth)
-            }
+        ZStack {
+            StoryStatusCircleRing(
+                diameter: size + 8,
+                isUnseen: isUnseen,
+                unreadLineWidth: POIHighlightStyle.avatarLineWidth,
+                seenLineWidth: 1.2,
+                unreadShadowRadius: 4
+            )
+
+            avatar
+                .frame(width: size, height: size)
+                .clipShape(Circle())
+                .overlay {
+                    Circle()
+                        .inset(by: 1.5)
+                        .stroke(Color.white.opacity(0.14), lineWidth: 1.2)
+                }
+        }
+        .frame(width: size + 14, height: size + 14)
     }
 
     private var placeholder: some View {
@@ -614,6 +658,9 @@ struct HighlightsSection: View {
 struct EngagementSection: View {
     let model: ExperienceDetailView.EngagementSectionModel
     let accentColor: Color
+    let onUserSelected: (User) -> Void
+    let onPOIContributorViewed: ([String]) -> Void
+    let isPOIContributorUnseen: ([String]) -> Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -622,12 +669,15 @@ struct EngagementSection: View {
                     entries: model.friendLikes,
                     iconName: model.friendLikesIconName,
                     storyContributors: model.storyContributors,
-                    accentColor: accentColor
+                    accentColor: accentColor,
+                    onUserSelected: onUserSelected,
+                    onContributorViewed: onPOIContributorViewed,
+                    isContributorUnseen: isPOIContributorUnseen
                 )
             }
 
             if model.friendComments.isEmpty == false {
-                CommentThreadList(entries: model.friendComments)
+                CommentThreadList(entries: model.friendComments, onUserSelected: onUserSelected)
             }
         }
     }
@@ -639,6 +689,7 @@ struct HeroSection: View {
     let userProvider: (UUID) -> User?
     let hideMedia: Bool
     let useTallLayout: Bool
+    let onUserSelected: ((User) -> Void)?
     let onCapsuleTap: ((JourneyPost) -> Void)?
 
     init(
@@ -647,6 +698,7 @@ struct HeroSection: View {
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
+        onUserSelected: ((User) -> Void)? = nil,
         onCapsuleTap: ((JourneyPost) -> Void)? = nil
     ) {
         self.model = model
@@ -654,6 +706,7 @@ struct HeroSection: View {
         self.userProvider = userProvider
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.onUserSelected = onUserSelected
         self.onCapsuleTap = onCapsuleTap
     }
 
@@ -669,6 +722,7 @@ struct HeroSection: View {
             hideHeader: false,
             hideMedia: hideMedia,
             useTallLayout: useTallLayout,
+            onUserSelected: onUserSelected,
             onCapsuleTap: onCapsuleTap
         )
     }

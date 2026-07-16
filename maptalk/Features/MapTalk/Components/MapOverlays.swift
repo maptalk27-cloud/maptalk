@@ -6,9 +6,13 @@ struct MapOverlays: MapContent {
     let reals: [RealPost]
     let journeys: [JourneyPost]
     let userCoordinate: CLLocationCoordinate2D?
-    let currentUser: User
     let heroNamespace: Namespace.ID?
     let useTimelineStyle: Bool
+    let displayMode: RealStoriesRow.DisplayMode
+    let selectedStoryId: UUID?
+    let userProvider: (UUID) -> User?
+    let isRealUnseen: (RealPost) -> Bool
+    let isPOIUnseen: (RatedPOI) -> Bool
     let onTapReal: ((RealPost) -> Void)?
     let onTapPOI: ((RatedPOI) -> Void)?
 
@@ -21,17 +25,29 @@ struct MapOverlays: MapContent {
 
         ForEach(reals) { real in
             Annotation("", coordinate: real.center) {
+                let user = userProvider(real.userId)
+                let usesContentMarker = displayMode == .content || useTimelineStyle
+                let isSelected = selectedStoryId == real.id
+                let isUnseen = isRealUnseen(real)
                 let baseMarker: AnyView = {
-                    if useTimelineStyle {
+                    if usesContentMarker {
                         return AnyView(
                             RealMapThumbnail(
                                 real: real,
-                                user: PreviewData.user(for: real.userId),
-                                size: 40
+                                user: user,
+                                size: 40,
+                                isSelected: isSelected,
+                                isUnseen: isUnseen
                             )
                         )
                     } else {
-                        return AnyView(RealAvatarMarker(user: PreviewData.user(for: real.userId)))
+                        return AnyView(
+                            RealAvatarMarker(
+                                user: user,
+                                isSelected: isSelected,
+                                isUnseen: isUnseen
+                            )
+                        )
                     }
                 }()
                 let marker: AnyView = {
@@ -61,7 +77,8 @@ struct MapOverlays: MapContent {
 
         // Draw POIs after reels so they sit above the reel markers.
         ForEach(ratedPOIs) { rated in
-            let isRecent = rated.hasRecentPhotoShare
+            let isSelected = selectedStoryId == rated.id
+            let isUnseen = isPOIUnseen(rated)
             Annotation("", coordinate: rated.poi.coordinate) {
                 let marker: AnyView = {
                     if useTimelineStyle {
@@ -69,12 +86,22 @@ struct MapOverlays: MapContent {
                             UserMapMarker(category: rated.poi.category)
                                 .frame(width: 24, height: 26)
                         )
+                    } else if displayMode == .content {
+                        return AnyView(
+                            POIContentMapMarker(
+                                category: rated.poi.category,
+                                isSelected: isSelected,
+                                isUnseen: isUnseen
+                            )
+                        )
                     } else {
                         return AnyView(
                             POICategoryMarker(
                                 category: rated.poi.category,
                                 count: rated.checkIns.count,
-                                isRecentHighlight: isRecent
+                                isRecentHighlight: isUnseen,
+                                isSelected: isSelected,
+                                showsCount: displayMode == .people
                             )
                         )
                     }
@@ -95,7 +122,7 @@ struct MapOverlays: MapContent {
         ForEach(journeys) { journey in
             Annotation("", coordinate: journey.coordinate) {
                 JourneyMapMarker(
-                    user: PreviewData.user(for: journey.userId),
+                    user: userProvider(journey.userId),
                     label: "journey",
                     size: 52
                 )
@@ -104,14 +131,77 @@ struct MapOverlays: MapContent {
 
         if let userCoordinate {
             Annotation("", coordinate: userCoordinate) {
-                UserAvatarView(user: currentUser, size: 48)
+                CurrentLocationMarker()
             }
         }
     }
 }
 
+private struct POIContentMapMarker: View {
+    let category: POICategory
+    let isSelected: Bool
+    let isUnseen: Bool
+
+    var body: some View {
+        ZStack {
+            StoryStatusDiamondRing(
+                size: outerSize,
+                isUnseen: isUnseen,
+                cornerRadius: 6,
+                unreadLineWidth: statusRingLineWidth,
+                seenLineWidth: statusRingLineWidth,
+                unreadShadowRadius: 4
+            )
+
+            UserMapMarker(category: category)
+                .frame(width: innerFrameSize, height: innerFrameSize)
+        }
+        .frame(width: outerSize + 8, height: outerSize + 8)
+        .scaleEffect(isSelected ? 1.12 : 1)
+    }
+
+    private var outerSize: CGFloat {
+        isSelected ? 36 : 32
+    }
+
+    private var innerFrameSize: CGFloat {
+        isSelected ? 26 : 24
+    }
+
+    private var statusRingLineWidth: CGFloat {
+        isSelected ? 2.2 : 2
+    }
+}
+
+private struct CurrentLocationMarker: View {
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color.blue.opacity(0.16))
+                .frame(width: 36, height: 36)
+                .overlay {
+                    Circle()
+                        .stroke(Color.blue.opacity(0.28), lineWidth: 1)
+                }
+
+            Circle()
+                .fill(Color.blue)
+                .frame(width: 17, height: 17)
+                .overlay {
+                    Circle()
+                        .stroke(Color.white, lineWidth: 3)
+                }
+                .shadow(color: Color.black.opacity(0.25), radius: 4, y: 2)
+        }
+        .frame(width: 44, height: 44)
+        .allowsHitTesting(false)
+    }
+}
+
 private struct RealAvatarMarker: View {
     let user: User?
+    let isSelected: Bool
+    let isUnseen: Bool
 
     private var initials: String {
         guard let handle = user?.handle else { return "?" }
@@ -120,50 +210,85 @@ private struct RealAvatarMarker: View {
 
     var body: some View {
         ZStack {
+            StoryStatusCircleRing(
+                diameter: ringDiameter,
+                isUnseen: isUnseen,
+                unreadLineWidth: 2.4,
+                seenLineWidth: 1.35,
+                unreadShadowRadius: 4
+            )
+
+            ZStack {
+                backgroundFill
+
+                if let url = user?.avatarURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        case .empty:
+                            initialsView
+                                .overlay {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                }
+                        default:
+                            initialsView
+                        }
+                    }
+                    .clipShape(Circle())
+                } else {
+                    initialsView
+                }
+            }
+            .frame(width: markerDiameter, height: markerDiameter)
+            .overlay {
+                Circle()
+                    .strokeBorder(Color.white.opacity(isUnseen ? 0.35 : 0.24), lineWidth: 1)
+            }
+        }
+        .frame(width: outerDiameter, height: outerDiameter)
+    }
+
+    private var markerDiameter: CGFloat {
+        isSelected ? 66 : 60
+    }
+
+    private var ringDiameter: CGFloat {
+        markerDiameter + 8
+    }
+
+    private var outerDiameter: CGFloat {
+        markerDiameter + 18
+    }
+
+    private var initialsView: some View {
+        Text(initials)
+            .font(.headline.bold())
+            .foregroundStyle(.white)
+    }
+
+    @ViewBuilder
+    private var backgroundFill: some View {
+        if isUnseen {
             Circle()
                 .fill(
                     RadialGradient(
                         colors: [
-                            Theme.neonPrimary.opacity(0.85),
-                            Theme.neonPrimary.opacity(0.35)
+                            Theme.unreadRingColor.opacity(0.85),
+                            Theme.unreadRingColor.opacity(0.35)
                         ],
                         center: .center,
                         startRadius: 5,
                         endRadius: 44
                     )
                 )
-
-            if let url = user?.avatarURL {
-                AsyncImage(url: url) { image in
-                    image
-                        .resizable()
-                        .scaledToFill()
-                } placeholder: {
-                    ProgressView()
-                }
-                .clipShape(Circle())
-            } else {
-                Text(initials)
-                    .font(.headline.bold())
-                    .foregroundStyle(.white)
-            }
-        }
-        .frame(width: 60, height: 60)
-        .overlay {
+        } else {
             Circle()
-                .strokeBorder(Color.white.opacity(0.6), lineWidth: 1.6)
+                .fill(Color.black.opacity(0.35))
         }
-        .overlay {
-            Circle()
-                .stroke(Theme.neonPrimary, lineWidth: 2.4)
-        }
-        .background {
-            Circle()
-                .stroke(Theme.neonPrimary.opacity(0.28), lineWidth: 3)
-                .frame(width: 64, height: 64)
-        }
-        .padding(4)
-        .drawingGroup()
     }
 }
 
@@ -219,11 +344,12 @@ private struct JourneyMapMarker: View {
             .overlay {
                 Circle()
                     .stroke(Theme.neonAccent, lineWidth: 2.4)
+                    .frame(width: size + 8, height: size + 8)
             }
             .background {
                 Circle()
                     .stroke(Theme.neonAccent.opacity(0.28), lineWidth: 3)
-                    .frame(width: size + 4, height: size + 4)
+                    .frame(width: size + 12, height: size + 12)
             }
 
             Text(label)
@@ -250,40 +376,36 @@ private struct POICategoryMarker: View {
     let category: POICategory
     let count: Int
     let isRecentHighlight: Bool
+    let isSelected: Bool
+    let showsCount: Bool
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                StoryStatusDiamondRing(
+                    size: ringSize,
+                    isUnseen: isRecentHighlight,
+                    cornerRadius: 8,
+                    unreadLineWidth: statusRingLineWidth,
+                    seenLineWidth: statusRingLineWidth,
+                    unreadShadowRadius: isRecentHighlight ? 5 : 0
+                )
+
+                RoundedDiamond(cornerRadius: 7)
                     .fill(markerGradient)
-                    .frame(width: 44, height: 44)
-                    .rotationEffect(.degrees(45))
+                    .frame(width: markerSize, height: markerSize)
 
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.white.opacity(isRecentHighlight ? 0.9 : 0.6), lineWidth: 1.6)
-                    .frame(width: 44, height: 44)
-                    .rotationEffect(.degrees(45))
-
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(markerGlow.opacity(isRecentHighlight ? 1 : 0.6), lineWidth: 2.4)
-                    .frame(width: 44, height: 44)
-                    .rotationEffect(.degrees(45))
+                RoundedDiamond(cornerRadius: 7)
+                    .stroke(Color.white.opacity(isRecentHighlight ? 0.34 : 0.26), lineWidth: 1)
+                    .frame(width: markerSize, height: markerSize)
 
                 Image(systemName: category.symbolName)
                     .font(.title3.weight(.bold))
                     .foregroundStyle(.white)
             }
-            .frame(width: 52, height: 52)
-            .background {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .stroke(markerGlow.opacity(0.28), lineWidth: 3)
-                    .frame(width: 48, height: 48)
-                    .rotationEffect(.degrees(45))
-            }
-            .padding(10)
-            .drawingGroup()
+            .frame(width: ringSize + 8, height: ringSize + 8)
 
-            if count > 1 {
+            if showsCount, count > 1 {
                 Text("\(count)")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.white)
@@ -291,9 +413,10 @@ private struct POICategoryMarker: View {
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Color(white: 0.15)))
                     .overlay(Capsule().stroke(Color.white, lineWidth: 1.5))
-                    .offset(x: -6, y: -6)
+                    .offset(x: -2, y: -2)
             }
         }
+        .padding(10)
     }
 
     private var markerGradient: LinearGradient {
@@ -304,8 +427,16 @@ private struct POICategoryMarker: View {
         )
     }
 
-    private var markerGlow: Color {
-        category.markerGradientColors.last ?? Theme.neonPrimary
+    private var statusRingLineWidth: CGFloat {
+        isSelected ? 2.8 : 2.4
+    }
+
+    private var markerSize: CGFloat {
+        isSelected ? 48 : 44
+    }
+
+    private var ringSize: CGFloat {
+        markerSize + 12
     }
 }
 

@@ -10,6 +10,7 @@ struct JourneyCard: View {
     let user: User?
     let style: Style
     let userProvider: (UUID) -> User?
+    let onUserTap: ((User) -> Void)?
     let onAvatarStackTap: (() -> Void)?
 
     init(
@@ -17,18 +18,22 @@ struct JourneyCard: View {
         user: User?,
         style: Style,
         userProvider: @escaping (UUID) -> User?,
+        onUserTap: ((User) -> Void)? = nil,
         onAvatarStackTap: (() -> Void)? = nil
     ) {
         self.journey = journey
         self.user = user
         self.style = style
         self.userProvider = userProvider
+        self.onUserTap = onUserTap
         self.onAvatarStackTap = onAvatarStackTap
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            avatarView
+            profileButton {
+                avatarView
+            }
                 .alignmentGuide(.top) { $0[.top] }
                 .padding(.trailing, 10)
 
@@ -63,9 +68,11 @@ struct JourneyCard: View {
 
     private var userNameRow: some View {
         HStack(spacing: 8) {
-            Text(displayName)
-                .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
+            profileButton {
+                Text(displayName)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+            }
             Text(journey.displayLabel)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.8))
@@ -107,6 +114,20 @@ struct JourneyCard: View {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else { return "??" }
         return String(trimmed.prefix(2)).uppercased()
+    }
+
+    @ViewBuilder
+    private func profileButton<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        if let user, let onUserTap {
+            Button {
+                onUserTap(user)
+            } label: {
+                content()
+            }
+            .buttonStyle(.plain)
+        } else {
+            content()
+        }
     }
 
     private var contentText: some View {
@@ -268,10 +289,14 @@ struct JourneyAvatarStack: View {
         switch event.kind {
         case let .reel(reel, user):
             let displayUser = user ?? userProvider(reel.userId)
-            RealMapThumbnail(real: reel, user: displayUser, size: avatarSize)
+            RealMapThumbnail(
+                real: reel,
+                user: displayUser,
+                size: avatarSize,
+                fitsStatusInsideFrame: true
+            )
         case let .poi(rated):
-            UserMapMarker(category: rated.poi.category)
-                .frame(width: avatarSize * 0.88, height: avatarSize * 0.97)
+            POIMapThumbnail(category: rated.poi.category, size: avatarSize)
         }
     }
 }

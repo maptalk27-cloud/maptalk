@@ -19,6 +19,7 @@ struct CompactRealCard: View {
     let hideHeader: Bool
     let hideMedia: Bool
     let useTallLayout: Bool
+    let onUserSelected: ((User) -> Void)?
     let onCapsuleTap: ((JourneyPost) -> Void)?
 
     @State private var isLightboxPresented = false
@@ -36,6 +37,7 @@ struct CompactRealCard: View {
         hideHeader: Bool = false,
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
+        onUserSelected: ((User) -> Void)? = nil,
         onCapsuleTap: ((JourneyPost) -> Void)? = nil
     ) {
         self.real = real
@@ -48,6 +50,7 @@ struct CompactRealCard: View {
         self.hideHeader = hideHeader
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.onUserSelected = onUserSelected
         self.onCapsuleTap = onCapsuleTap
         _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
@@ -55,7 +58,9 @@ struct CompactRealCard: View {
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if showHeader && isSingleVideoDetail == false {
-                avatarView
+                profileButton {
+                    avatarView
+                }
                     .alignmentGuide(.top) { $0[.top] }
                     .padding(.trailing, 10)
             }
@@ -260,10 +265,12 @@ struct CompactRealCard: View {
     }
 
     private var userNameRow: some View {
-        Text(displayName)
-            .font(.headline.weight(.semibold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        profileButton {
+            Text(displayName)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var avatarView: some View {
@@ -302,6 +309,20 @@ struct CompactRealCard: View {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else { return "??" }
         return String(trimmed.prefix(2)).uppercased()
+    }
+
+    @ViewBuilder
+    private func profileButton<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        if let user, avatarCategory == nil, let onUserSelected {
+            Button {
+                onUserSelected(user)
+            } label: {
+                content()
+            }
+            .buttonStyle(.plain)
+        } else {
+            content()
+        }
     }
 
     private var contentText: some View {

@@ -270,9 +270,15 @@ extension ExperienceDetailView {
                 checkIn.media.compactMap { media -> POIStoryContributor.Item? in
                     guard isStoryEligibleMedia(media) else { return nil }
                     return POIStoryContributor.Item(
-                        id: UUID(),
+                        id: media.id,
                         media: mediaDisplayItem(media),
-                        timestamp: checkIn.createdAt
+                        timestamp: checkIn.createdAt,
+                        readKey: StoryReadKeys.poiStoryPage(
+                            poiId: ratedPOI.id,
+                            checkInId: checkIn.id,
+                            mediaId: media.id,
+                            timestamp: checkIn.createdAt
+                        )
                     )
                 }
             }

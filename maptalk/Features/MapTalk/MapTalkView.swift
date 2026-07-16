@@ -5,7 +5,7 @@ import SwiftUI
 import UIKit
 
 struct MapTalkView: View {
-    @StateObject var viewModel: MapTalkViewModel
+    @StateObject private var viewModel: MapTalkViewModel
     @Environment(\.appEnv) private var environment
     @State private var flightController = MapFlightController()
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -23,19 +23,31 @@ struct MapTalkView: View {
     @State private var journeyStack: [JourneyPost] = []
     @State private var suppressJourneySelectionUpdate: Bool = false
     @State private var detentRerenderKey: Int = 0
+    @State private var didApplyInitialStorySelection: Bool = false
+    @State private var viewedStoryKeys: Set<String> = StoryReadStateStore.load()
+    @State private var pendingViewedStoryKey: String?
     @Namespace private var heroNamespace
+    private let initialStoryId: UUID?
+
+    init(viewModel: MapTalkViewModel, initialStoryId: UUID? = nil) {
+        _viewModel = StateObject(wrappedValue: viewModel)
+        self.initialStoryId = initialStoryId
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let journeyNamespace = focusedJourneyHeader != nil ? heroNamespace : nil
             let makePOIGroup: (RatedPOI, Bool) -> RealStoriesRow.POIStoryGroup? = { rated, onlyRecent in
                 let sharers = rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
-                    let hasPhoto = checkIn.media.contains { media in
-                        if case .photo = media.kind { return true }
-                        return false
+                    let storyMedia = checkIn.media.filter { media in
+                        switch media.kind {
+                        case .photo, .video:
+                            return true
+                        }
                     }
+                    let hasStory = storyMedia.isEmpty == false
                     if onlyRecent {
-                        if hasPhoto == false { return nil }
+                        if hasStory == false { return nil }
                         if checkIn.createdAt < Date().addingTimeInterval(-60 * 60 * 24) {
                             return nil
                         }
@@ -44,7 +56,16 @@ struct MapTalkView: View {
                     return RealStoriesRow.POISharer(
                         id: checkIn.id,
                         user: user,
-                        timestamp: checkIn.createdAt
+                        timestamp: checkIn.createdAt,
+                        hasStory: hasStory,
+                        readKeys: storyMedia.map { media in
+                            StoryReadKeys.poiStoryPage(
+                                poiId: rated.id,
+                                checkInId: checkIn.id,
+                                mediaId: media.id,
+                                timestamp: checkIn.createdAt
+                            )
+                        }
                     )
                 }
                 .sorted { $0.timestamp > $1.timestamp }
@@ -68,7 +89,7 @@ struct MapTalkView: View {
 
             let sortedReals = viewModel.reals.sorted { $0.createdAt > $1.createdAt }
             let poiGroups = viewModel.ratedPOIs.compactMap { rated in
-                makePOIGroup(rated, true)
+                makePOIGroup(rated, viewModel.isUserScope == false)
             }
             let baseStoryItems = (
                 sortedReals.map { RealStoriesRow.StoryItem(real: $0) } +
@@ -171,6 +192,46 @@ struct MapTalkView: View {
                 }
                 return nil
             }
+            let isStoryUnseen: (RealStoriesRow.StoryItem) -> Bool = { item in
+                if case let .poi(group) = item.source {
+                    return group.unreadCandidateKeys.contains { viewedStoryKeys.contains($0) == false }
+                }
+                return item.isFresh && viewedStoryKeys.contains(item.readKey) == false
+            }
+            let markStoryReadKeyViewed: (String) -> Void = { key in
+                guard viewedStoryKeys.contains(key) == false else { return }
+                withAnimation(.easeOut(duration: 0.14)) {
+                    _ = viewedStoryKeys.insert(key)
+                }
+                StoryReadStateStore.save(viewedStoryKeys)
+            }
+            let markStoryReadKeysViewed: ([String]) -> Void = { keys in
+                let newKeys = keys.filter { viewedStoryKeys.contains($0) == false }
+                guard newKeys.isEmpty == false else { return }
+                withAnimation(.easeOut(duration: 0.14)) {
+                    viewedStoryKeys.formUnion(newKeys)
+                }
+                StoryReadStateStore.save(viewedStoryKeys)
+            }
+            let isPOIContributorUnseen: ([String]) -> Bool = { keys in
+                keys.contains { viewedStoryKeys.contains($0) == false }
+            }
+            let flushPendingViewedStory: (String?) -> Void = { excludingKey in
+                guard let pendingKey = pendingViewedStoryKey,
+                      pendingKey != excludingKey else {
+                    return
+                }
+                pendingViewedStoryKey = nil
+                markStoryReadKeyViewed(pendingKey)
+            }
+            let isRealUnseen: (RealPost) -> Bool = { real in
+                guard let item = storyItemForReal(real) else { return false }
+                return isStoryUnseen(item)
+            }
+            let isPOIUnseen: (RatedPOI) -> Bool = { rated in
+                guard let item = storyItemForPOI(rated) else { return false }
+                return isStoryUnseen(item)
+            }
 
             let presentSequenceIfNeeded: (Bool) -> Void = { shouldPresent in
                 guard sequenceItems.isEmpty == false else { return }
@@ -189,7 +250,15 @@ struct MapTalkView: View {
             }
 
             let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
+                flushPendingViewedStory(item.readKey)
                 selectedStoryId = item.id
+                if shouldPresent || isExperiencePresented {
+                    if case .poi = item.source {
+                        pendingViewedStoryKey = nil
+                    } else {
+                        pendingViewedStoryKey = item.isFresh ? item.readKey : nil
+                    }
+                }
                 switch item.source {
                 case let .real(real):
                     let previousSelection = selectedRealId
@@ -251,6 +320,11 @@ struct MapTalkView: View {
                 }
                 focusedJourneyHeader = journey
                 selectedStoryId = journeyStoryItems(journey).first?.id
+                if presentSheet,
+                   let firstItem = journeyStoryItems(journey).first {
+                    flushPendingViewedStory(firstItem.readKey)
+                    pendingViewedStoryKey = firstItem.isFresh ? firstItem.readKey : nil
+                }
                 suppressJourneySelectionUpdate = true
                 reelAlignTrigger &+= 1
                 if let target = journeyBoundingTarget(
@@ -314,6 +388,17 @@ struct MapTalkView: View {
                 }
             }
 
+            let applyInitialStorySelectionIfNeeded: () -> Void = {
+                guard didApplyInitialStorySelection == false,
+                      let initialStoryId,
+                      let item = storyItemForId(initialStoryId) else {
+                    return
+                }
+                didApplyInitialStorySelection = true
+                selectStoryItem(item, true, true, .initial)
+                reelAlignTrigger &+= 1
+            }
+
             ZStack(alignment: .top) {
                 Map(position: $cameraPosition, interactionModes: .all) {
                     MapOverlays(
@@ -321,16 +406,22 @@ struct MapTalkView: View {
                         reals: focusedJourneyHeader?.reels ?? viewModel.reals,
                         journeys: [],
                         userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
-                        currentUser: PreviewData.currentUser,
                         heroNamespace: journeyNamespace,
                         useTimelineStyle: focusedJourneyHeader != nil,
+                        displayMode: viewModel.isUserScope ? .content : .people,
+                        selectedStoryId: selectedStoryId,
+                        userProvider: viewModel.user(for:),
+                        isRealUnseen: isRealUnseen,
+                        isPOIUnseen: isPOIUnseen,
                         onTapReal: { real in
                             guard let item = storyItemForReal(real) else { return }
                             selectStoryItem(item, true, false, nil)
+                            reelAlignTrigger &+= 1
                         },
                         onTapPOI: { rated in
                             guard let item = storyItemForPOI(rated) else { return }
                             selectStoryItem(item, true, false, nil)
+                            reelAlignTrigger &+= 1
                         }
                     )
                 }
@@ -338,8 +429,14 @@ struct MapTalkView: View {
 
                 VStack(spacing: 6) {
                     if focusedJourneyHeader == nil {
-                        MapTalkHandwrittenBadge()
-                            .frame(maxWidth: .infinity, alignment: .center)
+                        Group {
+                            if let scopedUser = viewModel.scopedUser {
+                                ProfileMapIdentityBadge(user: scopedUser)
+                            } else {
+                                MapTalkHandwrittenBadge()
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
                     }
 
                     if let journeyHeader = focusedJourneyHeader {
@@ -379,7 +476,9 @@ struct MapTalkView: View {
                             },
                             onSelectJourney: { _ in },
                             userProvider: viewModel.user(for:),
-                            alignTrigger: reelAlignTrigger
+                            alignTrigger: reelAlignTrigger,
+                            displayMode: viewModel.isUserScope ? .content : .people,
+                            isUnseen: isStoryUnseen
                         )
                     }
                 }
@@ -423,6 +522,7 @@ struct MapTalkView: View {
                                     selectedStoryId = nil
                                     activeExperience = nil
                                     isExperiencePresented = false
+                                    flushPendingViewedStory(nil)
                                     viewModel.centerOnUser()
                                 },
                                 onTapRating: {},
@@ -435,6 +535,7 @@ struct MapTalkView: View {
                 }
             }
             .sheet(isPresented: $isExperiencePresented, onDismiss: {
+                flushPendingViewedStory(nil)
                 experienceDetent = .fraction(ControlsLayout.previewFraction)
                 selectedRealId = nil
                 selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
@@ -502,7 +603,9 @@ struct MapTalkView: View {
                                     onJourneyAvatarStackTap: { journey in
                                         handleJourneyTap(journey, true, focusedJourneyHeader)
                                     },
-                                    userProvider: viewModel.user(for:)
+                                    userProvider: viewModel.user(for:),
+                                    onPOIContributorViewed: markStoryReadKeysViewed,
+                                    isPOIContributorUnseen: isPOIContributorUnseen
                                 )
                                 .id(nonce)
                             )
@@ -514,7 +617,9 @@ struct MapTalkView: View {
                             ExperienceDetailView(
                                 ratedPOI: rated,
                                 isExpanded: isExpanded,
-                                userProvider: viewModel.user(for:)
+                                userProvider: viewModel.user(for:),
+                                onPOIContributorViewed: markStoryReadKeysViewed,
+                                isPOIContributorUnseen: isPOIContributorUnseen
                             )
                             .id("\(rated.id)-\(nonce)")
                         )
@@ -539,6 +644,7 @@ struct MapTalkView: View {
                 viewModel.onAppear()
                 controlsBottomPadding = baseControlsPadding
                 ensureSelectionIfNeeded()
+                applyInitialStorySelectionIfNeeded()
             }
             .onReceive(viewModel.$region.dropFirst()) { newRegion in
                 let cause = pendingRegionCause
@@ -558,17 +664,21 @@ struct MapTalkView: View {
                     selectedStoryId = nil
                     activeExperience = nil
                     isExperiencePresented = false
+                    flushPendingViewedStory(nil)
                     return
                 }
                 if let currentId = selectedStoryId {
                     if ids.contains(currentId) == false {
+                        flushPendingViewedStory(nil)
                         selectedStoryId = nil
                         selectedRealId = nil
                     }
                 } else {
+                    flushPendingViewedStory(nil)
                     selectedStoryId = nil
                     selectedRealId = nil
                 }
+                applyInitialStorySelectionIfNeeded()
             }
             .onChangeCompat(of: focusedJourneyHeader?.id) { identifier in
                 if identifier != nil {
@@ -583,6 +693,9 @@ struct MapTalkView: View {
                 journeyEntryStoryId = nil
             }
             .onChangeCompat(of: isExperiencePresented) { isActive in
+                if isActive == false {
+                    flushPendingViewedStory(nil)
+                }
                 let target = isActive ? previewControlsPadding : baseControlsPadding
                 print("[MapTalkView] isExperiencePresented changed to \(isActive) detent=\(experienceDetent)")
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
@@ -885,6 +998,69 @@ private struct MapTalkHandwrittenBadge: View {
     }
 }
 
+private struct ProfileMapIdentityBadge: View {
+    let user: User
+
+    var body: some View {
+        HStack(spacing: 8) {
+            avatar
+
+            Text("@\(user.handle)")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        }
+        .padding(.leading, 6)
+        .padding(.trailing, 12)
+        .padding(.vertical, 5)
+        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+        .overlay {
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(0.35), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.08), radius: 8, y: 3)
+    }
+
+    private var avatar: some View {
+        ZStack {
+            if let url = user.avatarURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case let .success(image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .empty:
+                        placeholder
+                            .overlay {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            }
+                    default:
+                        placeholder
+                    }
+                }
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: 28, height: 28)
+        .clipShape(Circle())
+        .overlay {
+            Circle()
+                .stroke(Color.white.opacity(0.55), lineWidth: 1)
+        }
+    }
+
+    private var placeholder: some View {
+        Text(String(user.handle.prefix(2)).uppercased())
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black.opacity(0.6))
+    }
+}
+
 private struct MapTalkControls: View {
     let onTapLocate: () -> Void
     let onTapRating: () -> Void
@@ -925,6 +1101,39 @@ private enum ActiveExperience: Identifiable {
         default:
             return nil
         }
+    }
+}
+
+private extension RealStoriesRow.StoryItem {
+    var readKey: String {
+        switch source {
+        case let .real(real):
+            return StoryReadKeys.real(real)
+        case let .poi(group):
+            return "poi:\(group.id.uuidString):\(Self.timestampToken(group.latestTimestamp))"
+        case let .journey(journey):
+            return StoryReadKeys.journey(journey)
+        }
+    }
+
+    var isFresh: Bool {
+        StoryReadKeys.isFresh(timestamp)
+    }
+
+    private static func timestampToken(_ date: Date) -> Int {
+        Int(date.timeIntervalSinceReferenceDate)
+    }
+}
+
+private enum StoryReadStateStore {
+    private static let key = "MapTalk.viewedStoryKeys"
+
+    static func load() -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    static func save(_ keys: Set<String>) {
+        UserDefaults.standard.set(Array(keys), forKey: key)
     }
 }
 

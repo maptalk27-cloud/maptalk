@@ -9,17 +9,23 @@ struct FriendsView: View {
             List {
                 Section("Chats") {
                     ForEach(PreviewData.sampleFriends.prefix(10), id: \.id) { friend in
-                        HStack(spacing: 12) {
-                            UserAvatarView(user: friend, size: 44)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(friend.handle)
-                                    .font(.headline)
-                                Text("View their map journal.")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
+                        NavigationLink {
+                            UserProfileView(
+                                viewModel: .init(environment: environment, context: .friend(friend))
+                            )
+                        } label: {
+                            HStack(spacing: 12) {
+                                UserAvatarView(user: friend, size: 44)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(friend.handle)
+                                        .font(.headline)
+                                    Text("View their profile and map journal.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            .padding(.vertical, 6)
                         }
-                        .padding(.vertical, 6)
                     }
                 }
             }

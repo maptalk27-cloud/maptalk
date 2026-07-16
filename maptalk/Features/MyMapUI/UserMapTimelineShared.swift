@@ -267,12 +267,16 @@ private func avatar(for event: TimelineEvent) -> some View {
     switch event.kind {
     case let .reel(real, user):
         return AnyView(
-            RealMapThumbnail(real: real, user: user, size: 34)
+            RealMapThumbnail(
+                real: real,
+                user: user,
+                size: 34,
+                fitsStatusInsideFrame: true
+            )
         )
     case let .poi(poi):
         return AnyView(
-            UserMapMarker(category: poi.poi.category)
-                .frame(width: 30, height: 33)
+            POIMapThumbnail(category: poi.poi.category, size: 34)
         )
     }
 }
@@ -424,10 +428,67 @@ struct UserMapMarker: View {
     }
 }
 
+struct POIMapThumbnail: View {
+    let category: POICategory
+    var size: CGFloat = 34
+    var isUnseen: Bool = false
+
+    var body: some View {
+        ZStack {
+            StoryStatusDiamondRing(
+                size: size,
+                isUnseen: isUnseen,
+                cornerRadius: cornerRadius,
+                unreadLineWidth: size <= 28 ? 1.7 : 2.1,
+                seenLineWidth: 1,
+                unreadShadowRadius: isUnseen ? 4 : 0
+            )
+
+            RoundedDiamond(cornerRadius: max(cornerRadius - 1, 3))
+                .fill(markerGradient)
+                .frame(width: innerSize, height: innerSize)
+                .shadow(color: markerGlow.opacity(0.32), radius: 4, y: 2)
+
+            RoundedDiamond(cornerRadius: max(cornerRadius - 1, 3))
+                .stroke(Color.white.opacity(0.26), lineWidth: 0.9)
+                .frame(width: innerSize, height: innerSize)
+
+            Image(systemName: category.symbolName)
+                .font(.system(size: max(innerSize * 0.38, 9), weight: .bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+        }
+        .frame(width: size, height: size)
+    }
+
+    private var innerSize: CGFloat {
+        max(size - 8, 16)
+    }
+
+    private var cornerRadius: CGFloat {
+        max(size * 0.18, 4)
+    }
+
+    private var markerGradient: LinearGradient {
+        LinearGradient(
+            colors: category.markerGradientColors,
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var markerGlow: Color {
+        category.markerGradientColors.last ?? Theme.neonPrimary
+    }
+}
+
 struct RealMapThumbnail: View {
     let real: RealPost
     let user: User?
     var size: CGFloat = 40
+    var isSelected: Bool = false
+    var isUnseen: Bool = false
+    var fitsStatusInsideFrame: Bool = false
 
     private var mediaURL: URL? {
         for attachment in real.attachments {
@@ -443,52 +504,85 @@ struct RealMapThumbnail: View {
         return nil
     }
 
+    private var emoji: String? {
+        real.attachments.compactMap { attachment in
+            if case let .emoji(emoji) = attachment.kind {
+                return emoji
+            }
+            return nil
+        }.first
+    }
+
     var body: some View {
         ZStack {
-            Circle()
-                .fill(Color.black.opacity(0.45))
-                .overlay {
-                    Circle().stroke(Color.white.opacity(0.2), lineWidth: 1)
-                }
+            StoryStatusCircleRing(
+                diameter: ringSize,
+                isUnseen: isUnseen,
+                unreadLineWidth: 2.2,
+                seenLineWidth: 1.25,
+                unreadShadowRadius: 4
+            )
 
-            if let url = mediaURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case let .success(image):
-                        image.resizable().scaledToFill()
-                    case .empty:
-                        ProgressView()
-                    case .failure:
-                        avatarFallback
-                    @unknown default:
-                        avatarFallback
+            ZStack {
+                Circle()
+                    .fill(Color.black.opacity(0.45))
+                    .overlay {
+                        Circle().stroke(Color.white.opacity(0.2), lineWidth: 1)
                     }
-                }
-                .clipShape(Circle())
-            } else if let avatar = user?.avatarURL {
-                AsyncImage(url: avatar) { phase in
-                    switch phase {
-                    case let .success(image):
-                        image.resizable().scaledToFill()
-                    case .empty:
-                        ProgressView()
-                    case .failure:
-                        avatarFallback
-                    @unknown default:
-                        avatarFallback
+
+                if let url = mediaURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case let .success(image):
+                            image.resizable().scaledToFill()
+                        case .empty:
+                            avatarImage
+                                .overlay {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                }
+                        case .failure:
+                            avatarImage
+                        @unknown default:
+                            avatarImage
+                        }
                     }
+                    .clipShape(Circle())
+                } else if let emoji {
+                    emojiFallback(emoji)
+                } else {
+                    avatarImage
                 }
-                .clipShape(Circle())
-            } else {
-                avatarFallback
             }
+            .frame(width: contentSize, height: contentSize)
         }
-        .frame(width: size, height: size)
-        .overlay {
-            Circle()
-                .stroke(Theme.neonPrimary.opacity(0.7), lineWidth: 2)
+        .frame(width: frameSize, height: frameSize)
+        .shadow(color: shadowColor, radius: isUnseen ? 8 : 5, y: 3)
+    }
+
+    @ViewBuilder
+    private var avatarImage: some View {
+        if let avatar = user?.avatarURL {
+            AsyncImage(url: avatar) { phase in
+                switch phase {
+                case let .success(image):
+                    image.resizable().scaledToFill()
+                case .empty:
+                    avatarFallback
+                        .overlay {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                case .failure:
+                    avatarFallback
+                @unknown default:
+                    avatarFallback
+                }
+            }
+            .clipShape(Circle())
+        } else {
+            avatarFallback
         }
-        .shadow(color: Color.black.opacity(0.45), radius: 6, y: 3)
     }
 
     private var avatarFallback: some View {
@@ -500,9 +594,40 @@ struct RealMapThumbnail: View {
             .clipShape(Circle())
     }
 
+    private func emojiFallback(_ emoji: String) -> some View {
+        Text(emoji)
+            .font(.system(size: markerSize * 0.42))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.neonPrimary.opacity(0.16))
+            .clipShape(Circle())
+    }
+
     private var initials: String {
         guard let handle = user?.handle else { return "PO" }
         return String(handle.prefix(2)).uppercased()
+    }
+
+    private var markerSize: CGFloat {
+        isSelected ? size + 6 : size
+    }
+
+    private var ringSize: CGFloat {
+        fitsStatusInsideFrame ? markerSize : markerSize + 8
+    }
+
+    private var contentSize: CGFloat {
+        fitsStatusInsideFrame ? max(markerSize - 8, 16) : markerSize
+    }
+
+    private var frameSize: CGFloat {
+        fitsStatusInsideFrame ? markerSize : ringSize + 8
+    }
+
+    private var shadowColor: Color {
+        if isUnseen {
+            return Theme.unreadRingColor.opacity(0.32)
+        }
+        return Color.black.opacity(0.35)
     }
 }
 

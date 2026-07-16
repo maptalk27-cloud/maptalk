@@ -4,6 +4,11 @@ import MapKit
 
 @MainActor
 final class MapTalkViewModel: ObservableObject {
+    enum Scope {
+        case global
+        case user(User)
+    }
+
     enum Mode: Int {
         case world
         case friends
@@ -22,14 +27,23 @@ final class MapTalkViewModel: ObservableObject {
     @Published var reals: [RealPost] = []
     @Published var userCoordinate: CLLocationCoordinate2D?
 
+    let scope: Scope
     private let environment: AppEnvironment
-    init(environment: AppEnvironment) {
+    init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
-        bind()
+        self.scope = scope
+        switch scope {
+        case .global:
+            bind()
+        case let .user(user):
+            loadUserScope(for: user)
+        }
     }
 
     func onAppear() {
-        environment.location.requestWhenInUse()
+        if case .global = scope {
+            environment.location.requestWhenInUse()
+        }
     }
 
     func centerOnUser() {
@@ -39,7 +53,24 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func user(for id: UUID) -> User? {
-        PreviewData.user(for: id)
+        if case let .user(user) = scope, user.id == id {
+            return user
+        }
+        return PreviewData.user(for: id)
+    }
+
+    var isUserScope: Bool {
+        if case .user = scope {
+            return true
+        }
+        return false
+    }
+
+    var scopedUser: User? {
+        if case let .user(user) = scope {
+            return user
+        }
+        return nil
     }
 
     func region(for real: RealPost) -> MKCoordinateRegion {
@@ -99,6 +130,17 @@ final class MapTalkViewModel: ObservableObject {
             .active(in: nil)
             .receive(on: DispatchQueue.main)
             .assign(to: &$reals)
+    }
+
+    private func loadUserScope(for user: User) {
+        let snapshot = UserMapViewModel(
+            environment: environment,
+            context: .profileContext(for: user)
+        )
+        ratedPOIs = snapshot.footprints.map(\.ratedPOI)
+        reals = snapshot.reels
+        userCoordinate = nil
+        region = snapshot.mapRegion
     }
 
     private func regionAround(

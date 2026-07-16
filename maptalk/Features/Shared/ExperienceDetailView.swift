@@ -90,6 +90,7 @@ struct ExperienceDetailView: View {
             let id: UUID
             let media: MediaDisplayItem
             let timestamp: Date
+            let readKey: String
         }
 
         let id: UUID
@@ -97,6 +98,14 @@ struct ExperienceDetailView: View {
         let user: User?
         let items: [Item]
         let mostRecent: Date
+
+        var readKeys: [String] {
+            items.reduce(into: [String]()) { keys, item in
+                if keys.contains(item.readKey) == false {
+                    keys.append(item.readKey)
+                }
+            }
+        }
     }
 
     struct EngagementSectionModel {
@@ -121,19 +130,27 @@ struct ExperienceDetailView: View {
     let isExpanded: Bool
     let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
     let userProvider: (UUID) -> User?
+    let onPOIContributorViewed: ([String]) -> Void
+    let isPOIContributorUnseen: ([String]) -> Bool
+    @Environment(\.appEnv) private var environment
     @State private var storyViewerState: POIStoryViewerState?
+    @State private var selectedProfileContext: UserMapViewModel.Context?
 
     init(
         ratedPOI: RatedPOI,
         isExpanded: Bool,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
-        userProvider: @escaping (UUID) -> User? = { _ in nil }
+        userProvider: @escaping (UUID) -> User? = { _ in nil },
+        onPOIContributorViewed: @escaping ([String]) -> Void = { _ in },
+        isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
     ) {
         self.poi = ratedPOI
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.userProvider = userProvider
+        self.onPOIContributorViewed = onPOIContributorViewed
+        self.isPOIContributorUnseen = isPOIContributorUnseen
     }
 
     init(
@@ -141,13 +158,17 @@ struct ExperienceDetailView: View {
         selection: Binding<UUID>,
         isExpanded: Bool,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
-        userProvider: @escaping (UUID) -> User? = { _ in nil }
+        userProvider: @escaping (UUID) -> User? = { _ in nil },
+        onPOIContributorViewed: @escaping ([String]) -> Void = { _ in },
+        isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
     ) {
         self.poi = nil
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.userProvider = userProvider
+        self.onPOIContributorViewed = onPOIContributorViewed
+        self.isPOIContributorUnseen = isPOIContributorUnseen
     }
 
     var body: some View {
@@ -172,9 +193,21 @@ struct ExperienceDetailView: View {
             POIStoryViewer(
                 contributors: refreshedData.recentSharers,
                 initialIndex: min(state.contributorIndex, max(refreshedData.recentSharers.count - 1, 0)),
-                accentColor: refreshedData.accentColor
+                accentColor: refreshedData.accentColor,
+                onUserSelected: openProfile,
+                onPageViewed: { readKey in
+                    onPOIContributorViewed([readKey])
+                }
             ) {
                 storyViewerState = nil
+            }
+        }
+        .fullScreenCover(item: $selectedProfileContext) { context in
+            NavigationStack {
+                UserProfileView(
+                    viewModel: .init(environment: environment, context: context),
+                    showsCloseButton: true
+                )
             }
         }
     }
@@ -182,6 +215,10 @@ struct ExperienceDetailView: View {
     func openRecentSharer(at index: Int, using data: ContentData) {
         guard data.recentSharers.indices.contains(index) else { return }
         storyViewerState = POIStoryViewerState(contributorIndex: index)
+    }
+
+    func openProfile(for user: User) {
+        selectedProfileContext = .profileContext(for: user)
     }
 }
 
