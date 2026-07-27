@@ -2,23 +2,20 @@ import SwiftUI
 
 struct UserMapView: View {
     @StateObject var viewModel: UserMapViewModel
-    @State private var selectedSegmentId: String?
 
     var body: some View {
-        UserMapDetailView(
-            pins: viewModel.mapPins,
-            reels: viewModel.reels,
-            footprints: viewModel.footprints,
-            mapUser: viewModel.identity.user,
-            region: viewModel.mapRegion,
-            userProvider: userProvider,
-            onDismiss: {},
-            selectedSegmentId: $selectedSegmentId,
-            onSelectSegment: { selectedSegmentId = $0 },
-            onDismissWithSegment: { selectedSegmentId = $0 },
-            initialDisplayMode: .timeline,
-            showsCloseButton: false
-        )
+        NavigationStack {
+            UserMapHomeView(
+                user: viewModel.identity.user,
+                region: viewModel.mapRegion,
+                records: UserMapRecord.make(
+                    reels: viewModel.reels,
+                    footprints: viewModel.footprints,
+                    user: viewModel.identity.user
+                ),
+                userProvider: userProvider
+            )
+        }
     }
 
     private var userProvider: (UUID) -> User? {

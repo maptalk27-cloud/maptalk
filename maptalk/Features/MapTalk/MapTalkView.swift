@@ -24,7 +24,7 @@ struct MapTalkView: View {
     @State private var suppressJourneySelectionUpdate: Bool = false
     @State private var detentRerenderKey: Int = 0
     @State private var didApplyInitialStorySelection: Bool = false
-    @State private var viewedStoryKeys: Set<String> = StoryReadStateStore.load()
+    @StateObject private var storyReadStore = StoryReadStore()
     @State private var pendingViewedStoryKey: String?
     @Namespace private var heroNamespace
     private let initialStoryId: UUID?
@@ -37,113 +37,41 @@ struct MapTalkView: View {
     var body: some View {
         GeometryReader { geometry in
             let journeyNamespace = focusedJourneyHeader != nil ? heroNamespace : nil
-            let makePOIGroup: (RatedPOI, Bool) -> RealStoriesRow.POIStoryGroup? = { rated, onlyRecent in
-                let sharers = rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
-                    let storyMedia = checkIn.media.filter { media in
-                        switch media.kind {
-                        case .photo, .video:
-                            return true
-                        }
-                    }
-                    let hasStory = storyMedia.isEmpty == false
-                    if onlyRecent {
-                        if hasStory == false { return nil }
-                        if checkIn.createdAt < Date().addingTimeInterval(-60 * 60 * 24) {
-                            return nil
-                        }
-                    }
-                    let user = viewModel.user(for: checkIn.userId)
-                    return RealStoriesRow.POISharer(
-                        id: checkIn.id,
-                        user: user,
-                        timestamp: checkIn.createdAt,
-                        hasStory: hasStory,
-                        readKeys: storyMedia.map { media in
-                            StoryReadKeys.poiStoryPage(
-                                poiId: rated.id,
-                                checkInId: checkIn.id,
-                                mediaId: media.id,
-                                timestamp: checkIn.createdAt
-                            )
-                        }
-                    )
-                }
-                .sorted { $0.timestamp > $1.timestamp }
-                guard sharers.isEmpty == false else { return nil }
-                return RealStoriesRow.POIStoryGroup(
-                    ratedPOI: rated,
-                    sharers: sharers,
-                    latestTimestamp: sharers.first?.timestamp ?? (rated.checkIns.map(\.createdAt).max() ?? Date())
-                )
-            }
             let journeyStoryItems: (JourneyPost) -> [RealStoriesRow.StoryItem] = { journey in
-                let journeyPOIs = journey.pois.compactMap { rated in
-                    makePOIGroup(rated, false)
-                }
-                let items = (
-                    journey.reels.sorted { $0.createdAt > $1.createdAt }.map { RealStoriesRow.StoryItem(real: $0) } +
-                    journeyPOIs.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
-                )
-                return items.sorted { $0.timestamp > $1.timestamp }
+                MapStoryFeed.items(for: journey, userProvider: viewModel.user(for:))
             }
 
-            let sortedReals = viewModel.reals.sorted { $0.createdAt > $1.createdAt }
-            let poiGroups = viewModel.ratedPOIs.compactMap { rated in
-                makePOIGroup(rated, viewModel.isUserScope == false)
-            }
-            let baseStoryItems = (
-                sortedReals.map { RealStoriesRow.StoryItem(real: $0) } +
-                poiGroups.compactMap { RealStoriesRow.StoryItem(poiGroup: $0) }
+            let baseStoryItems = MapStoryFeed.items(
+                reals: viewModel.reals,
+                ratedPOIs: viewModel.ratedPOIs,
+                onlyRecentPOIStories: viewModel.isUserScope == false,
+                userProvider: viewModel.user(for:)
             )
-            .sorted { $0.timestamp > $1.timestamp }
 
             let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
 
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
 
             let storyItemIds = storyItems.map(\.id)
-            let sequenceItems: [ExperienceDetailView.SequencePager.Item] = {
-                if focusedJourneyHeader != nil {
-                    return storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
-                        switch item.source {
-                        case let .real(real):
-                            return ExperienceDetailView.SequencePager.Item(
-                                id: real.id,
-                                mode: .real(real, viewModel.user(for: real.userId))
-                            )
-                        case let .poi(group):
-                            return ExperienceDetailView.SequencePager.Item(
-                                id: group.id,
-                                mode: .poi(group.ratedPOI)
-                            )
-                        case let .journey(journey):
-                            return ExperienceDetailView.SequencePager.Item(
-                                id: journey.id,
-                                mode: .journey(journey)
-                            )
-                        }
-                    }
+            let sequenceItems = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
+                switch item.source {
+                case let .real(real):
+                    return ExperienceDetailView.SequencePager.Item(
+                        id: real.id,
+                        mode: .real(real, viewModel.user(for: real.userId))
+                    )
+                case let .poi(group):
+                    return ExperienceDetailView.SequencePager.Item(
+                        id: group.id,
+                        mode: .poi(group.ratedPOI)
+                    )
+                case let .journey(journey):
+                    return ExperienceDetailView.SequencePager.Item(
+                        id: journey.id,
+                        mode: .journey(journey)
+                    )
                 }
-                return storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
-                    switch item.source {
-                    case let .real(real):
-                        return ExperienceDetailView.SequencePager.Item(
-                            id: real.id,
-                            mode: .real(real, viewModel.user(for: real.userId))
-                        )
-                    case let .poi(group):
-                        return ExperienceDetailView.SequencePager.Item(
-                            id: group.id,
-                            mode: .poi(group.ratedPOI)
-                        )
-                    case let .journey(journey):
-                        return ExperienceDetailView.SequencePager.Item(
-                            id: journey.id,
-                            mode: .journey(journey)
-                        )
-                    }
-                }
-            }()
+            }
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
             let collapseDetent = {
@@ -194,27 +122,22 @@ struct MapTalkView: View {
             }
             let isStoryUnseen: (RealStoriesRow.StoryItem) -> Bool = { item in
                 if case let .poi(group) = item.source {
-                    return group.unreadCandidateKeys.contains { viewedStoryKeys.contains($0) == false }
+                    return group.unreadCandidateKeys.contains { storyReadStore.isViewed($0) == false }
                 }
-                return item.isFresh && viewedStoryKeys.contains(item.readKey) == false
+                return item.isFresh && storyReadStore.isViewed(item.readKey) == false
             }
             let markStoryReadKeyViewed: (String) -> Void = { key in
-                guard viewedStoryKeys.contains(key) == false else { return }
                 withAnimation(.easeOut(duration: 0.14)) {
-                    _ = viewedStoryKeys.insert(key)
+                    storyReadStore.markViewed(key)
                 }
-                StoryReadStateStore.save(viewedStoryKeys)
             }
             let markStoryReadKeysViewed: ([String]) -> Void = { keys in
-                let newKeys = keys.filter { viewedStoryKeys.contains($0) == false }
-                guard newKeys.isEmpty == false else { return }
                 withAnimation(.easeOut(duration: 0.14)) {
-                    viewedStoryKeys.formUnion(newKeys)
+                    storyReadStore.markViewed(keys)
                 }
-                StoryReadStateStore.save(viewedStoryKeys)
             }
             let isPOIContributorUnseen: ([String]) -> Bool = { keys in
-                keys.contains { viewedStoryKeys.contains($0) == false }
+                keys.contains { storyReadStore.isViewed($0) == false }
             }
             let flushPendingViewedStory: (String?) -> Void = { excludingKey in
                 guard let pendingKey = pendingViewedStoryKey,
@@ -1101,39 +1024,6 @@ private enum ActiveExperience: Identifiable {
         default:
             return nil
         }
-    }
-}
-
-private extension RealStoriesRow.StoryItem {
-    var readKey: String {
-        switch source {
-        case let .real(real):
-            return StoryReadKeys.real(real)
-        case let .poi(group):
-            return "poi:\(group.id.uuidString):\(Self.timestampToken(group.latestTimestamp))"
-        case let .journey(journey):
-            return StoryReadKeys.journey(journey)
-        }
-    }
-
-    var isFresh: Bool {
-        StoryReadKeys.isFresh(timestamp)
-    }
-
-    private static func timestampToken(_ date: Date) -> Int {
-        Int(date.timeIntervalSinceReferenceDate)
-    }
-}
-
-private enum StoryReadStateStore {
-    private static let key = "MapTalk.viewedStoryKeys"
-
-    static func load() -> Set<String> {
-        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
-    }
-
-    static func save(_ keys: Set<String>) {
-        UserDefaults.standard.set(Array(keys), forKey: key)
     }
 }
 
