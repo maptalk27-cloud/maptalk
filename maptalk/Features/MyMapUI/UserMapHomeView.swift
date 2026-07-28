@@ -34,7 +34,23 @@ struct UserMapRecord: Identifiable {
     }
 
     var cityName: String {
-        UserMapCity.label(for: coordinate)
+        if let locationLabel,
+           let city = UserMapCity.city(from: locationLabel) {
+            return city
+        }
+        return UserMapCity.label(for: coordinate)
+    }
+
+    private var locationLabel: String? {
+        switch kind {
+        case let .poi(poi):
+            return PreviewData.locationLabel(for: poi.poi.id)
+        case let .reel(reel):
+            return PreviewData.locationLabel(for: reel.id)
+        case let .journey(journey):
+            return journey.reels.lazy.compactMap { PreviewData.locationLabel(for: $0.id) }.first
+                ?? journey.pois.lazy.compactMap { PreviewData.locationLabel(for: $0.poi.id) }.first
+        }
     }
 
     static func make(
@@ -100,6 +116,38 @@ struct UserMapHomeView: View {
         var id: Self { self }
     }
 
+    fileprivate struct FilterState: Equatable {
+        var types = Set(RecordType.allCases)
+        var cities: Set<String> = []
+        var datePreset: DatePreset = .anyTime
+        var customStartDate = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
+        var customEndDate = Date.now
+
+        var isDefault: Bool {
+            types.count == RecordType.allCases.count
+                && cities.isEmpty
+                && datePreset == .anyTime
+        }
+    }
+
+    fileprivate enum FilterPresentation: String, Identifiable {
+        case all
+        case type
+        case date
+        case city
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .all: "Filter memories"
+            case .type: "Type"
+            case .date: "Date"
+            case .city: "Cities"
+            }
+        }
+    }
+
     let user: User
     let region: MKCoordinateRegion
     let records: [UserMapRecord]
@@ -107,15 +155,13 @@ struct UserMapHomeView: View {
 
     @State private var display: Display = .list
     @State private var searchText = ""
-    @State private var selectedTypes = Set(RecordType.allCases)
-    @State private var selectedCity: String?
-    @State private var datePreset: DatePreset = .anyTime
-    @State private var customStartDate = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
-    @State private var customEndDate = Date.now
-    @State private var isFilterPresented = false
+    @State private var filters = FilterState()
+    @State private var filterDraft = FilterState()
+    @State private var filterPresentation: FilterPresentation?
     @State private var selectedRecord: UserMapRecord?
     @State private var mapPreview: UserMapRecord?
     @State private var cameraPosition: MapCameraPosition
+    @FocusState private var isSearchFocused: Bool
 
     init(
         user: User,
@@ -142,42 +188,44 @@ struct UserMapHomeView: View {
             viewToggle
                 .padding(.bottom, display == .list ? 18 : 28)
         }
-        .navigationTitle("MyMap")
-        .navigationBarTitleDisplayMode(.large)
-        .searchable(text: $searchText, prompt: "Search places and memories")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    isFilterPresented = true
-                } label: {
-                    Image(systemName: hasActiveFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
-                }
-                .accessibilityLabel("Filter records")
-            }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            archiveControls
         }
+        .navigationTitle("MyMap")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(display == .list ? .visible : .hidden, for: .navigationBar)
         .sheet(item: $selectedRecord) { record in
             UserMapRecordDetail(record: record, userProvider: userProvider)
                 .presentationDetents([.fraction(0.32), .large])
                 .presentationBackground(.thinMaterial)
         }
-        .sheet(isPresented: $isFilterPresented) {
+        .sheet(item: $filterPresentation) { presentation in
             UserMapFilterSheet(
+                presentation: presentation,
                 cities: availableCities,
-                selectedTypes: $selectedTypes,
-                selectedCity: $selectedCity,
-                datePreset: $datePreset,
-                customStartDate: $customStartDate,
-                customEndDate: $customEndDate
+                filters: $filterDraft,
+                resultCount: filteredRecords(using: filterDraft).count,
+                onApply: {
+                    applyFilters(filterDraft)
+                }
             )
             .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        .onChange(of: searchText) { _, _ in
+            clearMapPreviewIfNeeded(using: filters)
         }
     }
 
     private var filteredRecords: [UserMapRecord] {
+        filteredRecords(using: filters)
+    }
+
+    private func filteredRecords(using filter: FilterState) -> [UserMapRecord] {
         records.filter { record in
-            guard selectedTypes.contains(recordType(for: record)) else { return false }
-            guard selectedCity == nil || selectedCity == record.cityName else { return false }
-            guard matchesDate(record.timestamp) else { return false }
+            guard filter.types.contains(recordType(for: record)) else { return false }
+            guard filter.cities.isEmpty || filter.cities.contains(record.cityName) else { return false }
+            guard matchesDate(record.timestamp, using: filter) else { return false }
             guard searchText.isEmpty == false else { return true }
             return record.title.localizedCaseInsensitiveContains(searchText)
                 || record.cityName.localizedCaseInsensitiveContains(searchText)
@@ -189,7 +237,7 @@ struct UserMapHomeView: View {
     }
 
     private var hasActiveFilters: Bool {
-        selectedTypes.count != RecordType.allCases.count || selectedCity != nil || datePreset != .anyTime
+        filters.isDefault == false
     }
 
     private func recordType(for record: UserMapRecord) -> RecordType {
@@ -200,9 +248,9 @@ struct UserMapHomeView: View {
         }
     }
 
-    private func matchesDate(_ date: Date) -> Bool {
+    private func matchesDate(_ date: Date, using filter: FilterState) -> Bool {
         let calendar = Calendar.current
-        switch datePreset {
+        switch filter.datePreset {
         case .anyTime:
             return true
         case .today:
@@ -214,8 +262,8 @@ struct UserMapHomeView: View {
         case .year:
             return date >= (calendar.date(byAdding: .year, value: -1, to: .now) ?? .distantPast)
         case .custom:
-            let start = calendar.startOfDay(for: min(customStartDate, customEndDate))
-            let endDay = calendar.startOfDay(for: max(customStartDate, customEndDate))
+            let start = calendar.startOfDay(for: min(filter.customStartDate, filter.customEndDate))
+            let endDay = calendar.startOfDay(for: max(filter.customStartDate, filter.customEndDate))
             let end = calendar.date(byAdding: .day, value: 1, to: endDay) ?? endDay
             return date >= start && date < end
         }
@@ -233,10 +281,10 @@ struct UserMapHomeView: View {
 
     private var listContent: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24, pinnedViews: .sectionHeaders) {
+            LazyVStack(alignment: .leading, spacing: 26, pinnedViews: .sectionHeaders) {
                 if filteredRecords.isEmpty {
                     ContentUnavailableView(
-                        "No records found",
+                        "No memories found",
                         systemImage: "magnifyingglass",
                         description: Text("Try a different search or filter.")
                     )
@@ -257,25 +305,25 @@ struct UserMapHomeView: View {
 
                                 if index < section.1.count - 1 {
                                     Divider()
-                                        .padding(.leading, 70)
+                                        .padding(.leading, 76)
                                 }
                             }
                         }
                     } header: {
-                        Text(section.0)
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 8)
-                            .background(Color(.systemBackground))
+                        ArchiveDateHeader(
+                            title: section.0,
+                            count: section.1.count,
+                            date: section.1.first?.timestamp ?? .now
+                        )
+                        .background(Color(.systemBackground))
                     }
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.top, 8)
+            .padding(.top, 14)
             .padding(.bottom, 94)
         }
-        .background(Color(.systemGroupedBackground))
+        .background(Color(.systemBackground))
     }
 
     private var mapContent: some View {
@@ -307,6 +355,189 @@ struct UserMapHomeView: View {
         }
     }
 
+    private var archiveControls: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                HStack(spacing: 9) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+
+                    TextField("Search memories", text: $searchText)
+                        .font(.subheadline)
+                        .focused($isSearchFocused)
+                        .submitLabel(.search)
+
+                    if searchText.isEmpty == false {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 38)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                Button {
+                    presentFilter(.all)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(hasActiveFilters ? Color.white : Color.primary)
+                        .frame(width: 38, height: 38)
+                        .background(hasActiveFilters ? Color.black : Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Filter records")
+            }
+
+            if hasActiveFilters {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        if showsAllTypes == false {
+                            ArchiveActiveFilterToken(
+                                title: typeFilterTitle,
+                                onOpen: { presentFilter(.type) },
+                                onClear: { clearFilter(.type) }
+                            )
+                        }
+
+                        if filters.datePreset != .anyTime {
+                            ArchiveActiveFilterToken(
+                                title: dateFilterTitle,
+                                onOpen: { presentFilter(.date) },
+                                onClear: { clearFilter(.date) }
+                            )
+                        }
+
+                        if filters.cities.isEmpty == false {
+                            ArchiveActiveFilterToken(
+                                title: cityFilterTitle,
+                                onOpen: { presentFilter(.city) },
+                                onClear: { clearFilter(.city) }
+                            )
+                        }
+
+                        Button("Clear") {
+                            clearFilter(.all)
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .padding(.horizontal, -16)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 11)
+        .background(display == .map ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(Color(.systemBackground)))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(display == .map ? Color.white.opacity(0.18) : Color(.separator).opacity(0.25))
+                .frame(height: 1)
+        }
+    }
+
+    private var showsAllTypes: Bool {
+        filters.types.count == RecordType.allCases.count
+    }
+
+    private var typeFilterTitle: String {
+        if showsAllTypes { return "All types" }
+        let selected = RecordType.allCases
+            .filter(filters.types.contains)
+            .map(\.rawValue)
+        return selected.joined(separator: " + ")
+    }
+
+    private var cityFilterTitle: String {
+        if filters.cities.isEmpty { return "Everywhere" }
+        let selected = availableCities.filter(filters.cities.contains)
+        guard let first = selected.first else { return "Places" }
+        return selected.count == 1 ? first : "\(first) + \(selected.count - 1)"
+    }
+
+    private var dateFilterTitle: String {
+        guard filters.datePreset == .custom else { return filters.datePreset.rawValue }
+        let start = min(filters.customStartDate, filters.customEndDate)
+        let end = max(filters.customStartDate, filters.customEndDate)
+        let format = Date.FormatStyle(date: .abbreviated, time: .omitted)
+        return "\(start.formatted(format)) – \(end.formatted(format))"
+    }
+
+    private func presentFilter(_ presentation: FilterPresentation) {
+        isSearchFocused = false
+        filterDraft = filters
+        filterPresentation = presentation
+    }
+
+    private func applyFilters(_ newFilters: FilterState) {
+        filters = newFilters
+        clearMapPreviewIfNeeded(using: newFilters)
+        if display == .map {
+            focusMap(on: filteredRecords(using: newFilters))
+        }
+    }
+
+    private func clearFilter(_ presentation: FilterPresentation) {
+        var updated = filters
+        let defaultFilters = FilterState()
+
+        switch presentation {
+        case .all:
+            updated = defaultFilters
+        case .type:
+            updated.types = defaultFilters.types
+        case .date:
+            updated.datePreset = defaultFilters.datePreset
+            updated.customStartDate = defaultFilters.customStartDate
+            updated.customEndDate = defaultFilters.customEndDate
+        case .city:
+            updated.cities.removeAll()
+        }
+
+        applyFilters(updated)
+    }
+
+    private func clearMapPreviewIfNeeded(using filter: FilterState) {
+        guard let mapPreview,
+              filteredRecords(using: filter).contains(where: { $0.id == mapPreview.id }) == false else { return }
+        withAnimation(.easeOut(duration: 0.18)) {
+            self.mapPreview = nil
+        }
+    }
+
+    private func focusMap(on records: [UserMapRecord]) {
+        guard records.isEmpty == false else { return }
+
+        let coordinates = records.map(\.coordinate)
+        let latitudes = coordinates.map(\.latitude)
+        let longitudes = coordinates.map(\.longitude)
+        guard let minLatitude = latitudes.min(),
+              let maxLatitude = latitudes.max(),
+              let minLongitude = longitudes.min(),
+              let maxLongitude = longitudes.max() else { return }
+
+        let latitudeDelta = min(max((maxLatitude - minLatitude) * 1.35, 0.045), 150)
+        let longitudeDelta = min(max((maxLongitude - minLongitude) * 1.35, 0.045), 320)
+        let region = MKCoordinateRegion(
+            center: .init(
+                latitude: (minLatitude + maxLatitude) / 2,
+                longitude: (minLongitude + maxLongitude) / 2
+            ),
+            span: .init(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
+        )
+
+        withAnimation(.easeInOut(duration: 0.3)) {
+            cameraPosition = .region(region)
+        }
+    }
+
     @ViewBuilder
     private func mapMarker(for record: UserMapRecord) -> some View {
         switch record.kind {
@@ -315,20 +546,23 @@ struct UserMapHomeView: View {
         case let .reel(reel):
             RealMapThumbnail(real: reel, user: userProvider(reel.userId), size: 38)
         case .journey:
-            Image(systemName: "map.fill")
-                .font(.headline.weight(.bold))
-                .foregroundStyle(.white)
-                .frame(width: 42, height: 42)
-                .background(Theme.neonAccent, in: Circle())
-                .overlay { Circle().stroke(Color.white.opacity(0.7), lineWidth: 2) }
-                .shadow(color: Theme.neonAccent.opacity(0.45), radius: 8, y: 3)
+            MemoryThumbnail(record: record, size: 42, cornerRadius: 12)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white, lineWidth: 2)
+                }
+                .shadow(color: Color.black.opacity(0.24), radius: 5, y: 2)
         }
     }
 
     private var viewToggle: some View {
         Button {
+            let nextDisplay: Display = display == .list ? .map : .list
             withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                display = display == .list ? .map : .list
+                display = nextDisplay
+            }
+            if nextDisplay == .map {
+                focusMap(on: filteredRecords)
             }
         } label: {
             Label(display == .list ? "Map" : "List", systemImage: display == .list ? "map" : "list.bullet")
@@ -352,6 +586,12 @@ struct UserMapHomeView: View {
 }
 
 private enum UserMapCity {
+    static func city(from locationLabel: String) -> String? {
+        let city = String(locationLabel.split(separator: ",", maxSplits: 1).first ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return city.isEmpty ? nil : city
+    }
+
     static func label(for coordinate: CLLocationCoordinate2D) -> String {
         let candidates: [(String, CLLocationCoordinate2D)] = [
             ("Xi'an", .init(latitude: 34.341, longitude: 108.939)),
@@ -368,88 +608,445 @@ private enum UserMapCity {
     }
 }
 
+private struct ArchiveActiveFilterToken: View {
+    let title: String
+    let onOpen: () -> Void
+    let onClear: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onOpen) {
+                Text(title)
+                    .lineLimit(1)
+                    .padding(.leading, 11)
+                    .padding(.trailing, 8)
+                    .frame(height: 30)
+            }
+            .buttonStyle(.plain)
+
+            Rectangle()
+                .fill(Color(.separator).opacity(0.45))
+                .frame(width: 1, height: 14)
+
+            Button(action: onClear) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.bold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Clear \(title) filter")
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.primary)
+        .background(Color(.secondarySystemBackground), in: Capsule(style: .continuous))
+        .overlay {
+            Capsule(style: .continuous)
+                .stroke(Color(.separator).opacity(0.25), lineWidth: 1)
+        }
+    }
+}
+
+private struct ArchiveFilterOption: View {
+    let title: String
+    let systemImage: String?
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 7) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.caption.weight(.semibold))
+                }
+
+                Text(title)
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.caption2.weight(.bold))
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .padding(.horizontal, 11)
+            .frame(maxWidth: .infinity)
+            .frame(height: 42)
+            .background(
+                isSelected ? Color.black : Color(.secondarySystemBackground),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color(.separator).opacity(isSelected ? 0 : 0.22), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ArchiveDateHeader: View {
+    let title: String
+    let count: Int
+    let date: Date
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(seasonTint)
+                .frame(width: 6, height: 6)
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            Spacer()
+            Text(count.formatted())
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var seasonTint: Color {
+        switch Calendar.current.component(.month, from: date) {
+        case 3...5:
+            Color(red: 0.87, green: 0.66, blue: 0.70)
+        case 6...8:
+            Color(red: 0.54, green: 0.72, blue: 0.83)
+        case 9...11:
+            Color(red: 0.74, green: 0.58, blue: 0.39)
+        default:
+            Color(red: 0.58, green: 0.65, blue: 0.72)
+        }
+    }
+}
+
 private struct UserMapFilterSheet: View {
+    let presentation: UserMapHomeView.FilterPresentation
     let cities: [String]
-    @Binding var selectedTypes: Set<UserMapHomeView.RecordType>
-    @Binding var selectedCity: String?
-    @Binding var datePreset: UserMapHomeView.DatePreset
-    @Binding var customStartDate: Date
-    @Binding var customEndDate: Date
+    @Binding var filters: UserMapHomeView.FilterState
+    let resultCount: Int
+    let onApply: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var citySearchText = ""
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section {
-                    ForEach(UserMapHomeView.RecordType.allCases) { type in
-                        Button {
-                            toggle(type)
-                        } label: {
-                            HStack {
-                                Label(type.rawValue, systemImage: type.icon)
-                                Spacer()
-                                Image(systemName: selectedTypes.contains(type) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selectedTypes.contains(type) ? Theme.neonPrimary : .secondary)
-                            }
-                        }
-                        .foregroundStyle(.primary)
-                    }
-                } header: {
-                    Text("Record type")
-                } footer: {
-                    Text("Choose one or more kinds of memories.")
-                }
-
-                Section("Time") {
-                    Picker("When", selection: $datePreset) {
-                        ForEach(UserMapHomeView.DatePreset.allCases) { preset in
-                            Text(preset.rawValue).tag(preset)
-                        }
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 30) {
+                    if showsType {
+                        typeSection
                     }
 
-                    if datePreset == .custom {
-                        DatePicker("From", selection: $customStartDate, displayedComponents: .date)
-                        DatePicker("To", selection: $customEndDate, displayedComponents: .date)
+                    if showsDate {
+                        dateSection
                     }
-                }
 
-                Section {
-                    Picker("Location", selection: $selectedCity) {
-                        Text("All cities").tag(String?.none)
-                        ForEach(cities, id: \.self) { city in
-                            Text(city).tag(Optional(city))
-                        }
+                    if showsCity {
+                        citySection
                     }
-                } header: {
-                    Text("City")
-                } footer: {
-                    Text("Cities are inferred from the saved location. A future location search can replace this with geocoded places.")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 92)
             }
-            .navigationTitle("Filters")
+            .background(Color(.systemBackground))
+            .navigationTitle(presentation.title)
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    onApply()
+                    dismiss()
+                } label: {
+                    Text("Show \(resultCount) \(resultCount == 1 ? "memory" : "memories")")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.black, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.bar)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Clear") {
-                        selectedTypes = Set(UserMapHomeView.RecordType.allCases)
-                        selectedCity = nil
-                        datePreset = .anyTime
-                    }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Show results") { dismiss() }
-                        .fontWeight(.semibold)
+                    Button("Clear") { clearCurrentFacet() }
+                        .disabled(canClearCurrentFacet == false)
                 }
             }
         }
     }
 
+    private var showsType: Bool {
+        presentation == .all || presentation == .type
+    }
+
+    private var showsDate: Bool {
+        presentation == .all || presentation == .date
+    }
+
+    private var showsCity: Bool {
+        presentation == .all || presentation == .city
+    }
+
+    private var typeSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeading("What you saved", detail: "Choose one or more kinds of memories.")
+
+            ArchiveFilterOption(
+                title: "All types",
+                systemImage: "square.grid.2x2",
+                isSelected: isShowingAllTypes,
+                action: selectAllTypes
+            )
+
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
+                spacing: 8
+            ) {
+                ForEach(UserMapHomeView.RecordType.allCases) { type in
+                    ArchiveFilterOption(
+                        title: type.rawValue,
+                        systemImage: type.icon,
+                        isSelected: filters.types.contains(type) && isShowingAllTypes == false,
+                        action: { toggle(type) }
+                    )
+                }
+            }
+        }
+    }
+
+    private var dateSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeading("When it happened", detail: "Use a quick window or choose exact dates.")
+
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
+                spacing: 8
+            ) {
+                ForEach(UserMapHomeView.DatePreset.allCases.filter { $0 != .custom }) { preset in
+                    ArchiveFilterOption(
+                        title: preset.rawValue,
+                        systemImage: dateIcon(for: preset),
+                        isSelected: filters.datePreset == preset,
+                        action: { filters.datePreset = preset }
+                    )
+                }
+            }
+
+            ArchiveFilterOption(
+                title: "Choose dates",
+                systemImage: "calendar",
+                isSelected: filters.datePreset == .custom,
+                action: { filters.datePreset = .custom }
+            )
+
+            if filters.datePreset == .custom {
+                VStack(spacing: 0) {
+                    DatePicker("From", selection: $filters.customStartDate, displayedComponents: .date)
+                        .padding(.vertical, 12)
+                    Divider()
+                    DatePicker("To", selection: $filters.customEndDate, displayedComponents: .date)
+                        .padding(.vertical, 12)
+                }
+                .padding(.horizontal, 12)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+    }
+
+    private var citySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionHeading("Places", detail: citySelectionDetail)
+
+            ArchiveFilterOption(
+                title: "Everywhere",
+                systemImage: "globe",
+                isSelected: filters.cities.isEmpty,
+                action: { filters.cities.removeAll() }
+            )
+
+            if cities.count > 6 {
+                citySearchField
+            }
+
+            if cities.isEmpty {
+                Text("No saved places yet.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } else if visibleCities.isEmpty {
+                Text("No cities match \"\(citySearchText)\".")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(visibleCities.enumerated()), id: \.element) { index, city in
+                        Button {
+                            toggle(city)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "mappin")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 16)
+                                Text(city)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                if filters.cities.contains(city) {
+                                    Image(systemName: "checkmark")
+                                        .font(.caption.weight(.bold))
+                                        .foregroundStyle(.primary)
+                                }
+                            }
+                            .padding(.horizontal, 13)
+                            .frame(height: 48)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if index < visibleCities.count - 1 {
+                            Divider()
+                                .padding(.leading, 39)
+                        }
+                    }
+                }
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+    }
+
+    private var citySearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+            TextField("Search cities", text: $citySearchText)
+                .font(.subheadline)
+            if citySearchText.isEmpty == false {
+                Button {
+                    citySearchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 42)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func sectionHeading(_ title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var isShowingAllTypes: Bool {
+        filters.types.count == UserMapHomeView.RecordType.allCases.count
+    }
+
+    private var citySelectionDetail: String {
+        guard filters.cities.isEmpty == false else {
+            return "Select one city or combine a few."
+        }
+        return "\(filters.cities.count) \(filters.cities.count == 1 ? "city" : "cities") selected."
+    }
+
+    private var visibleCities: [String] {
+        let matching = cities.filter { city in
+            citySearchText.isEmpty || city.localizedCaseInsensitiveContains(citySearchText)
+        }
+        let selected = matching.filter(filters.cities.contains)
+        let unselected = matching.filter { filters.cities.contains($0) == false }
+        return selected + unselected
+    }
+
+    private var canClearCurrentFacet: Bool {
+        switch presentation {
+        case .all:
+            return filters.isDefault == false
+        case .type:
+            return isShowingAllTypes == false
+        case .date:
+            return filters.datePreset != .anyTime
+        case .city:
+            return filters.cities.isEmpty == false
+        }
+    }
+
+    private func selectAllTypes() {
+        filters.types = Set(UserMapHomeView.RecordType.allCases)
+    }
+
     private func toggle(_ type: UserMapHomeView.RecordType) {
-        if selectedTypes.contains(type) {
-            guard selectedTypes.count > 1 else { return }
-            selectedTypes.remove(type)
+        let allTypes = Set(UserMapHomeView.RecordType.allCases)
+
+        if isShowingAllTypes {
+            filters.types = [type]
+        } else if filters.types.contains(type) {
+            filters.types.remove(type)
+            if filters.types.isEmpty {
+                filters.types = allTypes
+            }
         } else {
-            selectedTypes.insert(type)
+            filters.types.insert(type)
+            if filters.types.count == allTypes.count {
+                filters.types = allTypes
+            }
+        }
+    }
+
+    private func toggle(_ city: String) {
+        if filters.cities.contains(city) {
+            filters.cities.remove(city)
+        } else {
+            filters.cities.insert(city)
+        }
+    }
+
+    private func clearCurrentFacet() {
+        let defaultFilters = UserMapHomeView.FilterState()
+
+        switch presentation {
+        case .all:
+            filters = defaultFilters
+        case .type:
+            filters.types = defaultFilters.types
+        case .date:
+            filters.datePreset = defaultFilters.datePreset
+            filters.customStartDate = defaultFilters.customStartDate
+            filters.customEndDate = defaultFilters.customEndDate
+        case .city:
+            filters.cities.removeAll()
+        }
+    }
+
+    private func dateIcon(for preset: UserMapHomeView.DatePreset) -> String? {
+        switch preset {
+        case .anyTime: "infinity"
+        case .today: "sun.max"
+        case .week: "calendar"
+        case .month: "calendar.badge.clock"
+        case .year: "calendar.badge.exclamationmark"
+        case .custom: nil
         }
     }
 }
@@ -459,13 +1056,13 @@ private struct UserMapRecordCard: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            thumbnail
+            MemoryThumbnail(record: record, size: 64, cornerRadius: 8)
             VStack(alignment: .leading, spacing: 4) {
                 Text(record.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Text(subtitle)
+                    .lineLimit(2)
+                Text(metadata)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -475,79 +1072,182 @@ private struct UserMapRecordCard: View {
             }
             Spacer(minLength: 6)
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, 11)
         .contentShape(Rectangle())
     }
 
-    @ViewBuilder private var thumbnail: some View {
-        Group {
-            switch record.kind {
-            case let .poi(rated):
-                Image(systemName: rated.poi.category.symbolName)
+    private var metadata: String {
+        switch record.kind {
+        case let .poi(rated):
+            return "POI · \(rated.poi.category.displayName) · \(record.cityName)"
+        case .reel:
+            return "Reel · \(record.cityName)"
+        case let .journey(journey):
+            return "Journey · \(journey.reels.count + journey.pois.count) memories"
+        }
+    }
+}
+
+private struct MemoryThumbnail: View {
+    let record: UserMapRecord
+    let size: CGFloat
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            thumbnailContent
+            if case .journey = record.kind {
+                Image(systemName: "rectangle.stack.fill")
+                    .font(.system(size: max(size * 0.16, 8), weight: .bold))
                     .foregroundStyle(.white)
-                    .frame(width: 58, height: 58)
-                    .background(LinearGradient(colors: rated.poi.category.markerGradientColors, startPoint: .topLeading, endPoint: .bottomTrailing))
-            case let .reel(reel):
-                reelThumbnail(reel)
-            case .journey:
-                Image(systemName: "map.fill")
+                    .padding(max(size * 0.09, 4))
+                    .background(Color.black.opacity(0.55), in: Circle())
+                    .padding(max(size * 0.07, 3))
+            }
+            if case .reel = record.kind {
+                Image(systemName: "play.fill")
+                    .font(.system(size: max(size * 0.15, 8), weight: .heavy))
                     .foregroundStyle(.white)
-                    .frame(width: 58, height: 58)
-                    .background(Theme.neonAccent)
+                    .padding(max(size * 0.1, 5))
+                    .background(Color.black.opacity(0.48), in: Circle())
+                    .padding(max(size * 0.07, 3))
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(Color.black.opacity(0.08), lineWidth: 1)
         }
     }
 
     @ViewBuilder
-    private func reelThumbnail(_ reel: RealPost) -> some View {
-        if let url = reel.attachments.compactMap(mediaPreviewURL).first {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case let .success(image): image.resizable().scaledToFill()
-                case .empty: ProgressView()
-                default: reelFallback
+    private var thumbnailContent: some View {
+        switch record.kind {
+        case let .poi(rated):
+            if let url = poiPreviewURL(for: rated) {
+                MemoryRemoteImage(url: url)
+            } else {
+                Image(systemName: rated.poi.category.symbolName)
+                    .font(.system(size: size * 0.3, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(LinearGradient(colors: rated.poi.category.markerGradientColors, startPoint: .topLeading, endPoint: .bottomTrailing))
+            }
+        case let .reel(reel):
+            if let url = reelPreviewURL(for: reel) {
+                MemoryRemoteImage(url: url)
+            } else {
+                Image(systemName: "play.fill")
+                    .font(.system(size: size * 0.26, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+            }
+        case let .journey(journey):
+            JourneyMemoryThumbnail(journey: journey, size: size)
+        }
+    }
+
+    private func poiPreviewURL(for rated: RatedPOI) -> URL? {
+        rated.media.compactMap { media in
+            switch media.kind {
+            case let .photo(url): return url
+            case let .video(_, poster): return poster
+            }
+        }.first ?? rated.checkIns.flatMap(\.media).compactMap { media in
+            switch media.kind {
+            case let .photo(url): return url
+            case let .video(_, poster): return poster
+            }
+        }.first
+    }
+
+    private func reelPreviewURL(for reel: RealPost) -> URL? {
+        reel.attachments.compactMap { attachment in
+            switch attachment.kind {
+            case let .photo(url): return url
+            case let .video(_, poster): return poster
+            case .emoji: return nil
+            }
+        }.first
+    }
+}
+
+private struct MemoryRemoteImage: View {
+    let url: URL
+
+    var body: some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case let .success(image):
+                image.resizable().scaledToFill()
+            case .empty:
+                Color(.tertiarySystemFill)
+                    .overlay { ProgressView().controlSize(.mini) }
+            default:
+                Color(.tertiarySystemFill)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
+    }
+}
+
+private struct JourneyMemoryThumbnail: View {
+    let journey: JourneyPost
+    let size: CGFloat
+
+    var body: some View {
+        if imageURLs.isEmpty {
+            Image(systemName: "map")
+                .font(.system(size: size * 0.3, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
+        } else if imageURLs.count == 1, let imageURL = imageURLs.first {
+            MemoryRemoteImage(url: imageURL)
+        } else {
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 1), GridItem(.flexible(), spacing: 1)],
+                spacing: 1
+            ) {
+                ForEach(0..<4, id: \.self) { index in
+                    if let imageURL = imageURLs[safe: index] {
+                        MemoryRemoteImage(url: imageURL)
+                    } else {
+                        Color(.tertiarySystemFill)
+                    }
                 }
             }
-            .frame(width: 58, height: 58)
-            .overlay {
-                Image(systemName: "play.fill")
-                    .font(.caption.weight(.heavy))
-                    .foregroundStyle(.white)
-                    .padding(7)
-                    .background(Color.black.opacity(0.52), in: Circle())
+        }
+    }
+
+    private var imageURLs: [URL] {
+        let reelURLs = journey.reels.flatMap { reel in
+            reel.attachments.compactMap { attachment -> URL? in
+                switch attachment.kind {
+                case let .photo(url): return url
+                case let .video(_, poster): return poster
+                case .emoji: return nil
+                }
             }
-        } else {
-            reelFallback
         }
+        let poiURLs = journey.pois.flatMap { rated in
+            rated.media.compactMap { media -> URL? in
+                switch media.kind {
+                case let .photo(url): return url
+                case let .video(_, poster): return poster
+                }
+            }
+        }
+        return Array((reelURLs + poiURLs).prefix(4))
     }
+}
 
-    private var reelFallback: some View {
-        ZStack {
-            Theme.neonPrimary.opacity(0.7)
-            Image(systemName: "play.fill").foregroundStyle(.white)
-        }
-        .frame(width: 58, height: 58)
-    }
-
-    private func mediaPreviewURL(_ attachment: RealPost.Attachment) -> URL? {
-        switch attachment.kind {
-        case let .photo(url): return url
-        case let .video(_, poster): return poster
-        case .emoji: return nil
-        }
-    }
-
-    private var subtitle: String {
-        switch record.kind {
-        case let .poi(rated): return rated.poi.category.displayName
-        case .reel: return "Reel"
-        case let .journey(journey): return "\(journey.reels.count + journey.pois.count) memories"
-        }
+private extension Collection {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
@@ -556,18 +1256,29 @@ private struct UserMapRecordPreview: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "mappin.circle.fill")
-                .font(.title2)
-                .foregroundStyle(Theme.neonPrimary)
+            MemoryThumbnail(record: record, size: 52, cornerRadius: 8)
             VStack(alignment: .leading, spacing: 3) {
-                Text(record.title).font(.headline).lineLimit(1)
-                Text("Tap to open").font(.caption).foregroundStyle(.secondary)
+                Text(record.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text(metadata)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer()
             Image(systemName: "chevron.right").foregroundStyle(.tertiary)
         }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var metadata: String {
+        switch record.kind {
+        case let .poi(rated): return "POI · \(rated.poi.category.displayName) · \(record.cityName)"
+        case .reel: return "Reel · \(record.cityName)"
+        case let .journey(journey): return "Journey · \(journey.reels.count + journey.pois.count) memories"
+        }
     }
 }
 
