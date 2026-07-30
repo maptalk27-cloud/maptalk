@@ -32,6 +32,35 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
+    func testMyMapPinStaysOnMapAndOpensCapsule() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let myMapTab = app.tabBars.buttons["MyMap"]
+        XCTAssertTrue(myMapTab.waitForExistence(timeout: 5))
+        myMapTab.tap()
+
+        let showMap = app.buttons["Show map"]
+        XCTAssertTrue(showMap.waitForExistence(timeout: 5))
+        showMap.tap()
+
+        let mapPin = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "mymap.map-marker.")
+        ).firstMatch
+        XCTAssertTrue(mapPin.waitForExistence(timeout: 8))
+        mapPin.tap()
+
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "MyMap pin opens a capsule in place"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+
+        let capsule = app.descendants(matching: .any)["mymap.compact-capsule"]
+        XCTAssertTrue(capsule.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["Search memories"].exists)
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {

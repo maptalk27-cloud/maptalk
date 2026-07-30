@@ -10,9 +10,11 @@ struct UserMapView: View {
                 region: viewModel.mapRegion,
                 records: UserMapRecord.make(
                     reels: viewModel.reels,
-                    footprints: viewModel.footprints,
-                    user: viewModel.identity.user
+                    footprints: viewModel.footprints
                 ),
+                journeyProvider: { id in
+                    viewModel.journeyCatalog.first { $0.id == id }
+                },
                 userProvider: userProvider
             )
         }

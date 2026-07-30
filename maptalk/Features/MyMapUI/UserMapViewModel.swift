@@ -3,6 +3,11 @@ import MapKit
 
 @MainActor
 final class UserMapViewModel: ObservableObject {
+    enum DataScope {
+        case privateArchive
+        case publishedProfile
+    }
+
     enum Context: Equatable, Identifiable {
         case me
         case friend(User)
@@ -25,10 +30,6 @@ final class UserMapViewModel: ObservableObject {
             return false
         }
 
-        var usesChengsiFeed: Bool {
-            if case .me = self { return true }
-            return false
-        }
     }
 
     struct Identity {
@@ -85,6 +86,9 @@ final class UserMapViewModel: ObservableObject {
     )
     @Published private(set) var footprints: [Footprint] = []
     @Published private(set) var reels: [RealPost] = []
+    /// Local folder definitions used to resolve a Reel's `capsuleId`.
+    /// They are not root-level MyMap records.
+    @Published private(set) var journeyCatalog: [JourneyPost] = []
     @Published private(set) var mapRegion: MKCoordinateRegion = UserMapViewModel.defaultRegion
 
     var mapPins: [MapPin] {
@@ -100,10 +104,16 @@ final class UserMapViewModel: ObservableObject {
 
     private let environment: AppEnvironment
     private let context: Context
+    private let dataScope: DataScope
 
-    init(environment: AppEnvironment, context: Context = .me) {
+    init(
+        environment: AppEnvironment,
+        context: Context = .me,
+        dataScope: DataScope = .publishedProfile
+    ) {
         self.environment = environment
         self.context = context
+        self.dataScope = dataScope
         self.identity = Identity(user: context.user, isCurrentUser: context.isCurrentUser)
         loadSnapshot()
     }
@@ -116,7 +126,12 @@ final class UserMapViewModel: ObservableObject {
         let user = context.user
         let isSilentLumen = user.handle == "silent.lumen"
         if case .me = context {
-            let chengsiFeed = PreviewData.chengsi
+            let chengsiFeed = switch dataScope {
+            case .privateArchive:
+                PreviewData.chengsiPrivateArchive
+            case .publishedProfile:
+                PreviewData.chengsiPublishedProfile
+            }
             loadFeed(chengsiFeed)
             return
         }
@@ -139,6 +154,7 @@ final class UserMapViewModel: ObservableObject {
             .filter { $0.userId == user.id }
             .sorted { $0.createdAt > $1.createdAt }
         reels = personalReals
+        journeyCatalog = []
 
         summary = Summary(
             footprintCount: matchedFootprints.count,
@@ -170,6 +186,7 @@ final class UserMapViewModel: ObservableObject {
             .sorted { ($0.latestVisit ?? .distantPast) > ($1.latestVisit ?? .distantPast) }
 
         reels = feed.reels
+        journeyCatalog = feed.journeys
 
         summary = Summary(
             footprintCount: matchedFootprints.count,

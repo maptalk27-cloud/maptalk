@@ -12,8 +12,9 @@ struct MapTalkView: View {
     @State private var selectedRealId: UUID?
     @State private var selectedStoryId: UUID?
     @State private var activeExperience: ActiveExperience?
-    @State private var isExperiencePresented: Bool = false
-    @State private var experienceDetent: PresentationDetent = .fraction(ControlsLayout.previewFraction)
+    @StateObject private var experiencePresentation = MapExperiencePresentation(
+        compactDetent: .fraction(ControlsLayout.previewFraction)
+    )
     @State private var currentRegion: MKCoordinateRegion?
     @State private var pendingRegionCause: RegionChangeCause = .initial
     @State private var reelAlignTrigger: Int = 0
@@ -22,7 +23,6 @@ struct MapTalkView: View {
     @State private var journeyEntryStoryId: UUID?
     @State private var journeyStack: [JourneyPost] = []
     @State private var suppressJourneySelectionUpdate: Bool = false
-    @State private var detentRerenderKey: Int = 0
     @State private var didApplyInitialStorySelection: Bool = false
     @StateObject private var storyReadStore = StoryReadStore()
     @State private var pendingViewedStoryKey: String?
@@ -38,7 +38,11 @@ struct MapTalkView: View {
         GeometryReader { geometry in
             let journeyNamespace = focusedJourneyHeader != nil ? heroNamespace : nil
             let journeyStoryItems: (JourneyPost) -> [RealStoriesRow.StoryItem] = { journey in
-                MapStoryFeed.items(for: journey, userProvider: viewModel.user(for:))
+                MapJourneyScope(
+                    journey: journey,
+                    userProvider: viewModel.user(for:)
+                )
+                .storyItems
             }
 
             let baseStoryItems = MapStoryFeed.items(
@@ -75,28 +79,7 @@ struct MapTalkView: View {
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
             let collapseDetent = {
-                print("[MapTalkView] collapseDetent requested; current detent=\(experienceDetent)")
-                let wasLarge = experienceDetent == .large
-                let wasPresented = isExperiencePresented
-                let target: PresentationDetent = .fraction(ControlsLayout.previewFraction)
-                detentRerenderKey &+= 1
-                experienceDetent = target
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        experienceDetent = target
-                    }
-                }
-                if wasPresented, wasLarge {
-                    let savedExperience = activeExperience
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        isExperiencePresented = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            activeExperience = savedExperience
-                            experienceDetent = target
-                            isExperiencePresented = wasPresented
-                        }
-                    }
-                }
+                experiencePresentation.collapseToCompact()
             }
             let storyItemForReal: (RealPost) -> RealStoriesRow.StoryItem? = { real in
                 storyItems.first { item in
@@ -158,24 +141,21 @@ struct MapTalkView: View {
 
             let presentSequenceIfNeeded: (Bool) -> Void = { shouldPresent in
                 guard sequenceItems.isEmpty == false else { return }
-                let wasActive = isExperiencePresented
+                let wasActive = experiencePresentation.isPresented
                 guard shouldPresent || wasActive else { return }
                 let nonce = (shouldPresent || activeExperience?.sequenceNonce == nil)
                     ? UUID()
                     : (activeExperience?.sequenceNonce ?? UUID())
                 activeExperience = .sequence(nonce: nonce)
-                if isExperiencePresented == false {
-                    isExperiencePresented = true
-                }
                 if shouldPresent {
-                    collapseDetent()
+                    experiencePresentation.presentNewContent()
                 }
             }
 
             let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
                 flushPendingViewedStory(item.readKey)
                 selectedStoryId = item.id
-                if shouldPresent || isExperiencePresented {
+                if shouldPresent || experiencePresentation.isPresented {
                     if case .poi = item.source {
                         pendingViewedStoryKey = nil
                     } else {
@@ -228,9 +208,10 @@ struct MapTalkView: View {
 
             let handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void = { journey, presentSheet, parent in
                 let isTappingCurrentFocusedJourney = (focusedJourneyHeader?.id == journey.id)
-                if isExperiencePresented, experienceDetent == .large, isTappingCurrentFocusedJourney == false {
-                    print("[MapTalkView] journeyTap collapsing sheet from large -> .25 detent")
-                    collapseDetent()
+                if experiencePresentation.isPresented,
+                   experiencePresentation.isExpanded,
+                   isTappingCurrentFocusedJourney == false {
+                    experiencePresentation.collapseToCompact()
                     if case .sequence = activeExperience {
                         activeExperience = .sequence(nonce: activeExperience?.sequenceNonce ?? UUID())
                     }
@@ -272,15 +253,14 @@ struct MapTalkView: View {
                     viewModel.focus(on: journey)
                 }
                 if presentSheet {
-                    if isTappingCurrentFocusedJourney, isExperiencePresented, experienceDetent == .large {
+                    if isTappingCurrentFocusedJourney,
+                       experiencePresentation.isPresented,
+                       experiencePresentation.isExpanded {
                         // Already on this journey in large sheet: refresh data but keep detent.
                         activeExperience = .sequence(nonce: activeExperience?.sequenceNonce ?? UUID())
                     } else {
                         activeExperience = .sequence(nonce: UUID())
-                        if isExperiencePresented == false {
-                            isExperiencePresented = true
-                        }
-                        experienceDetent = .fraction(ControlsLayout.previewFraction)
+                        experiencePresentation.presentNewContent()
                     }
                 }
             }
@@ -364,7 +344,7 @@ struct MapTalkView: View {
 
                     if let journeyHeader = focusedJourneyHeader {
                         let journeyPath = journeyStack + [journeyHeader]
-                        journeyHeaderView(
+                        MapJourneyNavigationHeader(
                             path: journeyPath,
                             selectedJourneyId: journeyHeader.id,
                             onSelect: { journey in
@@ -444,7 +424,7 @@ struct MapTalkView: View {
                                     selectedRealId = nil
                                     selectedStoryId = nil
                                     activeExperience = nil
-                                    isExperiencePresented = false
+                                    experiencePresentation.dismiss()
                                     flushPendingViewedStory(nil)
                                     viewModel.centerOnUser()
                                 },
@@ -457,13 +437,13 @@ struct MapTalkView: View {
                     }
                 }
             }
-            .sheet(isPresented: $isExperiencePresented, onDismiss: {
+            .sheet(isPresented: $experiencePresentation.isPresented, onDismiss: {
+                guard experiencePresentation.didDismiss() == false else { return }
                 flushPendingViewedStory(nil)
-                experienceDetent = .fraction(ControlsLayout.previewFraction)
                 selectedRealId = nil
                 selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
             }) {
-                let isExpanded = experienceDetent == .large
+                let isExpanded = experiencePresentation.isExpanded
                 let shouldAnimateSelection = isExpanded == false
 
                 let content: AnyView = {
@@ -519,14 +499,15 @@ struct MapTalkView: View {
                             }
 
                             return AnyView(
-                                ExperienceDetailView(
-                                    sequencePager: pager,
+                                MapExperienceCapsule(
+                                    pager: pager,
                                     selection: selectionBinding,
                                     isExpanded: isExpanded,
+                                    onCollapsedTap: experiencePresentation.expand,
+                                    userProvider: viewModel.user(for:),
                                     onJourneyAvatarStackTap: { journey in
                                         handleJourneyTap(journey, true, focusedJourneyHeader)
                                     },
-                                    userProvider: viewModel.user(for:),
                                     onPOIContributorViewed: markStoryReadKeysViewed,
                                     isPOIContributorUnseen: isPOIContributorUnseen
                                 )
@@ -540,6 +521,7 @@ struct MapTalkView: View {
                             ExperienceDetailView(
                                 ratedPOI: rated,
                                 isExpanded: isExpanded,
+                                onCollapsedTap: experiencePresentation.expand,
                                 userProvider: viewModel.user(for:),
                                 onPOIContributorViewed: markStoryReadKeysViewed,
                                 isPOIContributorUnseen: isPOIContributorUnseen
@@ -552,11 +534,11 @@ struct MapTalkView: View {
                 }()
 
                 content
-                    .id(detentRerenderKey)
-                    .presentationDetents([.fraction(ControlsLayout.previewFraction), .large], selection: $experienceDetent)
-                    .presentationBackground(.thinMaterial)
-                    .presentationCompactAdaptation(.none)
-                    .applyBackgroundInteractionIfAvailable()
+                    .id(experiencePresentation.contentRevision)
+                    .mapExperienceSheetChrome(
+                        compactDetent: .fraction(ControlsLayout.previewFraction),
+                        selection: $experiencePresentation.detent
+                    )
             }
             .onAppear {
                 WorldBasemapPrefetcher.shared.prefetchGlobalBasemapIfNeeded()
@@ -586,7 +568,7 @@ struct MapTalkView: View {
                     selectedRealId = nil
                     selectedStoryId = nil
                     activeExperience = nil
-                    isExperiencePresented = false
+                    experiencePresentation.dismiss()
                     flushPendingViewedStory(nil)
                     return
                 }
@@ -615,23 +597,21 @@ struct MapTalkView: View {
                 }
                 journeyEntryStoryId = nil
             }
-            .onChangeCompat(of: isExperiencePresented) { isActive in
+            .onChangeCompat(of: experiencePresentation.isPresented) { isActive in
                 if isActive == false {
                     flushPendingViewedStory(nil)
                 }
                 let target = isActive ? previewControlsPadding : baseControlsPadding
-                print("[MapTalkView] isExperiencePresented changed to \(isActive) detent=\(experienceDetent)")
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                     controlsBottomPadding = target
                 }
             }
-            .onChangeCompat(of: experienceDetent) { detent in
-                print("[MapTalkView] detent changed -> \(detent)")
-                if detent == .fraction(ControlsLayout.previewFraction), isExperiencePresented {
+            .onChangeCompat(of: experiencePresentation.detent) { detent in
+                if detent == .fraction(ControlsLayout.previewFraction), experiencePresentation.isPresented {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                         controlsBottomPadding = previewControlsPadding
                     }
-                } else if isExperiencePresented == false {
+                } else if experiencePresentation.isPresented == false {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                         controlsBottomPadding = baseControlsPadding
                     }
@@ -644,11 +624,11 @@ struct MapTalkView: View {
                 controlsBottomPadding = isElevated ? recalculatedPreview : recalculatedBase
             }
             .onChangeCompat(of: baseControlsPadding) { newValue in
-                guard isExperiencePresented == false else { return }
+                guard experiencePresentation.isPresented == false else { return }
                 controlsBottomPadding = newValue
             }
             .onChangeCompat(of: previewControlsPadding) { newValue in
-                guard isExperiencePresented else { return }
+                guard experiencePresentation.isPresented else { return }
                 controlsBottomPadding = newValue
             }
             .onChangeCompat(of: viewModel.mode) { _ in
@@ -659,55 +639,20 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
-    func journeyBottomInset(for size: CGSize, safeAreaBottom: CGFloat) -> CGFloat {
-        size.height * ControlsLayout.previewFraction + safeAreaBottom
-    }
-
     func journeyBoundingTarget(
         for journey: JourneyPost,
         size: CGSize,
         safeAreaBottom: CGFloat
     ) -> (region: MKCoordinateRegion, distance: CLLocationDistance)? {
-        let reelCoords = journey.reels.map(\.center)
-        let poiCoords = journey.pois.map { $0.poi.coordinate }
-        let coords = reelCoords + poiCoords
-        guard coords.isEmpty == false else { return nil }
-
-        if coords.count == 1, let coord = coords.first {
-            let region = MKCoordinateRegion(
-                center: coord,
-                latitudinalMeters: 800,
-                longitudinalMeters: 800
-            )
-            return (region, 800)
+        guard let target = MapJourneyCamera.target(
+            for: journey,
+            size: size,
+            safeAreaBottom: safeAreaBottom,
+            compactFraction: ControlsLayout.previewFraction
+        ) else {
+            return nil
         }
-
-        var mapRect = MKMapRect.null
-        for coord in coords {
-            let point = MKMapPoint(coord)
-            let eventRect = MKMapRect(origin: point, size: MKMapSize(width: 0, height: 0))
-            mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
-        }
-
-        let fallbackSize = CGSize(width: 430, height: 932)
-        let baseSize = size == .zero ? fallbackSize : size
-        let mapView = MKMapView(frame: CGRect(origin: .zero, size: baseSize))
-        // Reserve space for the header + stories row so the fitted region stays below them.
-        let headerHeight = 52.0    // title bar
-        let spacing: Double = 14.0 // spacing between title and row
-        let rowHeight = 108.0      // RealStoriesRow fixed height
-        let topInset = headerHeight + spacing + rowHeight + 20.0
-        // Bottom inset: reserve space for the collapsed card.
-        let bottomInset = max(0, journeyBottomInset(for: baseSize, safeAreaBottom: safeAreaBottom) - 48.0)
-        let edgePadding = UIEdgeInsets(top: topInset, left: 40, bottom: bottomInset, right: 40)
-        let fittedRect = mapView.mapRectThatFits(mapRect, edgePadding: edgePadding)
-        let fittedRegion = MKCoordinateRegion(fittedRect)
-
-        let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)
-        let multiplier: Double = coords.count == 2 ? 3.4 : 2.2
-        let distance = max(spanMeters * multiplier, 800)
-
-        return (fittedRegion, distance)
+        return (target.region, target.distance)
     }
 
     func region(for item: RealStoriesRow.StoryItem) -> MKCoordinateRegion? {
@@ -718,131 +663,6 @@ private extension MapTalkView {
             return viewModel.region(for: group.ratedPOI)
         case let .journey(journey):
             return viewModel.region(for: journey)
-        }
-    }
-
-    @ViewBuilder
-    func journeyHeaderView(
-        path: [JourneyPost],
-        selectedJourneyId: UUID?,
-        onSelect: @escaping (JourneyPost) -> Void,
-        onExit: @escaping () -> Void
-    ) -> some View {
-        HStack(spacing: 12) {
-            Button {
-                onExit()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(10)
-                    .background(Color.black.opacity(0.45), in: Circle())
-            }
-
-            ScrollViewReader { proxy in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(path, id: \.id) { journey in
-                            let title = journeyTitle(for: journey)
-                            JourneyBreadcrumbCard(
-                                title: title,
-                                subtitle: "Journey",
-                                leadingSymbol: String(title.prefix(1)).uppercased(),
-                                isSelected: journey.id == selectedJourneyId
-                            )
-                            .id(journey.id)
-                            .onTapGesture {
-                                onSelect(journey)
-                            }
-                        }
-                    }
-                    .padding(.vertical, 4)
-                    .animation(.spring(response: 0.45, dampingFraction: 0.85), value: selectedJourneyId)
-                }
-                .onAppear {
-                    guard let selectedJourneyId else { return }
-                    DispatchQueue.main.async {
-                        proxy.scrollTo(selectedJourneyId, anchor: .center)
-                    }
-                }
-                .onChangeCompat(of: selectedJourneyId) { identifier in
-                    guard let identifier else { return }
-                    withAnimation(.spring(response: 0.45, dampingFraction: 0.85)) {
-                        proxy.scrollTo(identifier, anchor: .center)
-                    }
-                }
-            }
-        }
-    }
-
-    func journeyTitle(for journey: JourneyPost) -> String {
-        let trimmed = journey.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? journey.displayLabel : trimmed
-    }
-
-    private struct JourneyBreadcrumbCard: View {
-        let title: String
-        let subtitle: String
-        let leadingSymbol: String
-        let isSelected: Bool
-
-        var body: some View {
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(backgroundFill)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(borderStyle, lineWidth: isSelected ? 1.5 : 1)
-                    }
-
-                content
-            }
-            .frame(width: isSelected ? 260 : 60, height: 56)
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isSelected)
-        }
-
-        @ViewBuilder
-        private var content: some View {
-            if isSelected {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-
-                    Text(subtitle)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.72))
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-            } else {
-                Text(leadingSymbol)
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-
-        private var backgroundFill: AnyShapeStyle {
-            if isSelected {
-                return AnyShapeStyle(
-                    LinearGradient(
-                        colors: [Theme.neonPrimary.opacity(0.28), Color.black.opacity(0.82)],
-                        startPoint: .topTrailing,
-                        endPoint: .bottomLeading
-                    )
-                )
-            }
-            return AnyShapeStyle(Color.black.opacity(0.35))
-        }
-
-        private var borderStyle: AnyShapeStyle {
-            if isSelected {
-                return AnyShapeStyle(Color.white.opacity(0.3))
-            }
-            return AnyShapeStyle(Color.white.opacity(0.22))
         }
     }
 
@@ -874,15 +694,13 @@ private extension MapTalkView {
                 currentRegion = region
             }
             activeExperience = .sequence(nonce: UUID())
-            isExperiencePresented = true
-            experienceDetent = .fraction(ControlsLayout.previewFraction)
+            experiencePresentation.presentNewContent()
             return
         }
         focusedJourneyHeader = nil
         if journeyEntryStoryId == nil, currentJourney == nil {
             activeExperience = nil
-            isExperiencePresented = false
-            experienceDetent = .fraction(ControlsLayout.previewFraction)
+            experiencePresentation.dismiss()
         }
     }
 }

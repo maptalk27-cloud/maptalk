@@ -29,6 +29,7 @@ extension ExperienceDetailView {
                             onRecentSharerSelected: { index, data in
                                 openRecentSharer(at: index, using: data)
                             },
+                            journeyProvider: journeyProvider,
                             userProvider: userProvider,
                             onJourneyAvatarStackTap: onJourneyAvatarStackTap,
                             onUserSelected: openProfile,
@@ -45,6 +46,7 @@ extension ExperienceDetailView {
                     onRecentSharerSelected: { index, content in
                         openRecentSharer(at: index, using: content)
                     },
+                    journeyProvider: journeyProvider,
                     userProvider: userProvider,
                     onJourneyAvatarStackTap: onJourneyAvatarStackTap,
                     onUserSelected: openProfile,
@@ -63,6 +65,7 @@ extension ExperienceDetailView {
                     TabView(selection: context.selection) {
                         ForEach(context.pager.items) { item in
                             collapsedPreviewContent(for: item.mode)
+                                .collapsedPreviewTap(onCollapsedTap)
                                 .tag(item.id)
                                 .frame(width: size.width, height: size.height)
                         }
@@ -71,6 +74,7 @@ extension ExperienceDetailView {
                     .frame(width: size.width, height: size.height)
                 } else {
                     collapsedPreviewLayer(using: data)
+                        .collapsedPreviewTap(onCollapsedTap)
                         .frame(width: size.width, height: size.height)
                 }
             }
@@ -130,6 +134,7 @@ extension ExperienceDetailView {
             ExperienceDetailView.HeroSection(
                 model: hero,
                 style: .collapsed,
+                journeyProvider: journeyProvider,
                 userProvider: userProvider,
                 hideMedia: isSplitLayout,
                 useTallLayout: useTallLayout,
@@ -208,6 +213,26 @@ extension ExperienceDetailView {
         }
         .overlay {
             Color.black.opacity(0.55).ignoresSafeArea()
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func collapsedPreviewTap(_ action: (() -> Void)?) -> some View {
+        if let action {
+            contentShape(Rectangle())
+                // The compact card itself opens the full interaction, but the
+                // surrounding TabView still owns horizontal paging. A regular
+                // gesture here cancels that pager before it can recognize.
+                .simultaneousGesture(
+                    TapGesture().onEnded(action),
+                    including: .gesture
+                )
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Open details")
+        } else {
+            self
         }
     }
 }

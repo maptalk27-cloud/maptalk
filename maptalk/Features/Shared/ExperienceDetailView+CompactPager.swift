@@ -11,6 +11,7 @@ struct CompactRealCard: View {
 
     let real: RealPost
     let user: User?
+    let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
     let style: Style
     let displayNameOverride: String?
@@ -32,6 +33,7 @@ struct CompactRealCard: View {
         style: Style = .standard,
         displayNameOverride: String? = nil,
         avatarCategory: POICategory? = nil,
+        journeyProvider: @escaping (UUID) -> JourneyPost? = { PreviewData.journey(for: $0) },
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         suppressContent: Bool = false,
         hideHeader: Bool = false,
@@ -42,6 +44,7 @@ struct CompactRealCard: View {
     ) {
         self.real = real
         self.user = user
+        self.journeyProvider = journeyProvider
         self.userProvider = userProvider
         self.style = style
         self.displayNameOverride = displayNameOverride
@@ -350,7 +353,7 @@ struct CompactRealCard: View {
 
     private var capsuleJourney: JourneyPost? {
         guard let capsuleId = real.capsuleId else { return nil }
-        return PreviewData.journey(for: capsuleId)
+        return journeyProvider(capsuleId)
     }
 
     private var shouldShowMedia: Bool {
@@ -442,17 +445,23 @@ struct CompactRealCard: View {
                 .clipped()
                 .padding(.leading, -singleVideoLeadingInset)
                 .padding(.trailing, -singleVideoTrailingInset)
-                .overlay(singleVideoOverlay)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     handleMediaTap(for: attachment)
+                }
+                // The text/footer are visual-only. Leaving their full-size
+                // overlay hit-testable blocks the pager's horizontal drag.
+                .overlay(singleVideoOverlay)
+                // Only the compact Journey capsule itself is interactive; it
+                // stays above the video's tap target without swallowing swipes.
+                .overlay(alignment: .bottomLeading) {
+                    singleVideoJourneyCapsuleOverlay
                 }
             }
         }
     }
 
     private var singleVideoOverlay: some View {
-        let textLeadingInset: CGFloat = 0
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
                 if showHeader {
@@ -471,18 +480,7 @@ struct CompactRealCard: View {
             }
 
             Spacer(minLength: 0)
-            if let capsule = capsuleJourney {
-                CapsuleAttachmentCard(
-                    journey: capsule,
-                    userProvider: userProvider,
-                    style: style,
-                    isCompact: true,
-                    maxVisibleCount: 3
-                )
-                .padding(.leading, textLeadingInset)
-            }
             footerRow
-                .padding(.leading, textLeadingInset)
         }
         .padding(.top, 12)
         .padding(.bottom, 12)
@@ -490,6 +488,24 @@ struct CompactRealCard: View {
         .padding(.trailing, singleVideoTrailingInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var singleVideoJourneyCapsuleOverlay: some View {
+        if let capsule = capsuleJourney {
+            CapsuleAttachmentCard(
+                journey: capsule,
+                userProvider: userProvider,
+                style: style,
+                isCompact: true,
+                maxVisibleCount: 3,
+                onTap: onCapsuleTap
+            )
+            .padding(.leading, singleVideoLeadingInset)
+            .padding(.trailing, singleVideoTrailingInset)
+            .padding(.bottom, 42)
+            .allowsHitTesting(onCapsuleTap != nil)
+        }
     }
 
     private var collapsedMediaStrip: some View {
@@ -814,61 +830,19 @@ struct CompactRealCard: View {
             self.onTap = onTap
         }
 
-        private var avatarSize: CGFloat { isCompact ? 26 : 34 }
-        private var verticalPadding: CGFloat { isCompact ? 6 : 10 }
-        private var horizontalPadding: CGFloat { isCompact ? 6 : 8 }
-        private var leadingPadding: CGFloat { isCompact ? 0 : horizontalPadding }
-        private var trailingPadding: CGFloat { horizontalPadding }
-        private var maxRows: Int? { isCompact ? 1 : (style == .collapsed ? 2 : nil) }
-        private var backgroundBleed: CGFloat { isCompact ? 8 : 0 }
-        private var overlapSpacing: CGFloat { 10 }
-        private var maxCapsuleWidth: CGFloat? { isCompact ? nil : 280 }
-
-        private var effectiveMaxVisibleCount: Int? {
-            if let maxVisibleCount {
-                return maxVisibleCount
-            }
-            guard let maxCapsuleWidth else { return nil }
-            let eventCount = journey.reels.count + journey.pois.count
-            let availableWidth = max(maxCapsuleWidth - leadingPadding - trailingPadding, avatarSize)
-            let step = max(avatarSize - overlapSpacing, 1)
-            let baseOffset = overlapSpacing
-            let maxWithoutPlus = max(1, Int((availableWidth - baseOffset) / step))
-            if eventCount > maxWithoutPlus {
-                let plusWidth = max(avatarSize * 0.8, 18)
-                let maxWithPlus = max(1, Int((availableWidth - baseOffset - plusWidth) / step))
-                return maxWithPlus
-            }
-            return maxWithoutPlus
+        var body: some View {
+            label
         }
 
-        var body: some View {
-            JourneyAvatarStack(
+        private var label: some View {
+            JourneyAttachmentCapsule(
                 journey: journey,
                 userProvider: userProvider,
-                avatarSize: avatarSize,
-                maxRows: effectiveMaxVisibleCount == nil ? maxRows : nil,
-                maxVisibleCount: effectiveMaxVisibleCount
+                isCompact: isCompact,
+                isCollapsed: style == .collapsed,
+                maxVisibleCount: maxVisibleCount,
+                onTap: onTap.map { handler in { handler(journey) } }
             )
-            .padding(.vertical, verticalPadding)
-            .padding(.leading, leadingPadding)
-            .padding(.trailing, trailingPadding)
-            .frame(maxWidth: maxCapsuleWidth, alignment: .leading)
-            .background {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.white.opacity(0.08))
-                    .padding(.leading, -backgroundBleed)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                    .padding(.leading, -backgroundBleed)
-            }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                onTap?(journey)
-            }
-            .accessibilityAddTraits(.isButton)
         }
     }
 

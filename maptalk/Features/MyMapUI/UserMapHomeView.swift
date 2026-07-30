@@ -33,6 +33,13 @@ struct UserMapRecord: Identifiable {
         }
     }
 
+    var isMapExperienceItem: Bool {
+        switch kind {
+        case .poi, .reel: true
+        case .journey: false
+        }
+    }
+
     var cityName: String {
         if let locationLabel,
            let city = UserMapCity.city(from: locationLabel) {
@@ -55,20 +62,8 @@ struct UserMapRecord: Identifiable {
 
     static func make(
         reels: [RealPost],
-        footprints: [UserMapViewModel.Footprint],
-        user: User
+        footprints: [UserMapViewModel.Footprint]
     ) -> [UserMapRecord] {
-        let journeys = reels
-            .compactMap(\.capsuleId)
-            .reduce(into: [UUID]()) { ids, id in
-                if ids.contains(id) == false { ids.append(id) }
-            }
-            .compactMap(PreviewData.journey(for:))
-            .filter { $0.userId == user.id }
-
-        let journeyRecords = journeys.map {
-            UserMapRecord(id: $0.id, timestamp: $0.createdAt, kind: .journey($0))
-        }
         let reelRecords = reels.map {
             UserMapRecord(id: $0.id, timestamp: $0.createdAt, kind: .reel($0))
         }
@@ -79,7 +74,7 @@ struct UserMapRecord: Identifiable {
                 kind: .poi($0.ratedPOI)
             )
         }
-        return (journeyRecords + reelRecords + poiRecords)
+        return (reelRecords + poiRecords)
             .sorted { $0.timestamp > $1.timestamp }
     }
 }
@@ -93,14 +88,12 @@ struct UserMapHomeView: View {
     fileprivate enum RecordType: String, CaseIterable, Identifiable, Hashable {
         case poi = "POI"
         case reel = "Reel"
-        case journey = "Journey"
 
         var id: Self { self }
         var icon: String {
             switch self {
             case .poi: "mappin"
             case .reel: "play.rectangle"
-            case .journey: "map"
             }
         }
     }
@@ -151,6 +144,9 @@ struct UserMapHomeView: View {
     let user: User
     let region: MKCoordinateRegion
     let records: [UserMapRecord]
+    /// Private folder catalog. It resolves an attached or nested Journey but
+    /// does not decide which folders appear at the MyMap root.
+    let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
 
     @State private var display: Display = .list
@@ -158,47 +154,68 @@ struct UserMapHomeView: View {
     @State private var filters = FilterState()
     @State private var filterDraft = FilterState()
     @State private var filterPresentation: FilterPresentation?
-    @State private var selectedRecord: UserMapRecord?
-    @State private var mapPreview: UserMapRecord?
+    @State private var mapSelectedRecord: UserMapRecord?
+    @State private var mapFocusedJourney: JourneyPost?
+    @State private var mapJourneyStack: [JourneyPost] = []
+    @State private var mapJourneyEntryRecord: UserMapRecord?
+    @State private var mapJourneyEntryRegion: MKCoordinateRegion?
+    @StateObject private var mapCapsulePresentation: MapExperiencePresentation
+    @State private var mapFlightController = MapFlightController()
     @State private var cameraPosition: MapCameraPosition
+    @State private var currentMapRegion: MKCoordinateRegion
+    @State private var mapSize: CGSize = .zero
+    @State private var mapSafeAreaBottom: CGFloat = 0
+    @State private var mapReelAlignTrigger = 0
     @FocusState private var isSearchFocused: Bool
 
     init(
         user: User,
         region: MKCoordinateRegion,
         records: [UserMapRecord],
+        journeyProvider: @escaping (UUID) -> JourneyPost?,
         userProvider: @escaping (UUID) -> User?
     ) {
         self.user = user
         self.region = region
         self.records = records
+        self.journeyProvider = journeyProvider
         self.userProvider = userProvider
         _cameraPosition = State(initialValue: .region(region))
+        _currentMapRegion = State(initialValue: region)
+        _mapCapsulePresentation = StateObject(
+            wrappedValue: MapExperiencePresentation(compactDetent: Self.mapCapsuleCompactDetent)
+        )
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             switch display {
             case .list:
                 listContent
             case .map:
                 mapContent
             }
-
-            viewToggle
-                .padding(.bottom, display == .list ? 18 : 28)
+        }
+        .overlay(alignment: .bottom) {
+            if mapJourneyIsActive == false {
+                viewToggle
+                    .padding(.bottom, display == .list ? 18 : 28)
+                    // Keep the List/Map control above the scroll view's
+                    // NavigationLinks; otherwise its visual capsule can be
+                    // tapped through into an archive row.
+                    .zIndex(100)
+            }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            archiveControls
+            if display == .map, mapFocusedJourney != nil {
+                mapJourneyControls
+            } else {
+                archiveControls
+            }
         }
         .navigationTitle("MyMap")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(display == .list ? .visible : .hidden, for: .navigationBar)
-        .sheet(item: $selectedRecord) { record in
-            UserMapRecordDetail(record: record, userProvider: userProvider)
-                .presentationDetents([.fraction(0.32), .large])
-                .presentationBackground(.thinMaterial)
-        }
         .sheet(item: $filterPresentation) { presentation in
             UserMapFilterSheet(
                 presentation: presentation,
@@ -212,8 +229,28 @@ struct UserMapHomeView: View {
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
-        .onChange(of: searchText) { _, _ in
-            clearMapPreviewIfNeeded(using: filters)
+        .sheet(isPresented: $mapCapsulePresentation.isPresented, onDismiss: {
+            guard mapCapsulePresentation.didDismiss() == false else { return }
+            if let journey = mapFocusedJourney {
+                // MapTalk keeps the folder alive after a user dismisses its
+                // capsule; the next map interaction begins from its first
+                // child instead of falling back to the archive pager.
+                mapSelectedRecord = storyRecords(for: journey).first
+            } else {
+                mapSelectedRecord = nil
+            }
+        }) {
+            if mapSelectedRecord != nil {
+                mapCapsule
+                    // A pager swipe must retain the same native sheet and its
+                    // in-flight gesture; selection is content state, not view identity.
+                    .id(mapCapsulePresentation.contentRevision)
+                    .accessibilityIdentifier("mymap.compact-capsule")
+                    .mapExperienceSheetChrome(
+                        compactDetent: Self.mapCapsuleCompactDetent,
+                        selection: $mapCapsulePresentation.detent
+                    )
+            }
         }
     }
 
@@ -223,7 +260,7 @@ struct UserMapHomeView: View {
 
     private func filteredRecords(using filter: FilterState) -> [UserMapRecord] {
         records.filter { record in
-            guard filter.types.contains(recordType(for: record)) else { return false }
+            guard let type = recordType(for: record), filter.types.contains(type) else { return false }
             guard filter.cities.isEmpty || filter.cities.contains(record.cityName) else { return false }
             guard matchesDate(record.timestamp, using: filter) else { return false }
             guard searchText.isEmpty == false else { return true }
@@ -240,11 +277,11 @@ struct UserMapHomeView: View {
         filters.isDefault == false
     }
 
-    private func recordType(for record: UserMapRecord) -> RecordType {
+    private func recordType(for record: UserMapRecord) -> RecordType? {
         switch record.kind {
         case .poi: .poi
         case .reel: .reel
-        case .journey: .journey
+        case .journey: nil
         }
     }
 
@@ -296,8 +333,14 @@ struct UserMapHomeView: View {
                     Section {
                         VStack(spacing: 0) {
                             ForEach(Array(section.1.enumerated()), id: \.element.id) { index, record in
-                                Button {
-                                    selectedRecord = record
+                                NavigationLink {
+                                    MyMapMapDestination(
+                                        records: filteredRecords,
+                                        selectedRecord: record,
+                                        entryRegion: currentMapRegion,
+                                        journeyProvider: journeyProvider,
+                                        userProvider: userProvider
+                                    )
                                 } label: {
                                     UserMapRecordCard(record: record)
                                 }
@@ -327,30 +370,36 @@ struct UserMapHomeView: View {
     }
 
     private var mapContent: some View {
-        Map(position: $cameraPosition, interactionModes: .all) {
-            ForEach(filteredRecords) { record in
-                Annotation(record.title, coordinate: record.coordinate) {
-                    Button {
-                        mapPreview = record
-                    } label: {
-                        mapMarker(for: record)
+        GeometryReader { geometry in
+            Map(position: $cameraPosition, interactionModes: .all) {
+                ForEach(mapRecords) { record in
+                    Annotation("", coordinate: record.coordinate) {
+                        Button {
+                            selectOnMap(
+                                record,
+                                size: geometry.size,
+                                safeAreaBottom: geometry.safeAreaInsets.bottom
+                            )
+                        } label: {
+                            mapMarker(for: record)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(record.title)
+                        .accessibilityIdentifier("mymap.map-marker.\(record.id.uuidString)")
                     }
-                    .buttonStyle(.plain)
                 }
             }
-        }
-        .ignoresSafeArea(edges: .bottom)
-        .overlay(alignment: .bottom) {
-            if let mapPreview {
-                Button {
-                    selectedRecord = mapPreview
-                } label: {
-                    UserMapRecordPreview(record: mapPreview)
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 92)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+            .ignoresSafeArea(edges: .bottom)
+            .onMapCameraChange(frequency: .onEnd) { context in
+                currentMapRegion = context.region
+            }
+            .onAppear {
+                mapSize = geometry.size
+                mapSafeAreaBottom = geometry.safeAreaInsets.bottom
+            }
+            .onChangeCompat(of: geometry.size) { newSize in
+                mapSize = newSize
+                mapSafeAreaBottom = geometry.safeAreaInsets.bottom
             }
         }
     }
@@ -443,6 +492,75 @@ struct UserMapHomeView: View {
         }
     }
 
+    private var mapJourneyIsActive: Bool {
+        display == .map && mapFocusedJourney != nil
+    }
+
+    /// A Journey replaces the archive controls with the same folder chrome
+    /// used by MapTalk. Its child row, map pins and capsule all read from one
+    /// `MapJourneyScope`, so they cannot drift into the general archive.
+    @ViewBuilder
+    private var mapJourneyControls: some View {
+        if let journey = mapFocusedJourney {
+            let journeyScope = scope(for: journey)
+
+            VStack(spacing: 6) {
+                MapJourneyNavigationHeader(
+                    path: mapJourneyStack + [journey],
+                    selectedJourneyId: journey.id,
+                    onSelect: { selectedJourney in
+                        focusMapJourneyFromBreadcrumb(
+                            selectedJourney,
+                            size: mapSize,
+                            safeAreaBottom: mapSafeAreaBottom
+                        )
+                    },
+                    onExit: {
+                        exitMapJourneyFocus(
+                            size: mapSize,
+                            safeAreaBottom: mapSafeAreaBottom
+                        )
+                    }
+                )
+
+                if journeyScope.storyItems.isEmpty == false {
+                    RealStoriesRow(
+                        items: journeyScope.storyItems,
+                        selectedId: mapSelectedRecord?.id,
+                        onSelectReal: { real in
+                            guard let item = journeyScope.storyItem(for: real.id) else { return }
+                            selectMapJourneyStory(item)
+                        },
+                        onSelectPOIGroup: { group in
+                            guard let item = journeyScope.storyItem(for: group.id) else { return }
+                            selectMapJourneyStory(item)
+                        },
+                        onSelectJourney: { _ in },
+                        userProvider: userProvider,
+                        alignTrigger: mapReelAlignTrigger,
+                        displayMode: .content,
+                        isUnseen: { _ in false }
+                    )
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .accessibilityIdentifier("mymap.journey-header")
+            .background {
+                Rectangle()
+                    .fill(.ultraThinMaterial.opacity(0.65))
+                    .overlay(Color.white.opacity(0.06))
+                    .mask {
+                        LinearGradient(
+                            colors: [.white, .white, .white.opacity(0)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+            }
+        }
+    }
+
     private var showsAllTypes: Bool {
         filters.types.count == RecordType.allCases.count
     }
@@ -478,8 +596,7 @@ struct UserMapHomeView: View {
 
     private func applyFilters(_ newFilters: FilterState) {
         filters = newFilters
-        clearMapPreviewIfNeeded(using: newFilters)
-        if display == .map {
+        if display == .map, mapFocusedJourney == nil {
             focusMap(on: filteredRecords(using: newFilters))
         }
     }
@@ -504,16 +621,341 @@ struct UserMapHomeView: View {
         applyFilters(updated)
     }
 
-    private func clearMapPreviewIfNeeded(using filter: FilterState) {
-        guard let mapPreview,
-              filteredRecords(using: filter).contains(where: { $0.id == mapPreview.id }) == false else { return }
-        withAnimation(.easeOut(duration: 0.18)) {
-            self.mapPreview = nil
+    private func selectOnMap(
+        _ record: UserMapRecord,
+        size: CGSize,
+        safeAreaBottom: CGFloat
+    ) {
+        if case let .journey(journey) = record.kind {
+            enterMapJourney(
+                journey,
+                savesEntryRecord: true,
+                size: size,
+                safeAreaBottom: safeAreaBottom
+            )
+            return
+        }
+
+        // Pin taps stay in this map. They replace the compact capsule without
+        // automatically moving the camera, matching the main MapTalk map.
+        presentMapCapsule(record)
+    }
+
+    private func presentMapCapsule(_ record: UserMapRecord) {
+        mapSelectedRecord = record
+        mapCapsulePresentation.presentNewContent()
+    }
+
+    private func enterMapJourney(
+        _ journey: JourneyPost,
+        savesEntryRecord: Bool,
+        size: CGSize,
+        safeAreaBottom: CGFloat
+    ) {
+        let isCurrentJourney = mapFocusedJourney?.id == journey.id
+
+        if mapFocusedJourney == nil, savesEntryRecord, mapJourneyEntryRegion == nil {
+            mapJourneyEntryRecord = mapSelectedRecord
+            mapJourneyEntryRegion = currentMapRegion
+        }
+        if let parent = mapFocusedJourney, parent.id != journey.id {
+            mapJourneyStack.append(parent)
+        }
+
+        mapFocusedJourney = journey
+        focusMapJourneyCamera(journey, size: size, safeAreaBottom: safeAreaBottom)
+
+        guard let firstChild = storyRecords(for: journey).first else {
+            // A folder never becomes a fake pager card. Empty folders keep
+            // their map/header state but have no bottom capsule to present.
+            mapSelectedRecord = UserMapRecord(
+                id: journey.id,
+                timestamp: journey.createdAt,
+                kind: .journey(journey)
+            )
+            mapCapsulePresentation.dismiss()
+            return
+        }
+
+        if isCurrentJourney,
+           mapCapsulePresentation.isPresented,
+           mapCapsulePresentation.isExpanded {
+            mapSelectedRecord = firstChild
+        } else {
+            presentMapCapsule(firstChild)
+        }
+        mapReelAlignTrigger &+= 1
+    }
+
+    private func focusMapJourneyFromBreadcrumb(
+        _ journey: JourneyPost,
+        size: CGSize,
+        safeAreaBottom: CGFloat
+    ) {
+        if let index = mapJourneyStack.firstIndex(where: { $0.id == journey.id }) {
+            mapJourneyStack = Array(mapJourneyStack.prefix(upTo: index))
+        }
+        mapFocusedJourney = journey
+        focusMapJourneyCamera(journey, size: size, safeAreaBottom: safeAreaBottom)
+        if let firstChild = storyRecords(for: journey).first {
+            presentMapCapsule(firstChild)
+        } else {
+            mapCapsulePresentation.dismiss()
+        }
+        mapReelAlignTrigger &+= 1
+    }
+
+    private func exitMapJourneyFocus(size: CGSize, safeAreaBottom: CGFloat) {
+        if let parent = mapJourneyStack.popLast() {
+            mapFocusedJourney = parent
+            focusMapJourneyCamera(parent, size: size, safeAreaBottom: safeAreaBottom)
+            if let firstChild = storyRecords(for: parent).first {
+                presentMapCapsule(firstChild)
+            } else {
+                mapCapsulePresentation.dismiss()
+            }
+            mapReelAlignTrigger &+= 1
+            return
+        }
+
+        let entryRecord = mapJourneyEntryRecord
+        let entryRegion = mapJourneyEntryRegion
+        mapFocusedJourney = nil
+        mapJourneyStack.removeAll()
+        mapJourneyEntryRecord = nil
+        mapJourneyEntryRegion = nil
+
+        if let entryRecord {
+            presentMapCapsule(entryRecord)
+        } else {
+            mapCapsulePresentation.dismiss()
+        }
+
+        // Folder navigation is a scope change, not a new map transition.
+        // Restore exactly the camera the user had before entering it instead
+        // of flying to the prior card's pin.
+        if let entryRegion {
+            mapFlightController.cancelActiveTransition()
+            withAnimation(.easeInOut(duration: 0.3)) {
+                cameraPosition = .region(entryRegion)
+            }
+            currentMapRegion = entryRegion
+        }
+        mapReelAlignTrigger &+= 1
+    }
+
+    private func focusMapJourneyCamera(
+        _ journey: JourneyPost,
+        size: CGSize,
+        safeAreaBottom: CGFloat
+    ) {
+        guard let target = MapJourneyCamera.target(
+            for: journey,
+            size: size,
+            safeAreaBottom: safeAreaBottom,
+            compactFraction: Self.mapCapsuleCompactFraction
+        ) else {
+            return
+        }
+
+        mapFlightController.cancelActiveTransition()
+        withAnimation(.easeInOut(duration: 0.35)) {
+            cameraPosition = .camera(
+                MapCamera(
+                    centerCoordinate: target.region.center,
+                    distance: target.distance,
+                    heading: 0,
+                    pitch: 0
+                )
+            )
+        }
+        currentMapRegion = target.region
+    }
+
+    private func openAttachedJourney(_ journey: JourneyPost) {
+        enterMapJourney(
+            journey,
+            savesEntryRecord: true,
+            size: mapSize,
+            safeAreaBottom: mapSafeAreaBottom
+        )
+    }
+
+    private func privateJourney(for id: UUID) -> JourneyPost? {
+        if mapFocusedJourney?.id == id {
+            return mapFocusedJourney
+        }
+        if let pathJourney = mapJourneyStack.first(where: { $0.id == id }) {
+            return pathJourney
+        }
+        return journeyProvider(id)
+    }
+
+    private func scope(for journey: JourneyPost) -> MapJourneyScope {
+        MapJourneyScope(journey: journey, userProvider: userProvider)
+    }
+
+    private func storyRecords(for journey: JourneyPost) -> [UserMapRecord] {
+        scope(for: journey).storyItems.compactMap(record(for:))
+    }
+
+    private func record(for item: RealStoriesRow.StoryItem) -> UserMapRecord? {
+        switch item.source {
+        case let .real(real):
+            return UserMapRecord(id: item.id, timestamp: item.timestamp, kind: .reel(real))
+        case let .poi(group):
+            return UserMapRecord(id: item.id, timestamp: item.timestamp, kind: .poi(group.ratedPOI))
+        case .journey:
+            return nil
+        }
+    }
+
+    private var mapRecords: [UserMapRecord] {
+        guard let journey = mapFocusedJourney else { return filteredRecords }
+        return storyRecords(for: journey)
+    }
+
+    @ViewBuilder
+    private var mapCapsule: some View {
+        if mapSequenceItems.isEmpty {
+            MapJourneyEmptyCapsule()
+        } else {
+            MapExperienceCapsule(
+                pager: .init(items: mapSequenceItems),
+                selection: mapSequenceSelection,
+                isExpanded: mapCapsulePresentation.isExpanded,
+                onCollapsedTap: mapCapsulePresentation.expand,
+                journeyProvider: privateJourney(for:),
+                userProvider: userProvider,
+                onJourneyAvatarStackTap: openAttachedJourney
+            )
+        }
+    }
+
+    /// The map has the same browsing contract as MapTalk: Reel and POI are
+    /// pageable memories; Journey is a folder route, never a pager card.
+    private var mapCapsuleRecords: [UserMapRecord] {
+        if let journey = mapFocusedJourney {
+            return storyRecords(for: journey)
+        }
+
+        var candidates = mapRecords
+
+        if let selected = mapSelectedRecord,
+           candidates.contains(where: { $0.id == selected.id }) == false,
+           selected.isMapExperienceItem {
+            candidates.insert(selected, at: 0)
+        }
+
+        return candidates
+    }
+
+    private var mapSequenceItems: [ExperienceDetailView.SequencePager.Item] {
+        if let journey = mapFocusedJourney {
+            return scope(for: journey).sequenceItems
+        }
+
+        return mapCapsuleRecords.compactMap { record in
+            switch record.kind {
+            case let .reel(reel):
+                return .init(id: record.id, mode: .real(reel, userProvider(reel.userId)))
+            case let .poi(rated):
+                return .init(id: record.id, mode: .poi(rated))
+            case .journey:
+                return nil
+            }
+        }
+    }
+
+    private var mapSequenceSelection: Binding<UUID> {
+        Binding(
+            get: {
+                if let selected = mapSelectedRecord,
+                   mapSequenceItems.contains(where: { $0.id == selected.id }) {
+                    return selected.id
+                }
+                return mapSequenceItems.first?.id ?? UUID()
+            },
+            set: { identifier in
+                guard let record = mapCapsuleRecords.first(where: { $0.id == identifier }) else { return }
+                selectFromMapCapsulePager(record)
+            }
+        )
+    }
+
+    private func selectFromMapCapsulePager(_ record: UserMapRecord) {
+        mapSelectedRecord = record
+        mapReelAlignTrigger &+= 1
+        let targetRegion = storyRegion(for: record)
+
+        if mapCapsulePresentation.isExpanded {
+            currentMapRegion = targetRegion
+            cameraPosition = .region(targetRegion)
+            return
+        }
+
+        flyToMapStory(record)
+    }
+
+    private func selectMapJourneyStory(_ item: RealStoriesRow.StoryItem) {
+        guard let record = record(for: item) else { return }
+        presentMapCapsule(record)
+        flyToMapStory(record)
+        mapReelAlignTrigger &+= 1
+    }
+
+    private func flyToMapStory(_ record: UserMapRecord) {
+        mapFlightController.handleRegionChange(
+            currentRegion: currentMapRegion,
+            targetRegion: storyRegion(for: record),
+            cause: mapFlightCause(for: record),
+            cameraPosition: $cameraPosition
+        ) { region in
+            currentMapRegion = region
+        }
+    }
+
+    private func storyRegion(for record: UserMapRecord) -> MKCoordinateRegion {
+        switch record.kind {
+        case let .reel(reel):
+            return MKCoordinateRegion(
+                center: reel.center,
+                latitudinalMeters: max(reel.radiusMeters, 3_500) * 2,
+                longitudinalMeters: max(reel.radiusMeters, 3_500) * 2
+            )
+        case let .poi(rated):
+            return MKCoordinateRegion(
+                center: rated.poi.coordinate,
+                latitudinalMeters: max(650, 1_800) * 2,
+                longitudinalMeters: max(650, 1_800) * 2
+            )
+        case let .journey(journey):
+            return MKCoordinateRegion(
+                center: journey.coordinate,
+                latitudinalMeters: 4_400,
+                longitudinalMeters: 4_400
+            )
+        }
+    }
+
+    private func mapFlightCause(for record: UserMapRecord) -> RegionChangeCause {
+        switch record.kind {
+        case .poi: .poi
+        case .reel: .real
+        case .journey: .journey
         }
     }
 
     private func focusMap(on records: [UserMapRecord]) {
-        guard records.isEmpty == false else { return }
+        guard let targetRegion = mapRegion(for: records) else { return }
+
+        withAnimation(.easeInOut(duration: 0.3)) {
+            cameraPosition = .region(targetRegion)
+        }
+    }
+
+    private func mapRegion(for records: [UserMapRecord]) -> MKCoordinateRegion? {
+        guard records.isEmpty == false else { return nil }
 
         let coordinates = records.map(\.coordinate)
         let latitudes = coordinates.map(\.latitude)
@@ -521,39 +963,56 @@ struct UserMapHomeView: View {
         guard let minLatitude = latitudes.min(),
               let maxLatitude = latitudes.max(),
               let minLongitude = longitudes.min(),
-              let maxLongitude = longitudes.max() else { return }
+              let maxLongitude = longitudes.max() else { return nil }
 
         let latitudeDelta = min(max((maxLatitude - minLatitude) * 1.35, 0.045), 150)
         let longitudeDelta = min(max((maxLongitude - minLongitude) * 1.35, 0.045), 320)
-        let region = MKCoordinateRegion(
+        return MKCoordinateRegion(
             center: .init(
                 latitude: (minLatitude + maxLatitude) / 2,
                 longitude: (minLongitude + maxLongitude) / 2
             ),
             span: .init(latitudeDelta: latitudeDelta, longitudeDelta: longitudeDelta)
         )
-
-        withAnimation(.easeInOut(duration: 0.3)) {
-            cameraPosition = .region(region)
-        }
     }
 
     @ViewBuilder
     private func mapMarker(for record: UserMapRecord) -> some View {
+        let isSelected = record.id == mapSelectedRecord?.id && (
+            mapCapsulePresentation.isPresented || mapFocusedJourney != nil
+        )
+
         switch record.kind {
         case let .poi(rated):
             UserMapMarker(category: rated.poi.category)
+                .scaleEffect(isSelected ? 1.22 : 1)
+                .shadow(color: isSelected ? Color.black.opacity(0.28) : .clear, radius: 7, y: 3)
         case let .reel(reel):
-            RealMapThumbnail(real: reel, user: userProvider(reel.userId), size: 38)
+            RealMapThumbnail(
+                real: reel,
+                user: userProvider(reel.userId),
+                size: isSelected ? 46 : 38,
+                isSelected: isSelected
+            )
         case .journey:
-            MemoryThumbnail(record: record, size: 42, cornerRadius: 12)
+            ZStack {
+                MemoryThumbnail(record: record, size: 42, cornerRadius: 12)
+                Image(systemName: "folder.fill")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(6)
+                    .background(Color.black.opacity(0.55), in: Circle())
+            }
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white, lineWidth: 2)
+                        .stroke(Color.white, lineWidth: 1.5)
                 }
                 .shadow(color: Color.black.opacity(0.24), radius: 5, y: 2)
         }
     }
+
+    private static let mapCapsuleCompactFraction: CGFloat = 0.35
+    private static let mapCapsuleCompactDetent = PresentationDetent.fraction(mapCapsuleCompactFraction)
 
     private var viewToggle: some View {
         Button {
@@ -572,8 +1031,11 @@ struct UserMapHomeView: View {
                 .padding(.vertical, 12)
                 .background(Color.black.opacity(0.88), in: Capsule())
                 .shadow(color: Color.black.opacity(0.22), radius: 10, y: 4)
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .contentShape(Capsule())
+        .allowsHitTesting(true)
         .accessibilityLabel(display == .list ? "Show map" : "Show list")
     }
 
@@ -809,7 +1271,7 @@ private struct UserMapFilterSheet: View {
             )
 
             LazyVGrid(
-                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2),
                 spacing: 8
             ) {
                 ForEach(UserMapHomeView.RecordType.allCases) { type in
@@ -1088,7 +1550,7 @@ private struct UserMapRecordCard: View {
     }
 }
 
-private struct MemoryThumbnail: View {
+struct MemoryThumbnail: View {
     let record: UserMapRecord
     let size: CGFloat
     let cornerRadius: CGFloat
@@ -1194,7 +1656,7 @@ private struct MemoryRemoteImage: View {
     }
 }
 
-private struct JourneyMemoryThumbnail: View {
+struct JourneyMemoryThumbnail: View {
     let journey: JourneyPost
     let size: CGFloat
 
@@ -1248,62 +1710,5 @@ private struct JourneyMemoryThumbnail: View {
 private extension Collection {
     subscript(safe index: Index) -> Element? {
         indices.contains(index) ? self[index] : nil
-    }
-}
-
-private struct UserMapRecordPreview: View {
-    let record: UserMapRecord
-
-    var body: some View {
-        HStack(spacing: 12) {
-            MemoryThumbnail(record: record, size: 52, cornerRadius: 8)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(record.title)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Text(metadata)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-        }
-        .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-
-    private var metadata: String {
-        switch record.kind {
-        case let .poi(rated): return "POI · \(rated.poi.category.displayName) · \(record.cityName)"
-        case .reel: return "Reel · \(record.cityName)"
-        case let .journey(journey): return "Journey · \(journey.reels.count + journey.pois.count) memories"
-        }
-    }
-}
-
-private struct UserMapRecordDetail: View {
-    let record: UserMapRecord
-    let userProvider: (UUID) -> User?
-
-    var body: some View {
-        switch record.kind {
-        case let .poi(rated):
-            ExperienceDetailView(ratedPOI: rated, isExpanded: true, userProvider: userProvider)
-        case let .reel(reel):
-            ExperienceDetailView(
-                sequencePager: .init(items: [.init(id: reel.id, mode: .real(reel, userProvider(reel.userId)))]),
-                selection: .constant(reel.id),
-                isExpanded: true,
-                userProvider: userProvider
-            )
-        case let .journey(journey):
-            ExperienceDetailView(
-                sequencePager: .init(items: [.init(id: journey.id, mode: .journey(journey))]),
-                selection: .constant(journey.id),
-                isExpanded: true,
-                userProvider: userProvider
-            )
-        }
     }
 }

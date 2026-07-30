@@ -14,7 +14,13 @@ struct AppRouter: View {
                 .tabItem { Label("Friends", systemImage: "person.2") }
                 .tag(1)
 
-            UserMapView(viewModel: .init(environment: environment, context: .me))
+            UserMapView(
+                viewModel: .init(
+                    environment: environment,
+                    context: .me,
+                    dataScope: .privateArchive
+                )
+            )
                 .tabItem { Label("MyMap", systemImage: "mappin.and.ellipse") }
                 .tag(2)
 

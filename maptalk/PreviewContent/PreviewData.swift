@@ -60,9 +60,25 @@ enum PreviewData {
         let user: User
         let pois: [RatedPOI]
         let reels: [RealPost]
+        /// Journey folders exist only in Chengsi's private MyMap archive.
+        /// The published profile deliberately receives the default empty set.
+        let journeys: [JourneyPost]
+
+        init(
+            user: User,
+            pois: [RatedPOI],
+            reels: [RealPost],
+            journeys: [JourneyPost] = []
+        ) {
+            self.user = user
+            self.pois = pois
+            self.reels = reels
+            self.journeys = journeys
+        }
     }
 
-    static let chengsi: ChengsiMock = {
+    /// Everything Chengsi can revisit and organize inside MyMap, including unpublished memories.
+    static let chengsiPrivateArchive: ChengsiMock = {
         let referenceDate = Date()
         let aurora = sampleFriends[0]
         let night = sampleFriends[1]
@@ -642,8 +658,22 @@ enum PreviewData {
                 bangkokGlobalReal,
                 recentReal,
                 oldReal
-            ]
+            ],
+            journeys: sampleJourneys.filter { $0.userId == currentUser.id }
         )
+    }()
+
+    /// The deliberate public subset used by Profile and MapTalk.
+    static let chengsiPublishedProfile: ChengsiMock = {
+        let archive = chengsiPrivateArchive
+        let publishedPOIs = archive.pois.enumerated().compactMap { index, poi in
+            [0, 3, 5].contains(index) ? poi : nil
+        }
+        let publishedReels = archive.reels.filter { reel in
+            if case .publicAll = reel.visibility { return true }
+            return false
+        }
+        return ChengsiMock(user: archive.user, pois: publishedPOIs, reels: publishedReels)
     }()
 
     static let sampleRatedPOIs: [RatedPOI] = {
@@ -1973,9 +2003,9 @@ enum PreviewData {
             )
         ]
 
-        let chengsiIds = Set(chengsi.reels.map(\.id))
+        let chengsiIds = Set(chengsiPublishedProfile.reels.map(\.id))
         reals.removeAll { chengsiIds.contains($0.id) }
-        reals.insert(contentsOf: chengsi.reels, at: 0)
+        reals.insert(contentsOf: chengsiPublishedProfile.reels, at: 0)
         return reals
     }()
 

@@ -795,6 +795,7 @@ struct UserMapDetailView: View {
                 sequencePager: pager,
                 selection: selectionBinding,
                 isExpanded: experienceDetent == .large,
+                onCollapsedTap: { experienceDetent = .large },
                 userProvider: userProvider
             )
         }

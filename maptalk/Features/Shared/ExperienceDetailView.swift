@@ -128,7 +128,9 @@ struct ExperienceDetailView: View {
     let poi: RatedPOI?
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
+    let onCollapsedTap: (() -> Void)?
     let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
+    let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
@@ -139,7 +141,9 @@ struct ExperienceDetailView: View {
     init(
         ratedPOI: RatedPOI,
         isExpanded: Bool,
+        onCollapsedTap: (() -> Void)? = nil,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
+        journeyProvider: @escaping (UUID) -> JourneyPost? = { PreviewData.journey(for: $0) },
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         onPOIContributorViewed: @escaping ([String]) -> Void = { _ in },
         isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
@@ -147,7 +151,9 @@ struct ExperienceDetailView: View {
         self.poi = ratedPOI
         self.sequenceContext = nil
         self.isExpanded = isExpanded
+        self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
+        self.journeyProvider = journeyProvider
         self.userProvider = userProvider
         self.onPOIContributorViewed = onPOIContributorViewed
         self.isPOIContributorUnseen = isPOIContributorUnseen
@@ -157,7 +163,9 @@ struct ExperienceDetailView: View {
         sequencePager: SequencePager,
         selection: Binding<UUID>,
         isExpanded: Bool,
+        onCollapsedTap: (() -> Void)? = nil,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
+        journeyProvider: @escaping (UUID) -> JourneyPost? = { PreviewData.journey(for: $0) },
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         onPOIContributorViewed: @escaping ([String]) -> Void = { _ in },
         isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
@@ -165,7 +173,9 @@ struct ExperienceDetailView: View {
         self.poi = nil
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
+        self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
+        self.journeyProvider = journeyProvider
         self.userProvider = userProvider
         self.onPOIContributorViewed = onPOIContributorViewed
         self.isPOIContributorUnseen = isPOIContributorUnseen

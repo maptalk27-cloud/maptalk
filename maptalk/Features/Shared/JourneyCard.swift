@@ -197,22 +197,34 @@ struct JourneyCard: View {
 struct JourneyAvatarStack: View {
     let journey: JourneyPost
     let userProvider: (UUID) -> User?
+    let reels: [RealPost]?
+    let pois: [RatedPOI]?
     let avatarSize: CGFloat
     let maxRows: Int?
     let maxVisibleCount: Int?
+    let onReelTap: ((RealPost) -> Void)?
+    let onPOITap: ((RatedPOI) -> Void)?
 
     init(
         journey: JourneyPost,
         userProvider: @escaping (UUID) -> User?,
+        reels: [RealPost]? = nil,
+        pois: [RatedPOI]? = nil,
         avatarSize: CGFloat,
         maxRows: Int? = nil,
-        maxVisibleCount: Int? = nil
+        maxVisibleCount: Int? = nil,
+        onReelTap: ((RealPost) -> Void)? = nil,
+        onPOITap: ((RatedPOI) -> Void)? = nil
     ) {
         self.journey = journey
         self.userProvider = userProvider
+        self.reels = reels
+        self.pois = pois
         self.avatarSize = avatarSize
         self.maxRows = maxRows
         self.maxVisibleCount = maxVisibleCount
+        self.onReelTap = onReelTap
+        self.onPOITap = onPOITap
     }
 
     var body: some View {
@@ -262,14 +274,14 @@ struct JourneyAvatarStack: View {
     }
 
     private var sortedEvents: [JourneyStackEvent] {
-        let reelEvents = journey.reels.map { reel in
+        let reelEvents = (reels ?? journey.reels).map { reel in
             JourneyStackEvent(
                 id: reel.id,
                 date: reel.createdAt,
                 kind: .reel(reel, userProvider(reel.userId))
             )
         }
-        let poiEvents = journey.pois.map { poi in
+        let poiEvents = (pois ?? journey.pois).map { poi in
             JourneyStackEvent(
                 id: poi.id,
                 date: poi.checkIns.map(\.createdAt).max() ?? journey.createdAt,
@@ -289,15 +301,144 @@ struct JourneyAvatarStack: View {
         switch event.kind {
         case let .reel(reel, user):
             let displayUser = user ?? userProvider(reel.userId)
-            RealMapThumbnail(
-                real: reel,
-                user: displayUser,
-                size: avatarSize,
-                fitsStatusInsideFrame: true
-            )
+            tapTarget(action: onReelTap.map { handler in { handler(reel) } }) {
+                RealMapThumbnail(
+                    real: reel,
+                    user: displayUser,
+                    size: avatarSize,
+                    fitsStatusInsideFrame: true
+                )
+            }
         case let .poi(rated):
-            POIMapThumbnail(category: rated.poi.category, size: avatarSize)
+            tapTarget(action: onPOITap.map { handler in { handler(rated) } }) {
+                POIMapThumbnail(category: rated.poi.category, size: avatarSize)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func tapTarget<Content: View>(
+        action: (() -> Void)?,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        if let action {
+            Button(action: action) {
+                content()
+            }
+            .buttonStyle(.plain)
+        } else {
+            content()
+        }
+    }
+}
+
+/// The compact media stack attached to a Reel when it belongs to a Journey.
+/// It intentionally contains only the Journey's memories, never a public Journey post card.
+struct JourneyAttachmentCapsule: View {
+    let journey: JourneyPost
+    let userProvider: (UUID) -> User?
+    let reels: [RealPost]?
+    let pois: [RatedPOI]?
+    let isCompact: Bool
+    let isCollapsed: Bool
+    let maxVisibleCount: Int?
+    let onTap: (() -> Void)?
+    let onReelTap: ((RealPost) -> Void)?
+    let onPOITap: ((RatedPOI) -> Void)?
+
+    init(
+        journey: JourneyPost,
+        userProvider: @escaping (UUID) -> User?,
+        reels: [RealPost]? = nil,
+        pois: [RatedPOI]? = nil,
+        isCompact: Bool = false,
+        isCollapsed: Bool,
+        maxVisibleCount: Int? = nil,
+        onTap: (() -> Void)? = nil,
+        onReelTap: ((RealPost) -> Void)? = nil,
+        onPOITap: ((RatedPOI) -> Void)? = nil
+    ) {
+        self.journey = journey
+        self.userProvider = userProvider
+        self.reels = reels
+        self.pois = pois
+        self.isCompact = isCompact
+        self.isCollapsed = isCollapsed
+        self.maxVisibleCount = maxVisibleCount
+        self.onTap = onTap
+        self.onReelTap = onReelTap
+        self.onPOITap = onPOITap
+    }
+
+    var body: some View {
+        Group {
+            if let onTap {
+                Button(action: onTap) {
+                    content
+                }
+                .buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
+        .accessibilityLabel("Journey memories")
+    }
+
+    private var content: some View {
+        JourneyAvatarStack(
+            journey: journey,
+            userProvider: userProvider,
+            reels: reels,
+            pois: pois,
+            avatarSize: avatarSize,
+            maxRows: effectiveMaxVisibleCount == nil ? maxRows : nil,
+            maxVisibleCount: effectiveMaxVisibleCount,
+            onReelTap: onReelTap,
+            onPOITap: onPOITap
+        )
+        .padding(.vertical, verticalPadding)
+        .padding(.leading, leadingPadding)
+        .padding(.trailing, trailingPadding)
+        .frame(maxWidth: maxCapsuleWidth, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+                .padding(.leading, -backgroundBleed)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .padding(.leading, -backgroundBleed)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private var avatarSize: CGFloat { isCompact ? 26 : 34 }
+    private var verticalPadding: CGFloat { isCompact ? 6 : 10 }
+    private var horizontalPadding: CGFloat { isCompact ? 6 : 8 }
+    private var leadingPadding: CGFloat { isCompact ? 0 : horizontalPadding }
+    private var trailingPadding: CGFloat { horizontalPadding }
+    private var maxRows: Int? { isCompact ? 1 : (isCollapsed ? 2 : nil) }
+    private var backgroundBleed: CGFloat { isCompact ? 8 : 0 }
+    private var maxCapsuleWidth: CGFloat? { isCompact ? nil : 280 }
+
+    private var effectiveMaxVisibleCount: Int? {
+        if let maxVisibleCount { return maxVisibleCount }
+        guard let maxCapsuleWidth else { return nil }
+
+        let eventCount = (reels ?? journey.reels).count + (pois ?? journey.pois).count
+        let overlapSpacing: CGFloat = 10
+        let availableWidth = max(maxCapsuleWidth - leadingPadding - trailingPadding, avatarSize)
+        let step = max(avatarSize - overlapSpacing, 1)
+        let baseOffset = overlapSpacing
+        let maxWithoutPlus = max(1, Int((availableWidth - baseOffset) / step))
+
+        if eventCount > maxWithoutPlus {
+            let plusWidth = max(avatarSize * 0.8, 18)
+            let maxWithPlus = max(1, Int((availableWidth - baseOffset - plusWidth) / step))
+            return maxWithPlus
+        }
+        return maxWithoutPlus
     }
 }
 

@@ -6,6 +6,7 @@ extension ExperienceDetailView {
 struct ExperiencePanel: View {
     let data: ExperienceDetailView.ContentData
     let onRecentSharerSelected: ((Int, ExperienceDetailView.ContentData) -> Void)?
+    let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
     let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
     let onUserSelected: (User) -> Void
@@ -42,6 +43,7 @@ struct ExperiencePanel: View {
                     HeroSection(
                         model: hero,
                         style: .standard,
+                        journeyProvider: journeyProvider,
                         userProvider: userProvider,
                         onUserSelected: onUserSelected,
                         onCapsuleTap: onJourneyAvatarStackTap
@@ -686,6 +688,7 @@ struct EngagementSection: View {
 struct HeroSection: View {
     let model: ExperienceDetailView.HeroSectionModel
     let style: CompactRealCard.Style
+    let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
     let hideMedia: Bool
     let useTallLayout: Bool
@@ -695,6 +698,7 @@ struct HeroSection: View {
     init(
         model: ExperienceDetailView.HeroSectionModel,
         style: CompactRealCard.Style,
+        journeyProvider: @escaping (UUID) -> JourneyPost? = { PreviewData.journey(for: $0) },
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
@@ -703,6 +707,7 @@ struct HeroSection: View {
     ) {
         self.model = model
         self.style = style
+        self.journeyProvider = journeyProvider
         self.userProvider = userProvider
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
@@ -717,6 +722,7 @@ struct HeroSection: View {
             style: style,
             displayNameOverride: model.displayNameOverride,
             avatarCategory: model.avatarCategory,
+            journeyProvider: journeyProvider,
             userProvider: userProvider,
             suppressContent: model.suppressContent,
             hideHeader: false,
