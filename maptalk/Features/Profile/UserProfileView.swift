@@ -5,10 +5,16 @@ struct UserProfileView: View {
     @StateObject private var viewModel: UserProfileViewModel
     @State private var isEditingProfile = false
     private let showsCloseButton: Bool
+    private let showsSettingsButton: Bool
 
-    init(viewModel: UserProfileViewModel, showsCloseButton: Bool = false) {
+    init(
+        viewModel: UserProfileViewModel,
+        showsCloseButton: Bool = false,
+        showsSettingsButton: Bool = false
+    ) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.showsCloseButton = showsCloseButton
+        self.showsSettingsButton = showsSettingsButton
     }
 
     var body: some View {
@@ -40,8 +46,30 @@ struct UserProfileView: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Settings")
                     .padding(.top, 12)
                     .padding(.leading, 24)
+                }
+                .toolbar(.hidden, for: .navigationBar)
+        } else if showsSettingsButton {
+            profileContent
+                .overlay(alignment: .topTrailing) {
+                    NavigationLink {
+                        MySettingsView()
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 36, height: 36)
+                            .background(.thinMaterial, in: Circle())
+                            .overlay {
+                                Circle()
+                                    .stroke(Color(.separator).opacity(0.3), lineWidth: 1)
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 12)
+                    .padding(.trailing, 24)
                 }
                 .toolbar(.hidden, for: .navigationBar)
         } else {
@@ -60,7 +88,7 @@ struct UserProfileView: View {
                 historySection
             }
             .padding(.horizontal, 24)
-            .padding(.top, showsCloseButton ? 64 : 24)
+            .padding(.top, showsCloseButton || showsSettingsButton ? 64 : 24)
             .padding(.bottom, 40)
         }
         .background(Color(.systemBackground))
@@ -118,7 +146,7 @@ struct UserProfileView: View {
             } else {
                 HStack(spacing: 12) {
                     NavigationLink {
-                        ChatThreadView()
+                        ChatThreadView(user: viewModel.user)
                     } label: {
                         ProfileActionLabel(title: "Message", systemImage: "message.fill", style: .quiet)
                     }

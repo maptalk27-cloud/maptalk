@@ -54,6 +54,49 @@ enum PreviewData {
     private static let generatedFriends: [User] = (0..<120).map { generatedFriend(index: $0) }
 
     static let sampleFriends: [User] = primaryFriends + generatedFriends
+
+    static let sampleChatPreviews: [ChatPreview] = {
+        let now = Date()
+        return [
+            .init(
+                user: primaryFriends[0],
+                lastMessage: "That sunset was unreal. We should go back.",
+                updatedAt: now.addingTimeInterval(-2 * 60),
+                unreadCount: 1
+            ),
+            .init(
+                user: primaryFriends[1],
+                lastMessage: "I saved the place you sent me.",
+                updatedAt: now.addingTimeInterval(-18 * 60),
+                unreadCount: 0
+            ),
+            .init(
+                user: primaryFriends[2],
+                lastMessage: "Meet there at 7?",
+                updatedAt: now.addingTimeInterval(-3 * 60 * 60),
+                unreadCount: 2
+            ),
+            .init(
+                user: primaryFriends[3],
+                lastMessage: "The rain finally cleared up here.",
+                updatedAt: now.addingTimeInterval(-26 * 60 * 60),
+                unreadCount: 0
+            ),
+            .init(
+                user: primaryFriends[4],
+                lastMessage: "I added a few photos from last night.",
+                updatedAt: now.addingTimeInterval(-3 * 24 * 60 * 60),
+                unreadCount: 0
+            ),
+            .init(
+                user: primaryFriends[5],
+                lastMessage: "This one feels like your kind of place.",
+                updatedAt: now.addingTimeInterval(-6 * 24 * 60 * 60),
+                unreadCount: 0
+            )
+        ]
+    }()
+
     private static var locationLabels: [UUID: String] = [:]
 
     struct ChengsiMock {

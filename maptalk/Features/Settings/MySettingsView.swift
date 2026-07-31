@@ -3,67 +3,45 @@ import SwiftUI
 struct MySettingsView: View {
     @Environment(\.appEnv) private var environment
 
-    private let user = PreviewData.currentUser
     @State private var isPrivateMap = false
     @State private var notificationsEnabled = true
     @State private var autoPlayReels = true
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    NavigationLink {
-                        UserProfileView(
-                            viewModel: .init(environment: environment, context: .me)
-                        )
-                    } label: {
-                        HStack(spacing: 12) {
-                            UserAvatarView(user: user, size: 64)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("@\(user.handle)")
-                                    .font(.headline)
-                                Text("Profile and account")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-
-                Section {
-                    SettingRow(icon: "person.crop.circle", title: "Account & Security")
-                    SettingRow(icon: "qrcode.viewfinder", title: "My QR Code")
-                    SettingRow(icon: "creditcard.fill", title: "Payments")
-                }
-
-                Section {
-                    SettingToggleRow(
-                        icon: "location",
-                        title: "Map privacy",
-                        isOn: $isPrivateMap
-                    )
-                    SettingToggleRow(
-                        icon: "sparkles",
-                        title: "Auto-play Reels",
-                        isOn: $autoPlayReels
-                    )
-                    SettingToggleRow(
-                        icon: "bell.badge.fill",
-                        title: "Notifications",
-                        isOn: $notificationsEnabled
-                    )
-                }
-
-                Section {
-                    SettingRow(icon: "questionmark.circle", title: "Help & Feedback")
-                    SettingRow(icon: "info.circle", title: "About MapTalk", detail: buildLabel)
-                }
+        List {
+            Section {
+                SettingRow(icon: "person.crop.circle", title: "Account & Security")
+                SettingRow(icon: "qrcode.viewfinder", title: "My QR Code")
+                SettingRow(icon: "creditcard.fill", title: "Payments")
             }
-            .listStyle(.insetGrouped)
-            .navigationTitle("My")
+
+            Section {
+                SettingToggleRow(
+                    icon: "location",
+                    title: "Map privacy",
+                    isOn: $isPrivateMap
+                )
+                SettingToggleRow(
+                    icon: "sparkles",
+                    title: "Auto-play Reels",
+                    isOn: $autoPlayReels
+                )
+                SettingToggleRow(
+                    icon: "bell.badge.fill",
+                    title: "Notifications",
+                    isOn: $notificationsEnabled
+                )
+            }
+
+            Section {
+                SettingRow(icon: "questionmark.circle", title: "Help & Feedback")
+                SettingRow(icon: "info.circle", title: "About MapTalk", detail: buildLabel)
+            }
         }
+        .listStyle(.insetGrouped)
+        .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
     }
 
     private var buildLabel: String {
