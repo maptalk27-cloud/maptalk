@@ -60,20 +60,23 @@ enum PreviewData {
         let user: User
         let pois: [RatedPOI]
         let reels: [RealPost]
-        /// Journey folders exist only in Chengsi's private MyMap archive.
-        /// The published profile deliberately receives the default empty set.
+        /// Legacy capsule content kept private for existing MyMap interactions.
         let journeys: [JourneyPost]
+        /// Private, editable organization folders. These are never published posts.
+        let journeyFolders: [JourneyFolder]
 
         init(
             user: User,
             pois: [RatedPOI],
             reels: [RealPost],
-            journeys: [JourneyPost] = []
+            journeys: [JourneyPost] = [],
+            journeyFolders: [JourneyFolder] = []
         ) {
             self.user = user
             self.pois = pois
             self.reels = reels
             self.journeys = journeys
+            self.journeyFolders = journeyFolders
         }
     }
 
@@ -89,6 +92,8 @@ enum PreviewData {
         let kyotoCapsuleJourneyId = uuid(3101)
         let lagosCapsuleJourneyId = uuid(3102)
         let kyotoPocketJourneyId = uuid(3104)
+        let afterDarkFolderID = uuid(8101)
+        let revisitsFolderID = uuid(8102)
 
         let neonPier = POI(
             id: uuid(7001),
@@ -589,6 +594,34 @@ enum PreviewData {
         )
         registerLocationLabel("Leavenworth, Washington, USA", for: oldReal.id)
 
+        let journeyFolders: [JourneyFolder] = [
+            .init(
+                id: afterDarkFolderID,
+                userId: currentUser.id,
+                title: "After dark",
+                memberReferences: [
+                    .reel(portraitVideoReal.id),
+                    .poi(bangkokFootprint.id),
+                    .reel(lagosNightReal.id)
+                ],
+                createdAt: referenceDate.addingTimeInterval(-8 * 60 * 60),
+                updatedAt: referenceDate.addingTimeInterval(-90 * 60),
+                timelineStart: referenceDate.addingTimeInterval(-8 * 60 * 60)
+            ),
+            .init(
+                id: revisitsFolderID,
+                userId: currentUser.id,
+                title: "Places to revisit",
+                memberReferences: [
+                    .poi(pastFootprint.id),
+                    .reel(oldReal.id),
+                    .poi(recentFootprint.id)
+                ],
+                createdAt: referenceDate.addingTimeInterval(-7 * 24 * 60 * 60),
+                updatedAt: referenceDate.addingTimeInterval(-28 * 60 * 60)
+            )
+        ]
+
         let laReal = RealPost(
             id: uuid(9107),
             userId: currentUser.id,
@@ -659,7 +692,8 @@ enum PreviewData {
                 recentReal,
                 oldReal
             ],
-            journeys: sampleJourneys.filter { $0.userId == currentUser.id }
+            journeys: sampleJourneys.filter { $0.userId == currentUser.id },
+            journeyFolders: journeyFolders
         )
     }()
 
@@ -673,7 +707,12 @@ enum PreviewData {
             if case .publicAll = reel.visibility { return true }
             return false
         }
-        return ChengsiMock(user: archive.user, pois: publishedPOIs, reels: publishedReels)
+        return ChengsiMock(
+            user: archive.user,
+            pois: publishedPOIs,
+            reels: publishedReels,
+            journeyFolders: []
+        )
     }()
 
     static let sampleRatedPOIs: [RatedPOI] = {

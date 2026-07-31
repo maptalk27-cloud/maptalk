@@ -85,6 +85,12 @@ private extension String {
 
 struct UserMapHomeView: View {
     private enum Display: Equatable { case list, map }
+
+    private struct JourneyAddContext: Identifiable {
+        let id = UUID()
+        let references: [JourneyFolder.MemberReference]
+    }
+
     fileprivate enum RecordType: String, CaseIterable, Identifiable, Hashable {
         case poi = "POI"
         case reel = "Reel"
@@ -147,9 +153,22 @@ struct UserMapHomeView: View {
     /// Private folder catalog. It resolves an attached or nested Journey but
     /// does not decide which folders appear at the MyMap root.
     let journeyProvider: (UUID) -> JourneyPost?
+    /// Local-only collections. These are deliberately separate from the
+    /// chronological POI / Reel records above.
+    let journeyFolders: [JourneyFolder]
+    let reels: [RealPost]
+    let footprints: [UserMapViewModel.Footprint]
+    let canEditJourneyFolders: Bool
+    let onCreateJourneyFolder: (String, [JourneyFolder.MemberReference]) -> JourneyFolder?
+    let onSaveJourneyFolder: (JourneyFolder) -> Void
+    let onDeleteJourneyFolder: (UUID) -> Void
     let userProvider: (UUID) -> User?
 
     @State private var display: Display = .list
+    /// The map stays mounted beneath the archive, but its first presentation
+    /// should still frame the available memories. Later List ↔ Map switches
+    /// preserve the person's manually chosen viewport.
+    @State private var hasPresentedMap = false
     @State private var searchText = ""
     @State private var filters = FilterState()
     @State private var filterDraft = FilterState()
@@ -166,6 +185,10 @@ struct UserMapHomeView: View {
     @State private var mapSize: CGSize = .zero
     @State private var mapSafeAreaBottom: CGFloat = 0
     @State private var mapReelAlignTrigger = 0
+    @State private var journeyFolderRoute: JourneyFolder?
+    @State private var journeyAddContext: JourneyAddContext?
+    @State private var isSelectingMemories = false
+    @State private var selectedMemoryIDs: Set<UUID> = []
     @FocusState private var isSearchFocused: Bool
 
     init(
@@ -173,12 +196,26 @@ struct UserMapHomeView: View {
         region: MKCoordinateRegion,
         records: [UserMapRecord],
         journeyProvider: @escaping (UUID) -> JourneyPost?,
+        journeyFolders: [JourneyFolder] = [],
+        reels: [RealPost] = [],
+        footprints: [UserMapViewModel.Footprint] = [],
+        canEditJourneyFolders: Bool = false,
+        onCreateJourneyFolder: @escaping (String, [JourneyFolder.MemberReference]) -> JourneyFolder? = { _, _ in nil },
+        onSaveJourneyFolder: @escaping (JourneyFolder) -> Void = { _ in },
+        onDeleteJourneyFolder: @escaping (UUID) -> Void = { _ in },
         userProvider: @escaping (UUID) -> User?
     ) {
         self.user = user
         self.region = region
         self.records = records
         self.journeyProvider = journeyProvider
+        self.journeyFolders = journeyFolders
+        self.reels = reels
+        self.footprints = footprints
+        self.canEditJourneyFolders = canEditJourneyFolders
+        self.onCreateJourneyFolder = onCreateJourneyFolder
+        self.onSaveJourneyFolder = onSaveJourneyFolder
+        self.onDeleteJourneyFolder = onDeleteJourneyFolder
         self.userProvider = userProvider
         _cameraPosition = State(initialValue: .region(region))
         _currentMapRegion = State(initialValue: region)
@@ -189,33 +226,62 @@ struct UserMapHomeView: View {
 
     var body: some View {
         ZStack {
-            switch display {
-            case .list:
+            // MyMap has one map canvas. The list is an opaque reading layer
+            // above it rather than a separate root screen, so returning to
+            // Map keeps its camera, selection, and interaction state intact.
+            mapContent
+
+            if display == .list {
                 listContent
-            case .map:
-                mapContent
+                    .transition(.opacity)
             }
         }
+        .animation(.easeInOut(duration: 0.24), value: display)
         .overlay(alignment: .bottom) {
-            if mapJourneyIsActive == false {
-                viewToggle
-                    .padding(.bottom, display == .list ? 18 : 28)
-                    // Keep the List/Map control above the scroll view's
-                    // NavigationLinks; otherwise its visual capsule can be
-                    // tapped through into an archive row.
-                    .zIndex(100)
+            VStack(spacing: 10) {
+                if display == .list, isSelectingMemories, selectedMemoryIDs.isEmpty == false {
+                    addSelectionToJourneyButton
+                }
+
+                if mapJourneyIsActive == false {
+                    viewToggle
+                        // Keep the List/Map control above the scroll view's
+                        // NavigationLinks; otherwise its visual capsule can be
+                        // tapped through into an archive row.
+                        .zIndex(100)
+                }
             }
+            // The control belongs to MyMap, not either presentation mode.
+            .padding(.bottom, 18)
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if display == .map, mapFocusedJourney != nil {
                 mapJourneyControls
             } else {
-                archiveControls
+                VStack(spacing: display == .map && shouldShowJourneyShelf ? 8 : 0) {
+                    archiveControls
+
+                    if display == .map {
+                        mapJourneyShelf
+                    }
+                }
             }
         }
         .navigationTitle("MyMap")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(display == .list ? .visible : .hidden, for: .navigationBar)
+        // A root Map is still MyMap. Only a focused Journey replaces this
+        // identity with its own breadcrumb header.
+        .toolbar(mapJourneyIsActive ? .hidden : .visible, for: .navigationBar)
+        .toolbar {
+            if display == .list, canEditJourneyFolders {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(isSelectingMemories ? "Done" : "Select") {
+                        toggleMemorySelection()
+                    }
+                    .font(.subheadline.weight(.semibold))
+                }
+            }
+        }
         .sheet(item: $filterPresentation) { presentation in
             UserMapFilterSheet(
                 presentation: presentation,
@@ -228,6 +294,35 @@ struct UserMapHomeView: View {
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $journeyAddContext) { context in
+            JourneyFolderPickerSheet(
+                folders: journeyFolders,
+                memoryCount: context.references.count,
+                onSelect: { folderID in
+                    append(context.references, toJourneyFolder: folderID)
+                    finishMemorySelection()
+                },
+                onCreate: { title in
+                    let folder = onCreateJourneyFolder(title, context.references)
+                    finishMemorySelection()
+                    guard let folder else { return }
+                    DispatchQueue.main.async {
+                        journeyFolderRoute = folder
+                    }
+                }
+            )
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+        }
+        .navigationDestination(item: $journeyFolderRoute) { folder in
+            JourneyFolderDetailView(
+                folder: folder,
+                reels: reels,
+                footprints: footprints,
+                onSave: onSaveJourneyFolder,
+                onDelete: onDeleteJourneyFolder
+            )
         }
         .sheet(isPresented: $mapCapsulePresentation.isPresented, onDismiss: {
             guard mapCapsulePresentation.didDismiss() == false else { return }
@@ -316,57 +411,252 @@ struct UserMapHomeView: View {
             }
     }
 
+    /// Filters describe the memory stream. The organizer stays visible only
+    /// in the natural browse state so it never masquerades as a third record
+    /// type in a filtered result.
+    private var shouldShowJourneyShelf: Bool {
+        canEditJourneyFolders && searchText.isEmpty && filters.isDefault
+    }
+
+    private var selectedMemoryReferences: [JourneyFolder.MemberReference] {
+        records.compactMap { record in
+            guard selectedMemoryIDs.contains(record.id) else { return nil }
+            switch record.kind {
+            case let .reel(reel):
+                return .reel(reel.id)
+            case let .poi(rated):
+                return .poi(rated.id)
+            case .journey:
+                return nil
+            }
+        }
+    }
+
+    private var addSelectionToJourneyButton: some View {
+        Button {
+            let references = selectedMemoryReferences
+            guard references.isEmpty == false else { return }
+            journeyAddContext = JourneyAddContext(references: references)
+        } label: {
+            Label(
+                "Add \(selectedMemoryReferences.count) to Journey",
+                systemImage: "folder.badge.plus"
+            )
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .background(Color.black.opacity(0.9), in: Capsule())
+            .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("mymap.add-to-journey")
+    }
+
+    private func toggleMemorySelection() {
+        isSearchFocused = false
+        if isSelectingMemories {
+            finishMemorySelection()
+        } else {
+            isSelectingMemories = true
+        }
+    }
+
+    private func toggleMemorySelection(_ record: UserMapRecord) {
+        guard record.isMapExperienceItem else { return }
+        if selectedMemoryIDs.contains(record.id) {
+            selectedMemoryIDs.remove(record.id)
+        } else {
+            selectedMemoryIDs.insert(record.id)
+        }
+    }
+
+    private func finishMemorySelection() {
+        journeyAddContext = nil
+        selectedMemoryIDs.removeAll()
+        isSelectingMemories = false
+    }
+
+    private func append(
+        _ references: [JourneyFolder.MemberReference],
+        toJourneyFolder folderID: UUID
+    ) {
+        guard var folder = journeyFolders.first(where: { $0.id == folderID }) else { return }
+        for reference in references where folder.memberReferences.contains(reference) == false {
+            folder.memberReferences.append(reference)
+        }
+        onSaveJourneyFolder(folder)
+    }
+
     private var listContent: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 26, pinnedViews: .sectionHeaders) {
-                if filteredRecords.isEmpty {
-                    ContentUnavailableView(
-                        "No memories found",
-                        systemImage: "magnifyingglass",
-                        description: Text("Try a different search or filter.")
-                    )
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 80)
-                }
+                journeyShelfContent
+                archiveEmptyState
 
                 ForEach(groupedRecords, id: \.0) { section in
-                    Section {
-                        VStack(spacing: 0) {
-                            ForEach(Array(section.1.enumerated()), id: \.element.id) { index, record in
-                                NavigationLink {
-                                    MyMapMapDestination(
-                                        records: filteredRecords,
-                                        selectedRecord: record,
-                                        entryRegion: currentMapRegion,
-                                        journeyProvider: journeyProvider,
-                                        userProvider: userProvider
-                                    )
-                                } label: {
-                                    UserMapRecordCard(record: record)
-                                }
-                                .buttonStyle(.plain)
-
-                                if index < section.1.count - 1 {
-                                    Divider()
-                                        .padding(.leading, 76)
-                                }
-                            }
-                        }
-                    } header: {
-                        ArchiveDateHeader(
-                            title: section.0,
-                            count: section.1.count,
-                            date: section.1.first?.timestamp ?? .now
-                        )
-                        .background(Color(.systemBackground))
-                    }
+                    archiveSection(section)
                 }
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
-            .padding(.bottom, 94)
+            .padding(.bottom, isSelectingMemories && selectedMemoryIDs.isEmpty == false ? 158 : 94)
         }
         .background(Color(.systemBackground))
+    }
+
+    @ViewBuilder
+    private var journeyShelfContent: some View {
+        if shouldShowJourneyShelf {
+            JourneyFolderShelf(
+                folders: journeyFolders,
+                reels: reels,
+                footprints: footprints,
+                onOpen: { folder in
+                    journeyFolderRoute = folder
+                },
+                onCreate: {
+                    journeyAddContext = JourneyAddContext(references: [])
+                }
+            )
+            .padding(.bottom, 2)
+        }
+    }
+
+    /// A Journey has no coordinate, so it remains a compact private shelf in
+    /// the map chrome instead of becoming a misleading map pin. This is the
+    /// same organizer shown at the top of List, condensed for a map overlay.
+    @ViewBuilder
+    private var mapJourneyShelf: some View {
+        if shouldShowJourneyShelf {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Label("Journeys", systemImage: "folder.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(.thinMaterial, in: Capsule(style: .continuous))
+
+                    if journeyFolders.isEmpty {
+                        Button {
+                            journeyAddContext = JourneyAddContext(references: [])
+                        } label: {
+                            Label("New Journey", systemImage: "plus")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(.thinMaterial, in: Capsule(style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Create Journey")
+                    } else {
+                        ForEach(journeyFolders) { folder in
+                            Button {
+                                journeyFolderRoute = folder
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "folder.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(Color(Theme.neonPrimary))
+
+                                    Text(folder.title)
+                                        .font(.caption.weight(.semibold))
+                                        .lineLimit(1)
+
+                                    Text("\(folder.memberReferences.count)")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 9)
+                                .background(.thinMaterial, in: Capsule(style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Open \(folder.title)")
+                        }
+
+                        Button {
+                            journeyAddContext = JourneyAddContext(references: [])
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.primary)
+                                .frame(width: 32, height: 32)
+                                .background(.thinMaterial, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Create Journey")
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .padding(.bottom, 4)
+            .accessibilityIdentifier("mymap.journey-shelf")
+        }
+    }
+
+    @ViewBuilder
+    private var archiveEmptyState: some View {
+        if filteredRecords.isEmpty {
+            ContentUnavailableView(
+                "No memories found",
+                systemImage: "magnifyingglass",
+                description: Text("Try a different search or filter.")
+            )
+            .frame(maxWidth: .infinity)
+            .padding(.top, 80)
+        }
+    }
+
+    private func archiveSection(_ section: (String, [UserMapRecord])) -> some View {
+        Section {
+            VStack(spacing: 0) {
+                ForEach(section.1.indices, id: \.self) { index in
+                    archiveRecordRow(section.1[index])
+
+                    if index < section.1.count - 1 {
+                        Divider()
+                            .padding(.leading, isSelectingMemories ? 38 : 76)
+                    }
+                }
+            }
+        } header: {
+            ArchiveDateHeader(
+                title: section.0,
+                count: section.1.count,
+                date: section.1.first?.timestamp ?? .now
+            )
+            .background(Color(.systemBackground))
+        }
+    }
+
+    @ViewBuilder
+    private func archiveRecordRow(_ record: UserMapRecord) -> some View {
+        if isSelectingMemories {
+            Button {
+                toggleMemorySelection(record)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: selectedMemoryIDs.contains(record.id) ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(selectedMemoryIDs.contains(record.id) ? Color(Theme.neonPrimary) : Color.secondary)
+                    UserMapRecordCard(record: record)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button {
+                openRecordFromList(record)
+            } label: {
+                UserMapRecordCard(record: record)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("mymap.list-record.\(record.id.uuidString)")
+        }
     }
 
     private var mapContent: some View {
@@ -400,6 +690,33 @@ struct UserMapHomeView: View {
             .onChangeCompat(of: geometry.size) { newSize in
                 mapSize = newSize
                 mapSafeAreaBottom = geometry.safeAreaInsets.bottom
+            }
+        }
+    }
+
+    /// Opens a memory in the already-mounted MyMap canvas. A list row no
+    /// longer pushes a second map, so the user can naturally return to List
+    /// and keep the same map context. We deliberately do not fly the camera:
+    /// the compact capsule is the immediate acknowledgement and the person
+    /// remains in control of looking around the map.
+    private func openRecordFromList(_ record: UserMapRecord) {
+        isSearchFocused = false
+        hasPresentedMap = true
+
+        withAnimation(.easeInOut(duration: 0.24)) {
+            display = .map
+        }
+
+        DispatchQueue.main.async {
+            if case let .journey(journey) = record.kind {
+                enterMapJourney(
+                    journey,
+                    savesEntryRecord: true,
+                    size: mapSize,
+                    safeAreaBottom: mapSafeAreaBottom
+                )
+            } else {
+                presentMapCapsule(record)
             }
         }
     }
@@ -1017,10 +1334,21 @@ struct UserMapHomeView: View {
     private var viewToggle: some View {
         Button {
             let nextDisplay: Display = display == .list ? .map : .list
+
+            if nextDisplay == .list {
+                // Do not leave a map-only capsule floating over the archive
+                // after the person returns to List.
+                mapCapsulePresentation.dismiss()
+            }
+
             withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                 display = nextDisplay
             }
-            if nextDisplay == .map {
+
+            // First arrival gives the user a useful overview. Every later
+            // switch preserves the camera they manually explored.
+            if nextDisplay == .map, hasPresentedMap == false {
+                hasPresentedMap = true
                 focusMap(on: filteredRecords)
             }
         } label: {

@@ -15,6 +15,22 @@ struct UserMapView: View {
                 journeyProvider: { id in
                     viewModel.journeyCatalog.first { $0.id == id }
                 },
+                journeyFolders: viewModel.journeyFolders,
+                reels: viewModel.reels,
+                footprints: viewModel.footprints,
+                canEditJourneyFolders: viewModel.canEditJourneyFolders,
+                onCreateJourneyFolder: { title, references in
+                    viewModel.createJourneyFolder(
+                        title: title,
+                        memberReferences: references
+                    )
+                },
+                onSaveJourneyFolder: { folder in
+                    viewModel.saveJourneyFolder(folder)
+                },
+                onDeleteJourneyFolder: { id in
+                    viewModel.deleteJourneyFolder(id: id)
+                },
                 userProvider: userProvider
             )
         }

@@ -86,10 +86,17 @@ final class UserMapViewModel: ObservableObject {
     )
     @Published private(set) var footprints: [Footprint] = []
     @Published private(set) var reels: [RealPost] = []
-    /// Local folder definitions used to resolve a Reel's `capsuleId`.
+    /// Legacy social Journey posts used by the existing public-style capsule.
     /// They are not root-level MyMap records.
     @Published private(set) var journeyCatalog: [JourneyPost] = []
+    /// Private, editable organizers. Unlike `JourneyPost`, these never appear
+    /// in a public feed or as a pin on the root map.
+    @Published private(set) var journeyFolders: [JourneyFolder] = []
     @Published private(set) var mapRegion: MKCoordinateRegion = UserMapViewModel.defaultRegion
+
+    var canEditJourneyFolders: Bool {
+        context.isCurrentUser && dataScope == .privateArchive
+    }
 
     var mapPins: [MapPin] {
         footprints.map { footprint in
@@ -155,6 +162,7 @@ final class UserMapViewModel: ObservableObject {
             .sorted { $0.createdAt > $1.createdAt }
         reels = personalReals
         journeyCatalog = []
+        journeyFolders = []
 
         summary = Summary(
             footprintCount: matchedFootprints.count,
@@ -187,6 +195,7 @@ final class UserMapViewModel: ObservableObject {
 
         reels = feed.reels
         journeyCatalog = feed.journeys
+        journeyFolders = feed.journeyFolders
 
         summary = Summary(
             footprintCount: matchedFootprints.count,
@@ -206,6 +215,50 @@ final class UserMapViewModel: ObservableObject {
         } else {
             mapRegion = Self.defaultRegion
         }
+    }
+
+    /// Creates a local Journey organizer. Adding something to a folder never
+    /// moves or changes the original POI/Reel.
+    @discardableResult
+    func createJourneyFolder(
+        title: String,
+        memberReferences: [JourneyFolder.MemberReference] = [],
+        timelineStart: Date? = nil
+    ) -> JourneyFolder? {
+        guard canEditJourneyFolders else { return nil }
+
+        let now = Date()
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folder = JourneyFolder(
+            userId: identity.user.id,
+            title: cleanTitle.isEmpty ? "Untitled Journey" : cleanTitle,
+            memberReferences: memberReferences,
+            createdAt: now,
+            updatedAt: now,
+            timelineStart: timelineStart
+        )
+        journeyFolders.insert(folder, at: 0)
+        return folder
+    }
+
+    /// Saves the owner's arrangement. This is deliberately kept separate from
+    /// social Reel / POI writes so the folder remains a private tool.
+    func saveJourneyFolder(_ folder: JourneyFolder) {
+        guard canEditJourneyFolders,
+              let index = journeyFolders.firstIndex(where: { $0.id == folder.id }) else {
+            return
+        }
+
+        var updated = folder
+        let cleanTitle = updated.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        updated.title = cleanTitle.isEmpty ? "Untitled Journey" : cleanTitle
+        updated.updatedAt = Date()
+        journeyFolders[index] = updated
+    }
+
+    func deleteJourneyFolder(id: UUID) {
+        guard canEditJourneyFolders else { return }
+        journeyFolders.removeAll { $0.id == id }
     }
 
     private func personaBio(for user: User) -> String {
