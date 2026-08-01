@@ -174,6 +174,10 @@ struct UserMapHomeView: View {
     @State private var filterDraft = FilterState()
     @State private var filterPresentation: FilterPresentation?
     @State private var mapSelectedRecord: UserMapRecord?
+    /// A record opened from List creates a temporary map focus that has a
+    /// clear, local way back to the archive.
+    @State private var listFocusRecordID: UUID?
+    @State private var listReturnRecordID: UUID?
     @State private var mapFocusedJourney: JourneyPost?
     @State private var mapJourneyStack: [JourneyPost] = []
     @State private var mapJourneyEntryRecord: UserMapRecord?
@@ -273,6 +277,16 @@ struct UserMapHomeView: View {
         // identity with its own breadcrumb header.
         .toolbar(mapJourneyIsActive ? .hidden : .visible, for: .navigationBar)
         .toolbar {
+            if isListRecordFocusActive {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: returnToList) {
+                        Label("List", systemImage: "chevron.left")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .accessibilityLabel("Return to list")
+                }
+            }
+
             if display == .list, canEditJourneyFolders {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(isSelectingMemories ? "Done" : "Select") {
@@ -489,18 +503,23 @@ struct UserMapHomeView: View {
     }
 
     private var listContent: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 26, pinnedViews: .sectionHeaders) {
-                journeyShelfContent
-                archiveEmptyState
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 26, pinnedViews: .sectionHeaders) {
+                    journeyShelfContent
+                    archiveEmptyState
 
-                ForEach(groupedRecords, id: \.0) { section in
-                    archiveSection(section)
+                    ForEach(groupedRecords, id: \.0) { section in
+                        archiveSection(section)
+                    }
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, isSelectingMemories && selectedMemoryIDs.isEmpty == false ? 158 : 94)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, isSelectingMemories && selectedMemoryIDs.isEmpty == false ? 158 : 94)
+            .onAppear {
+                restoreListPosition(using: proxy)
+            }
         }
         .background(Color(.systemBackground))
     }
@@ -616,6 +635,7 @@ struct UserMapHomeView: View {
             VStack(spacing: 0) {
                 ForEach(section.1.indices, id: \.self) { index in
                     archiveRecordRow(section.1[index])
+                        .id(section.1[index].id)
 
                     if index < section.1.count - 1 {
                         Divider()
@@ -702,6 +722,7 @@ struct UserMapHomeView: View {
     private func openRecordFromList(_ record: UserMapRecord) {
         isSearchFocused = false
         hasPresentedMap = true
+        listFocusRecordID = record.isMapExperienceItem ? record.id : nil
 
         withAnimation(.easeInOut(duration: 0.24)) {
             display = .map
@@ -718,6 +739,31 @@ struct UserMapHomeView: View {
             } else {
                 presentMapCapsule(record)
             }
+        }
+    }
+
+    private var isListRecordFocusActive: Bool {
+        display == .map && mapFocusedJourney == nil && listFocusRecordID != nil
+    }
+
+    private func returnToList() {
+        let recordID = listFocusRecordID
+        listFocusRecordID = nil
+        listReturnRecordID = recordID
+        mapSelectedRecord = nil
+        mapCapsulePresentation.dismiss()
+
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            display = .list
+        }
+    }
+
+    private func restoreListPosition(using proxy: ScrollViewProxy) {
+        guard let recordID = listReturnRecordID else { return }
+
+        DispatchQueue.main.async {
+            proxy.scrollTo(recordID, anchor: .center)
+            listReturnRecordID = nil
         }
     }
 
@@ -1206,8 +1252,12 @@ struct UserMapHomeView: View {
         let targetRegion = storyRegion(for: record)
 
         if mapCapsulePresentation.isExpanded {
-            currentMapRegion = targetRegion
-            cameraPosition = .region(targetRegion)
+            // The large sheet covers the map now, but it may be collapsed at
+            // any point. Keep its pending camera framed for the compact card
+            // rather than letting the pin reappear behind the card later.
+            let framedTarget = mapStoryViewport?.framed(targetRegion) ?? targetRegion
+            currentMapRegion = framedTarget
+            cameraPosition = .region(framedTarget)
             return
         }
 
@@ -1226,10 +1276,31 @@ struct UserMapHomeView: View {
             currentRegion: currentMapRegion,
             targetRegion: storyRegion(for: record),
             cause: mapFlightCause(for: record),
+            viewport: mapStoryViewport,
             cameraPosition: $cameraPosition
         ) { region in
             currentMapRegion = region
         }
+    }
+
+    /// A compact capsule is not merely an overlay: it removes the bottom
+    /// portion of the map from the user's usable field of view. Frame map
+    /// jumps against the remaining area so the selected marker sits above the
+    /// card instead of at the geometric center of the whole screen.
+    private var mapStoryViewport: MapCameraViewport? {
+        guard mapSize.height > 1 else { return nil }
+
+        let archiveChromeInset = 10.0 + 38.0 + 11.0 + (hasActiveFilters ? 40.0 : 0.0)
+        let topInset = mapFocusedJourney == nil
+            ? archiveChromeInset
+            : MapJourneyCamera.journeyChromeInset
+        let bottomInset = mapSize.height * Self.mapCapsuleCompactFraction + mapSafeAreaBottom
+
+        return MapCameraViewport(
+            size: mapSize,
+            topInset: topInset,
+            bottomInset: bottomInset
+        )
     }
 
     private func storyRegion(for record: UserMapRecord) -> MKCoordinateRegion {
@@ -1338,6 +1409,8 @@ struct UserMapHomeView: View {
             if nextDisplay == .list {
                 // Do not leave a map-only capsule floating over the archive
                 // after the person returns to List.
+                listReturnRecordID = listFocusRecordID
+                listFocusRecordID = nil
                 mapCapsulePresentation.dismiss()
             }
 

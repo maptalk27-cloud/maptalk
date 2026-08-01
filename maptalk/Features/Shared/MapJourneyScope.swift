@@ -52,6 +52,11 @@ struct MapJourneyScope {
 /// Journey. It mirrors the main MapTalk map: all child points fit beneath the
 /// Journey header and compact capsule, and no generic city-level clamp is used.
 enum MapJourneyCamera {
+    /// The Journey breadcrumb and child-story rail occupy the top of the map.
+    /// Keep this shared with MyMap's story jumps so the selected memory lands
+    /// in the same visible area whether it was opened from the rail or pager.
+    static let journeyChromeInset: CGFloat = 194
+
     struct Target {
         let region: MKCoordinateRegion
         let distance: CLLocationDistance
@@ -66,13 +71,21 @@ enum MapJourneyCamera {
         let coordinates = journey.reels.map(\.center) + journey.pois.map { $0.poi.coordinate }
         guard coordinates.isEmpty == false else { return nil }
 
+        let fallbackSize = CGSize(width: 430, height: 932)
+        let baseSize = size == .zero ? fallbackSize : size
+        let viewport = MapCameraViewport(
+            size: baseSize,
+            topInset: journeyChromeInset,
+            bottomInset: baseSize.height * compactFraction + safeAreaBottom
+        )
+
         if coordinates.count == 1, let coordinate = coordinates.first {
-            let region = MKCoordinateRegion(
+            let baseRegion = MKCoordinateRegion(
                 center: coordinate,
                 latitudinalMeters: 800,
                 longitudinalMeters: 800
             )
-            return Target(region: region, distance: 800)
+            return Target(region: viewport.framed(baseRegion), distance: 800)
         }
 
         var mapRect = MKMapRect.null
@@ -85,16 +98,13 @@ enum MapJourneyCamera {
             mapRect = mapRect.isNull ? eventRect : mapRect.union(eventRect)
         }
 
-        let fallbackSize = CGSize(width: 430, height: 932)
-        let baseSize = size == .zero ? fallbackSize : size
         let mapView = MKMapView(frame: CGRect(origin: .zero, size: baseSize))
-        let headerHeight = 52.0
-        let spacing = 14.0
-        let storiesRowHeight = 108.0
-        let topInset = headerHeight + spacing + storiesRowHeight + 20.0
-        let compactCapsuleInset = baseSize.height * compactFraction + safeAreaBottom
-        let bottomInset = max(0, compactCapsuleInset - 48.0)
-        let edgePadding = UIEdgeInsets(top: topInset, left: 40, bottom: bottomInset, right: 40)
+        let edgePadding = UIEdgeInsets(
+            top: viewport.topInset,
+            left: 40,
+            bottom: viewport.bottomInset,
+            right: 40
+        )
         let fittedRegion = MKCoordinateRegion(mapView.mapRectThatFits(mapRect, edgePadding: edgePadding))
 
         let spanMeters = UserMapAnnotationZoomHelper.spanMeters(for: fittedRegion)

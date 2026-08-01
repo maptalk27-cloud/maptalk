@@ -12,6 +12,74 @@ enum RegionChangeCause {
     case other
 }
 
+/// Describes the part of a map that remains useful after persistent chrome
+/// covers its top or bottom edge. A destination is framed against this visible
+/// area, rather than the full Map view, so its pin does not land underneath a
+/// compact capsule.
+struct MapCameraViewport {
+    let size: CGSize
+    let topInset: CGFloat
+    let bottomInset: CGFloat
+
+    func framed(_ region: MKCoordinateRegion) -> MKCoordinateRegion {
+        guard size.width > 1, size.height > 1 else { return region }
+
+        let height = size.height
+        let top = min(max(0, topInset), height)
+        let bottom = min(max(0, bottomInset), max(0, height - top))
+        let centerOffset = (bottom - top) / (2 * height)
+        guard abs(centerOffset) > .ulpOfOne else { return region }
+
+        let halfLatitude = region.span.latitudeDelta / 2
+        let north = CLLocationCoordinate2D(
+            latitude: min(85, region.center.latitude + halfLatitude),
+            longitude: region.center.longitude
+        )
+        let south = CLLocationCoordinate2D(
+            latitude: max(-85, region.center.latitude - halfLatitude),
+            longitude: region.center.longitude
+        )
+        let northPoint = MKMapPoint(north)
+        let southPoint = MKMapPoint(south)
+        let regionHeight = abs(southPoint.y - northPoint.y)
+        let westPoint = MKMapPoint(
+            CLLocationCoordinate2D(
+                latitude: region.center.latitude,
+                longitude: region.center.longitude - region.span.longitudeDelta / 2
+            )
+        )
+        let eastPoint = MKMapPoint(
+            CLLocationCoordinate2D(
+                latitude: region.center.latitude,
+                longitude: region.center.longitude + region.span.longitudeDelta / 2
+            )
+        )
+        let regionWidth = abs(eastPoint.x - westPoint.x)
+        guard regionHeight.isFinite, regionWidth.isFinite,
+              regionHeight > 0, regionWidth > 0 else {
+            return region
+        }
+
+        // A MapKit region is fitted to the viewport's aspect ratio. On a
+        // portrait phone its actual vertical map span is normally wider than
+        // the requested latitude span, because longitude sets the scale.
+        // Offset against that visible span, otherwise the correction is only
+        // half as large as the card actually requires.
+        let mapPointsPerScreenPoint = max(regionHeight / height, regionWidth / size.width)
+        let visibleMapHeight = mapPointsPerScreenPoint * height
+
+        let center = MKMapPoint(region.center)
+        let shiftedY = min(
+            max(MKMapRect.world.minY, center.y + visibleMapHeight * centerOffset),
+            MKMapRect.world.maxY
+        )
+        return MKCoordinateRegion(
+            center: MKMapPoint(x: center.x, y: shiftedY).coordinate,
+            span: region.span
+        )
+    }
+}
+
 final class MapFlightController: ObservableObject {
     private var activeTransitionID: UUID?
 
@@ -23,6 +91,7 @@ final class MapFlightController: ObservableObject {
         currentRegion: MKCoordinateRegion?,
         targetRegion: MKCoordinateRegion,
         cause: RegionChangeCause,
+        viewport: MapCameraViewport? = nil,
         cameraPosition: Binding<MapCameraPosition>,
         onRegionUpdate: @escaping (MKCoordinateRegion) -> Void
     ) {
@@ -32,10 +101,11 @@ final class MapFlightController: ObservableObject {
 
         let clampedTarget = cityClamp(targetRegion)
         guard let existingRegion = currentRegion else {
+            let framedTarget = viewport?.framed(clampedTarget) ?? clampedTarget
             withAnimation(smoothAnimation(duration: 0.5)) {
-                cameraPosition.wrappedValue = .region(clampedTarget)
+                cameraPosition.wrappedValue = .region(framedTarget)
             }
-            onRegionUpdate(clampedTarget)
+            onRegionUpdate(framedTarget)
             return
         }
 
@@ -46,11 +116,12 @@ final class MapFlightController: ObservableObject {
         if existingRegion.contains(targetRegion.center, insetFraction: 0.92) &&
             targetSpan <= currentSpan * 1.15 {
             let preserved = MKCoordinateRegion(center: targetRegion.center, span: existingRegion.span)
+            let framedPreserved = viewport?.framed(preserved) ?? preserved
             let duration = min(0.25 + (travelDistance / 180_000.0), 0.45)
             withAnimation(smoothAnimation(duration: duration)) {
-                cameraPosition.wrappedValue = .region(preserved)
+                cameraPosition.wrappedValue = .region(framedPreserved)
             }
-            onRegionUpdate(preserved)
+            onRegionUpdate(framedPreserved)
             return
         }
 
@@ -60,21 +131,23 @@ final class MapFlightController: ObservableObject {
            targetSpan > currentSpan * 1.3 {
             // Keep tight zoom for nearby hops instead of zooming out to the target span.
             let preserved = MKCoordinateRegion(center: targetRegion.center, span: existingRegion.span)
+            let framedPreserved = viewport?.framed(preserved) ?? preserved
             let duration = min(0.25 + (travelDistance / 180_000.0), 0.45)
             withAnimation(smoothAnimation(duration: duration)) {
-                cameraPosition.wrappedValue = .region(preserved)
+                cameraPosition.wrappedValue = .region(framedPreserved)
             }
-            onRegionUpdate(preserved)
+            onRegionUpdate(framedPreserved)
             return
         }
 
         if UIAccessibility.isReduceMotionEnabled {
             activeTransitionID = nil
             let d = min(0.30 + (travelDistance / 150_000.0), 0.45)
+            let framedTarget = viewport?.framed(clampedTarget) ?? clampedTarget
             withAnimation(smoothAnimation(duration: d)) {
-                cameraPosition.wrappedValue = .region(clampedTarget)
+                cameraPosition.wrappedValue = .region(framedTarget)
             }
-            onRegionUpdate(clampedTarget)
+            onRegionUpdate(framedTarget)
             return
         }
 
@@ -89,6 +162,7 @@ final class MapFlightController: ObservableObject {
             current: existingRegion,
             target: targetRegion,
             travelDistance: travelDistance,
+            viewport: viewport,
             cameraPosition: cameraPosition,
             onRegionUpdate: onRegionUpdate
         )
@@ -137,6 +211,7 @@ final class MapFlightController: ObservableObject {
         current: MKCoordinateRegion,
         target: MKCoordinateRegion,
         travelDistance: CLLocationDistance,
+        viewport: MapCameraViewport?,
         cameraPosition: Binding<MapCameraPosition>,
         onRegionUpdate: @escaping (MKCoordinateRegion) -> Void
     ) {
@@ -145,10 +220,11 @@ final class MapFlightController: ObservableObject {
             activeTransitionID = nil
             let duration = min(0.35 + (travelDistance / 120_000.0), 0.55)
             let clamped = cityClamp(target)
+            let framedTarget = viewport?.framed(clamped) ?? clamped
             withAnimation(smoothAnimation(duration: duration)) {
-                cameraPosition.wrappedValue = .region(clamped)
+                cameraPosition.wrappedValue = .region(framedTarget)
             }
-            onRegionUpdate(clamped)
+            onRegionUpdate(framedTarget)
 
         case let .staged(zoomDistance, tempo):
             runStagedTransition(
@@ -156,6 +232,7 @@ final class MapFlightController: ObservableObject {
                 to: target,
                 zoomDistance: zoomDistance,
                 tempo: tempo,
+                viewport: viewport,
                 cameraPosition: cameraPosition,
                 onRegionUpdate: onRegionUpdate
             )
@@ -167,6 +244,7 @@ final class MapFlightController: ObservableObject {
         to target: MKCoordinateRegion,
         zoomDistance: CLLocationDistance,
         tempo: TransitionTempo,
+        viewport: MapCameraViewport?,
         cameraPosition: Binding<MapCameraPosition>,
         onRegionUpdate: @escaping (MKCoordinateRegion) -> Void
     ) {
@@ -206,6 +284,7 @@ final class MapFlightController: ObservableObject {
                 id: id,
                 target: target,
                 durations: durations,
+                viewport: viewport,
                 cameraPosition: cameraPosition,
                 onRegionUpdate: onRegionUpdate
             )
@@ -217,6 +296,7 @@ final class MapFlightController: ObservableObject {
         id: UUID,
         target: MKCoordinateRegion,
         durations: (zoomOut: Double, travel: Double, prefetchHold: Double, zoomIn: Double),
+        viewport: MapCameraViewport?,
         cameraPosition: Binding<MapCameraPosition>,
         onRegionUpdate: @escaping (MKCoordinateRegion) -> Void
     ) {
@@ -226,6 +306,7 @@ final class MapFlightController: ObservableObject {
                 to: target,
                 with: durations.zoomIn,
                 transitionID: id,
+                viewport: viewport,
                 cameraPosition: cameraPosition,
                 onRegionUpdate: onRegionUpdate
             )
@@ -236,17 +317,19 @@ final class MapFlightController: ObservableObject {
         to target: MKCoordinateRegion,
         with duration: Double,
         transitionID id: UUID,
+        viewport: MapCameraViewport?,
         cameraPosition: Binding<MapCameraPosition>,
         onRegionUpdate: @escaping (MKCoordinateRegion) -> Void
     ) {
         let clamped = cityClamp(target)
+        let framedTarget = viewport?.framed(clamped) ?? clamped
         withAnimation(smoothAnimation(duration: duration)) {
-            cameraPosition.wrappedValue = .region(clamped)
+            cameraPosition.wrappedValue = .region(framedTarget)
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
             guard let self, self.activeTransitionID == id else { return }
-            onRegionUpdate(clamped)
+            onRegionUpdate(framedTarget)
             self.activeTransitionID = nil
         }
     }
