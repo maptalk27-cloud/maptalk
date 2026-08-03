@@ -1,5 +1,6 @@
 import MapKit
 import SwiftUI
+import UIKit
 
 /// A single record collection rendered as either a chronological list or a map.
 @MainActor
@@ -81,6 +82,112 @@ struct UserMapRecord: Identifiable {
 
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
+}
+
+private enum JourneyOrganizerTarget: Hashable {
+    case folder(UUID)
+    case record(UUID)
+}
+
+private enum JourneyOrganizerCoordinateSpace {
+    static let space: NamedCoordinateSpace = .named("mymap.journey-organizer")
+}
+
+private struct JourneyOrganizerTargetFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [JourneyOrganizerTarget: CGRect] = [:]
+
+    static func reduce(
+        value: inout [JourneyOrganizerTarget: CGRect],
+        nextValue: () -> [JourneyOrganizerTarget: CGRect]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+
+@MainActor
+private struct JourneyOrganizerDrag {
+    let record: UserMapRecord
+    let reference: JourneyFolder.MemberReference
+    var location: CGPoint
+}
+
+@MainActor
+private struct JourneyOrganizerDrop: Identifiable {
+    let id = UUID()
+    let drag: JourneyOrganizerDrag
+    let target: JourneyOrganizerTarget
+}
+
+/// A fresh Folder is created by a physical map gesture first, then receives
+/// its human name without interrupting that spatial action.
+private struct JourneyFolderRenameRequest: Identifiable {
+    let folder: JourneyFolder
+
+    var id: UUID { folder.id }
+}
+
+/// A `UILongPressGestureRecognizer` keeps one physical touch alive from the
+/// hold that enters organize mode through its eventual drop. SwiftUI's
+/// separate long-press and drag gestures cannot make that guarantee once the
+/// map has its own pan recognizer in the hierarchy.
+@available(iOS 18.0, *)
+@MainActor
+private struct MapOrganizerPressGesture: UIGestureRecognizerRepresentable {
+    let isOrganizing: Bool
+    let onBegan: (CGPoint) -> Void
+    let onChanged: (CGPoint) -> Void
+    let onEnded: (CGPoint) -> Void
+    let onCancelled: () -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
+        let recognizer = UILongPressGestureRecognizer()
+        recognizer.minimumPressDuration = isOrganizing ? 0 : 0.55
+        recognizer.allowableMovement = 14
+        recognizer.cancelsTouchesInView = true
+        recognizer.delaysTouchesBegan = false
+        recognizer.delaysTouchesEnded = false
+        return recognizer
+    }
+
+    func updateUIGestureRecognizer(
+        _ recognizer: UILongPressGestureRecognizer,
+        context: Context
+    ) {
+        // In organize mode a marker is a physical object: touching it picks
+        // it up immediately. Outside that mode, a short touch stays a tap and
+        // a moving touch can still pan the map.
+        recognizer.minimumPressDuration = isOrganizing ? 0 : 0.55
+        recognizer.allowableMovement = isOrganizing ? 44 : 14
+    }
+
+    func handleUIGestureRecognizerAction(
+        _ recognizer: UILongPressGestureRecognizer,
+        context: Context
+    ) {
+        let location = context.converter.location(in: JourneyOrganizerCoordinateSpace.space)
+        switch recognizer.state {
+        case .began:
+            onBegan(location)
+        case .changed:
+            onChanged(location)
+        case .ended:
+            onEnded(location)
+        case .cancelled, .failed:
+            onCancelled()
+        default:
+            break
+        }
+    }
+}
+
+private extension UserMapRecord {
+    var journeyMemberReference: JourneyFolder.MemberReference? {
+        switch kind {
+        case let .reel(reel): .reel(reel.id)
+        case let .poi(rated): .poi(rated.id)
+        case .journey: nil
+        }
+    }
 }
 
 struct UserMapHomeView: View {
@@ -188,11 +295,21 @@ struct UserMapHomeView: View {
     @State private var currentMapRegion: MKCoordinateRegion
     @State private var mapSize: CGSize = .zero
     @State private var mapSafeAreaBottom: CGFloat = 0
+    @State private var mapOverlayRevision = 0
     @State private var mapReelAlignTrigger = 0
     @State private var journeyFolderRoute: JourneyFolder?
     @State private var journeyAddContext: JourneyAddContext?
+    @State private var journeyFolderRenameRequest: JourneyFolderRenameRequest?
     @State private var isSelectingMemories = false
     @State private var selectedMemoryIDs: Set<UUID> = []
+    @State private var isOrganizingMapJourneys = false
+    @State private var journeyOrganizerDrag: JourneyOrganizerDrag?
+    @State private var journeyOrganizerDrop: JourneyOrganizerDrop?
+    @State private var isJourneyOrganizerDropSettling = false
+    @State private var journeyOrganizerCompletedTarget: JourneyOrganizerTarget?
+    @State private var journeyOrganizerHoveredTarget: JourneyOrganizerTarget?
+    @State private var journeyOrganizerTargetFrames: [JourneyOrganizerTarget: CGRect] = [:]
+    @State private var journeyOrganizerSelectionFeedback = UISelectionFeedbackGenerator()
     @FocusState private var isSearchFocused: Bool
 
     init(
@@ -243,11 +360,17 @@ struct UserMapHomeView: View {
         .animation(.easeInOut(duration: 0.24), value: display)
         .overlay(alignment: .bottom) {
             VStack(spacing: 10) {
+                if display == .map, isOrganizingMapJourneys {
+                    mapJourneyDock
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 54)
+                }
+
                 if display == .list, isSelectingMemories, selectedMemoryIDs.isEmpty == false {
                     addSelectionToJourneyButton
                 }
 
-                if mapJourneyIsActive == false {
+                if mapJourneyIsActive == false, isOrganizingMapJourneys == false {
                     viewToggle
                         // Keep the List/Map control above the scroll view's
                         // NavigationLinks; otherwise its visual capsule can be
@@ -256,19 +379,42 @@ struct UserMapHomeView: View {
                 }
             }
             // The control belongs to MyMap, not either presentation mode.
-            .padding(.bottom, 18)
+            .padding(.bottom, isOrganizingMapJourneys ? 10 : 18)
+        }
+        .overlay {
+            GeometryReader { proxy in
+                if let drag = journeyOrganizerDrag {
+                    MapJourneyDragPreview(
+                        record: drag.record,
+                        user: mapJourneyDragPreviewUser(for: drag.record)
+                    )
+                    .position(mapJourneyDragPreviewPosition(for: drag, in: proxy))
+                    .transition(.scale(scale: 0.84).combined(with: .opacity))
+                    .animation(
+                        .spring(response: 0.24, dampingFraction: 0.76),
+                        value: journeyOrganizerHoveredTarget
+                    )
+                } else if let drop = journeyOrganizerDrop {
+                    MapJourneyDragPreview(
+                        record: drop.drag.record,
+                        user: mapJourneyDragPreviewUser(for: drop.drag.record)
+                    )
+                    .position(mapJourneyDropPosition(for: drop, in: proxy))
+                    .scaleEffect(isJourneyOrganizerDropSettling ? 0.32 : 1)
+                    .opacity(isJourneyOrganizerDropSettling ? 0.04 : 1)
+                    .animation(
+                        .snappy(duration: 0.2, extraBounce: 0.08),
+                        value: isJourneyOrganizerDropSettling
+                    )
+                }
+            }
+            .allowsHitTesting(false)
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if display == .map, mapFocusedJourney != nil {
                 mapJourneyControls
-            } else {
-                VStack(spacing: display == .map && shouldShowJourneyShelf ? 8 : 0) {
-                    archiveControls
-
-                    if display == .map {
-                        mapJourneyShelf
-                    }
-                }
+            } else if isOrganizingMapJourneys == false {
+                archiveControls
             }
         }
         .navigationTitle("MyMap")
@@ -293,6 +439,20 @@ struct UserMapHomeView: View {
                         toggleMemorySelection()
                     }
                     .font(.subheadline.weight(.semibold))
+                }
+            }
+
+            if display == .map, mapFocusedJourney == nil, isOrganizingMapJourneys {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: finishMapJourneyOrganization) {
+                        Text("Done")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(Color.black, in: Capsule(style: .continuous))
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -329,6 +489,14 @@ struct UserMapHomeView: View {
             .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
         }
+        .sheet(item: $journeyFolderRenameRequest) { request in
+            JourneyFolderNamingSheet(
+                folder: request.folder,
+                onSave: onSaveJourneyFolder
+            )
+            .presentationDetents([.height(264)])
+            .presentationDragIndicator(.visible)
+        }
         .navigationDestination(item: $journeyFolderRoute) { folder in
             JourneyFolderDetailView(
                 folder: folder,
@@ -361,6 +529,14 @@ struct UserMapHomeView: View {
                     )
             }
         }
+        .onPreferenceChange(JourneyOrganizerTargetFramePreferenceKey.self) { frames in
+            journeyOrganizerTargetFrames = frames
+        }
+        // Both the map markers and the folder dock participate in one drag.
+        // Their hit frames must therefore use exactly the same coordinate
+        // space as the UIKit recognizer, rather than each view's screen/global
+        // interpretation.
+        .coordinateSpace(JourneyOrganizerCoordinateSpace.space)
     }
 
     private var filteredRecords: [UserMapRecord] {
@@ -435,14 +611,7 @@ struct UserMapHomeView: View {
     private var selectedMemoryReferences: [JourneyFolder.MemberReference] {
         records.compactMap { record in
             guard selectedMemoryIDs.contains(record.id) else { return nil }
-            switch record.kind {
-            case let .reel(reel):
-                return .reel(reel.id)
-            case let .poi(rated):
-                return .poi(rated.id)
-            case .journey:
-                return nil
-            }
+            return record.journeyMemberReference
         }
     }
 
@@ -489,6 +658,300 @@ struct UserMapHomeView: View {
         journeyAddContext = nil
         selectedMemoryIDs.removeAll()
         isSelectingMemories = false
+    }
+
+    private func enterMapJourneyOrganization() {
+        guard canEditJourneyFolders,
+              display == .map,
+              mapFocusedJourney == nil else {
+            return
+        }
+
+        guard isOrganizingMapJourneys == false else { return }
+        isSearchFocused = false
+        // Organizing is a distinct, quiet state. A browsing capsule or search
+        // controls make the map feel like an overlay instead of a workspace.
+        mapSelectedRecord = nil
+        mapCapsulePresentation.dismiss()
+        journeyOrganizerTargetFrames = [:]
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            isOrganizingMapJourneys = true
+        }
+        journeyOrganizerSelectionFeedback.prepare()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func finishMapJourneyOrganization() {
+        journeyOrganizerDrag = nil
+        journeyOrganizerDrop = nil
+        isJourneyOrganizerDropSettling = false
+        journeyOrganizerCompletedTarget = nil
+        journeyOrganizerHoveredTarget = nil
+        journeyOrganizerTargetFrames = [:]
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+            isOrganizingMapJourneys = false
+        }
+    }
+
+    private func beginMapJourneyDrag(_ record: UserMapRecord, at location: CGPoint) {
+        guard isOrganizingMapJourneys,
+              let reference = record.journeyMemberReference else {
+            return
+        }
+
+        if journeyOrganizerDrag?.record.id == record.id {
+            updateMapJourneyDrag(record, at: location)
+            return
+        }
+
+        journeyOrganizerDrag = JourneyOrganizerDrag(
+            record: record,
+            reference: reference,
+            location: location
+        )
+        updateMapJourneyDrag(record, at: location)
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+    }
+
+    private func updateMapJourneyDrag(_ record: UserMapRecord, at location: CGPoint) {
+        guard var drag = journeyOrganizerDrag,
+              drag.record.id == record.id else {
+            return
+        }
+        drag.location = location
+        journeyOrganizerDrag = drag
+
+        let nextTarget = journeyOrganizerTarget(at: location, excluding: record.id)
+        guard nextTarget != journeyOrganizerHoveredTarget else { return }
+
+        journeyOrganizerHoveredTarget = nextTarget
+        if nextTarget != nil {
+            journeyOrganizerSelectionFeedback.selectionChanged()
+            journeyOrganizerSelectionFeedback.prepare()
+        }
+    }
+
+    private func endMapJourneyDrag(_ record: UserMapRecord, at location: CGPoint) {
+        updateMapJourneyDrag(record, at: location)
+        guard let drag = journeyOrganizerDrag,
+              drag.record.id == record.id,
+              let target = journeyOrganizerHoveredTarget else {
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
+                journeyOrganizerDrag = nil
+                journeyOrganizerHoveredTarget = nil
+            }
+            return
+        }
+
+        // Let the lifted marker visibly settle into its target before the
+        // underlying data changes. The touch feels like putting an object
+        // away, rather than an immediate list mutation.
+        let drop = JourneyOrganizerDrop(drag: drag, target: target)
+        journeyOrganizerDrag = nil
+        journeyOrganizerHoveredTarget = nil
+        journeyOrganizerCompletedTarget = target
+        journeyOrganizerDrop = drop
+        isJourneyOrganizerDropSettling = false
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        DispatchQueue.main.async {
+            guard journeyOrganizerDrop?.id == drop.id else { return }
+            withAnimation(.snappy(duration: 0.2, extraBounce: 0.08)) {
+                isJourneyOrganizerDropSettling = true
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            guard journeyOrganizerDrop?.id == drop.id else { return }
+            completeMapJourneyDrop(drop)
+            withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
+                journeyOrganizerDrop = nil
+                isJourneyOrganizerDropSettling = false
+                journeyOrganizerCompletedTarget = nil
+            }
+        }
+    }
+
+    private func cancelMapJourneyDrag(_ record: UserMapRecord) {
+        guard journeyOrganizerDrag?.record.id == record.id else { return }
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.78)) {
+            journeyOrganizerDrag = nil
+            journeyOrganizerHoveredTarget = nil
+        }
+    }
+
+    private func completeMapJourneyDrop(_ drop: JourneyOrganizerDrop) {
+        switch drop.target {
+        case let .folder(folderID):
+            append([drop.drag.reference], toJourneyFolder: folderID)
+
+        case let .record(recordID):
+            guard recordID != drop.drag.record.id,
+                  let other = mapRecords.first(where: { $0.id == recordID }),
+                  let otherReference = other.journeyMemberReference else {
+                return
+            }
+            if let folder = createJourney(with: [otherReference, drop.drag.reference]) {
+                journeyFolderRenameRequest = JourneyFolderRenameRequest(folder: folder)
+            }
+        }
+    }
+
+    private func journeyOrganizerTarget(
+        at location: CGPoint,
+        excluding sourceRecordID: UUID
+    ) -> JourneyOrganizerTarget? {
+        // Once a target has caught the marker, give it a larger exit radius.
+        // This avoids the harsh on/off flicker caused by sampling a moving
+        // finger around a target boundary.
+        if let hovered = journeyOrganizerHoveredTarget,
+           targetContains(
+                hovered,
+                location: location,
+                excluding: sourceRecordID,
+                padding: hoveredExitPadding(for: hovered)
+           ) {
+            return hovered
+        }
+
+        // A drop should feel forgiving: folders take priority in their dock,
+        // while map pins receive a slightly larger magnetic catchment area.
+        let folderCandidates = journeyOrganizerTargetFrames.compactMap { target, frame -> (JourneyOrganizerTarget, CGFloat)? in
+            switch target {
+            case .folder:
+                let expandedFrame = frame.insetBy(dx: -12, dy: -12)
+                guard expandedFrame.contains(location) else { return nil }
+                return (target, distanceSquared(from: location, to: .init(x: frame.midX, y: frame.midY)))
+            case .record:
+                return nil
+            }
+        }
+        if let folderTarget = folderCandidates.min(by: { $0.1 < $1.1 })?.0 {
+            return folderTarget
+        }
+
+        let recordCandidates = journeyOrganizerTargetFrames.compactMap { target, frame -> (JourneyOrganizerTarget, CGFloat)? in
+            guard case let .record(recordID) = target,
+                  recordID != sourceRecordID else {
+                return nil
+            }
+
+            let expandedFrame = frame.insetBy(dx: -22, dy: -22)
+            guard expandedFrame.contains(location) else { return nil }
+            return (target, distanceSquared(from: location, to: .init(x: frame.midX, y: frame.midY)))
+        }
+        return recordCandidates.min(by: { $0.1 < $1.1 })?.0
+    }
+
+    private func targetContains(
+        _ target: JourneyOrganizerTarget,
+        location: CGPoint,
+        excluding sourceRecordID: UUID,
+        padding: CGFloat
+    ) -> Bool {
+        guard let frame = journeyOrganizerTargetFrames[target] else { return false }
+
+        switch target {
+        case .folder:
+            return frame.insetBy(dx: -padding, dy: -padding).contains(location)
+        case let .record(recordID):
+            guard recordID != sourceRecordID else { return false }
+            let center = CGPoint(x: frame.midX, y: frame.midY)
+            let dx = location.x - center.x
+            let dy = location.y - center.y
+            let radius = max(frame.width, frame.height) / 2 + padding
+            return (dx * dx) + (dy * dy) <= radius * radius
+        }
+    }
+
+    private func hoveredExitPadding(for target: JourneyOrganizerTarget) -> CGFloat {
+        switch target {
+        case .folder: 24
+        case .record: 34
+        }
+    }
+
+    private func distanceSquared(from point: CGPoint, to center: CGPoint) -> CGFloat {
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        return (dx * dx) + (dy * dy)
+    }
+
+    private func mapJourneyDragPreviewUser(for record: UserMapRecord) -> User? {
+        guard case let .reel(reel) = record.kind else { return nil }
+        return userProvider(reel.userId)
+    }
+
+    private func mapJourneyDragPreviewPosition(
+        for drag: JourneyOrganizerDrag,
+        in proxy: GeometryProxy
+    ) -> CGPoint {
+        let rootFrame = proxy.frame(in: JourneyOrganizerCoordinateSpace.space)
+        let pointerPosition = CGPoint(
+            x: drag.location.x - rootFrame.minX,
+            y: drag.location.y - rootFrame.minY - 34
+        )
+
+        guard let target = journeyOrganizerHoveredTarget,
+              let targetFrame = journeyOrganizerTargetFrames[target] else {
+            return pointerPosition
+        }
+
+        let targetCenter = CGPoint(
+            x: targetFrame.midX - rootFrame.minX,
+            y: targetFrame.midY - rootFrame.minY
+        )
+
+        // A real object stays under the person's finger. The target can make
+        // a small magnetic pull, but the dragged marker must never teleport
+        // to the target's center like an overlay card.
+        let dx = targetCenter.x - pointerPosition.x
+        let dy = targetCenter.y - pointerPosition.y
+        let distance = max(sqrt(dx * dx + dy * dy), 0.001)
+        let maximumPull: CGFloat = {
+            switch target {
+            case .record: 12
+            case .folder: 14
+            }
+        }()
+        let pull = min(maximumPull, distance * 0.2)
+        return CGPoint(
+            x: pointerPosition.x + (dx / distance) * pull,
+            y: pointerPosition.y + (dy / distance) * pull
+        )
+    }
+
+    private func mapJourneyDropPosition(
+        for drop: JourneyOrganizerDrop,
+        in proxy: GeometryProxy
+    ) -> CGPoint {
+        let rootFrame = proxy.frame(in: JourneyOrganizerCoordinateSpace.space)
+        let pointerPosition = CGPoint(
+            x: drop.drag.location.x - rootFrame.minX,
+            y: drop.drag.location.y - rootFrame.minY - 34
+        )
+
+        guard isJourneyOrganizerDropSettling,
+              let targetFrame = journeyOrganizerTargetFrames[drop.target] else {
+            return pointerPosition
+        }
+
+        return CGPoint(
+            x: targetFrame.midX - rootFrame.minX,
+            y: targetFrame.midY - rootFrame.minY
+        )
+    }
+
+    private func createJourney(
+        with references: [JourneyFolder.MemberReference]
+    ) -> JourneyFolder? {
+        let uniqueReferences = references.reduce(into: [JourneyFolder.MemberReference]()) { result, reference in
+            if result.contains(reference) == false {
+                result.append(reference)
+            }
+        }
+        guard uniqueReferences.isEmpty == false else { return nil }
+        return onCreateJourneyFolder("Untitled Journey", uniqueReferences)
     }
 
     private func append(
@@ -542,80 +1005,118 @@ struct UserMapHomeView: View {
         }
     }
 
-    /// A Journey has no coordinate, so it remains a compact private shelf in
-    /// the map chrome instead of becoming a misleading map pin. This is the
-    /// same organizer shown at the top of List, condensed for a map overlay.
+    /// A Journey has no coordinate. In arrange mode it lives in a compact,
+    /// horizontally-scrollable photo rail above the tab bar rather than as a
+    /// map pin. The rail stays available throughout the session, like the
+    /// familiar iPhone Home Screen dock.
     @ViewBuilder
-    private var mapJourneyShelf: some View {
-        if shouldShowJourneyShelf {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    Label("Journeys", systemImage: "folder.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(.thinMaterial, in: Capsule(style: .continuous))
-
-                    if journeyFolders.isEmpty {
-                        Button {
-                            journeyAddContext = JourneyAddContext(references: [])
-                        } label: {
-                            Label("New Journey", systemImage: "plus")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 9)
-                                .background(.thinMaterial, in: Capsule(style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Create Journey")
-                    } else {
-                        ForEach(journeyFolders) { folder in
-                            Button {
-                                journeyFolderRoute = folder
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "folder.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(Color(Theme.neonPrimary))
-
-                                    Text(folder.title)
-                                        .font(.caption.weight(.semibold))
-                                        .lineLimit(1)
-
-                                    Text("\(folder.memberReferences.count)")
-                                        .font(.caption2.weight(.medium))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 9)
-                                .background(.thinMaterial, in: Capsule(style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Open \(folder.title)")
-                        }
-
-                        Button {
-                            journeyAddContext = JourneyAddContext(references: [])
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.primary)
-                                .frame(width: 32, height: 32)
-                                .background(.thinMaterial, in: Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Create Journey")
-                    }
-                }
-                .padding(.horizontal, 16)
-            }
-            .padding(.bottom, 4)
-            .accessibilityIdentifier("mymap.journey-shelf")
+    private var mapJourneyDock: some View {
+        if isOrganizingMapJourneys, journeyFolders.isEmpty == false {
+            mapJourneyDropDock
         }
     }
+
+    @ViewBuilder
+    private var mapJourneyDropDock: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            mapJourneyDropDockTiles
+                .padding(.horizontal, 18)
+                .padding(.vertical, 6)
+        }
+        .scrollClipDisabled()
+        .accessibilityIdentifier("mymap.journey-dock")
+    }
+
+    private var mapJourneyDropDockTiles: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ForEach(journeyFolders) { folder in
+                mapJourneyFolderTarget(
+                    folder,
+                    records: mapJourneyRecords(for: folder)
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mapJourneyFolderTarget(
+        _ folder: JourneyFolder,
+        records: [UserMapRecord]
+    ) -> some View {
+        let target = JourneyOrganizerTarget.folder(folder.id)
+        let isDropTarget = isOrganizingMapJourneys && (
+            journeyOrganizerHoveredTarget == target || journeyOrganizerCompletedTarget == target
+        )
+        let hasOtherActiveTarget = journeyOrganizerHoveredTarget != nil && isDropTarget == false
+        let tile = VStack(spacing: 6) {
+            MapJourneyFolderDockCover(
+                records: records,
+                isDropTarget: isDropTarget,
+                size: 64
+            )
+            .scaleEffect(isDropTarget ? 1.1 : 1, anchor: .bottom)
+            .offset(y: isDropTarget ? -5 : 0)
+
+            Text(folder.title)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(Color.primary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .minimumScaleFactor(0.82)
+                .frame(width: 70, height: 24, alignment: .top)
+                .shadow(color: Color.white.opacity(0.96), radius: 2, y: 1)
+        }
+        .frame(width: 70)
+        .opacity(hasOtherActiveTarget ? 0.62 : 1)
+        .shadow(
+            color: Color.black.opacity(isDropTarget ? 0.24 : 0),
+            radius: isDropTarget ? 12 : 0,
+            y: isDropTarget ? 7 : 0
+        )
+        .animation(.spring(response: 0.24, dampingFraction: 0.76), value: journeyOrganizerHoveredTarget)
+        .background(mapJourneyTargetFrame(target))
+
+        tile
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Journey folder: \(folder.title)")
+            .accessibilityValue("\(folder.memberReferences.count) memories")
+            .accessibilityIdentifier("mymap.map-journey-folder.\(folder.id.uuidString)")
+    }
+
+    private func mapJourneyRecords(for folder: JourneyFolder) -> [UserMapRecord] {
+        folder.memberReferences.compactMap { reference in
+            switch reference {
+            case let .reel(id):
+                guard let reel = reels.first(where: { $0.id == id }) else { return nil }
+                return UserMapRecord(id: reel.id, timestamp: reel.createdAt, kind: .reel(reel))
+
+            case let .poi(id):
+                guard let footprint = footprints.first(where: { $0.id == id }) else { return nil }
+                return UserMapRecord(
+                    id: footprint.id,
+                    timestamp: footprint.latestVisit ?? .distantPast,
+                    kind: .poi(footprint.ratedPOI)
+                )
+            }
+        }
+    }
+
+    private func mapJourneyTargetFrame(_ target: JourneyOrganizerTarget) -> some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: JourneyOrganizerTargetFramePreferenceKey.self,
+                value: isOrganizingMapJourneys
+                    ? [target: proxy.frame(in: JourneyOrganizerCoordinateSpace.space)]
+                    : [:]
+            )
+        }
+    }
+
+    private func mapJourneyWiggle(for id: UUID) -> Double {
+        id.uuidString.hashValue.isMultiple(of: 2) ? 1 : -1
+    }
+
 
     @ViewBuilder
     private var archiveEmptyState: some View {
@@ -680,38 +1181,191 @@ struct UserMapHomeView: View {
     }
 
     private var mapContent: some View {
-        GeometryReader { geometry in
-            Map(position: $cameraPosition, interactionModes: .all) {
-                ForEach(mapRecords) { record in
-                    Annotation("", coordinate: record.coordinate) {
-                        Button {
-                            selectOnMap(
-                                record,
-                                size: geometry.size,
-                                safeAreaBottom: geometry.safeAreaInsets.bottom
-                            )
-                        } label: {
-                            mapMarker(for: record)
+        MapReader { mapProxy in
+            GeometryReader { geometry in
+                Map(
+                    position: $cameraPosition,
+                    // Empty map space remains fully explorable in organize
+                    // mode. Once a marker is actually lifted, freeze the
+                    // canvas until it is dropped so the target stays put.
+                    interactionModes: journeyOrganizerDrag == nil ? .all : []
+                ) {
+                    ForEach(mapRecords) { record in
+                        Annotation("", coordinate: record.coordinate) {
+                            // MapKit owns spatial rendering; interaction is a
+                            // stable overlay, so a long press never replaces
+                            // the annotation beneath the user's finger.
+                            mapMarkerVisual(for: record)
+                                .allowsHitTesting(false)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(record.title)
-                        .accessibilityIdentifier("mymap.map-marker.\(record.id.uuidString)")
                     }
                 }
-            }
-            .ignoresSafeArea(edges: .bottom)
-            .onMapCameraChange(frequency: .onEnd) { context in
-                currentMapRegion = context.region
-            }
-            .onAppear {
-                mapSize = geometry.size
-                mapSafeAreaBottom = geometry.safeAreaInsets.bottom
-            }
-            .onChangeCompat(of: geometry.size) { newSize in
-                mapSize = newSize
-                mapSafeAreaBottom = geometry.safeAreaInsets.bottom
+                .overlay {
+                    mapOrganizerHitLayer(
+                        using: mapProxy,
+                        size: geometry.size,
+                        safeAreaBottom: geometry.safeAreaInsets.bottom
+                    )
+                }
+                .ignoresSafeArea(edges: .bottom)
+                .onMapCameraChange(frequency: .continuous) { context in
+                    currentMapRegion = context.region
+                    mapOverlayRevision &+= 1
+                }
+                .onAppear {
+                    mapSize = geometry.size
+                    mapSafeAreaBottom = geometry.safeAreaInsets.bottom
+                }
+                .onChangeCompat(of: geometry.size) { newSize in
+                    mapSize = newSize
+                    mapSafeAreaBottom = geometry.safeAreaInsets.bottom
+                }
             }
         }
+    }
+
+    @ViewBuilder
+    private func mapOrganizerHitLayer(
+        using mapProxy: MapProxy,
+        size: CGSize,
+        safeAreaBottom: CGFloat
+    ) -> some View {
+        // Reading the revision keeps the hit layer aligned while the person
+        // pans the map. The layer has no full-screen hit shape, so blank map
+        // space continues straight through to MapKit.
+        let _ = mapOverlayRevision
+
+        ForEach(mapRecords) { record in
+            if let point = mapProxy.convert(record.coordinate, to: .local),
+               isVisibleMapPoint(point, in: size) {
+                mapOrganizerMarkerHitTarget(
+                    for: record,
+                    size: size,
+                    safeAreaBottom: safeAreaBottom
+                )
+                .position(point)
+            }
+        }
+    }
+
+    private func isVisibleMapPoint(_ point: CGPoint, in size: CGSize) -> Bool {
+        let hitRadius: CGFloat = 36
+        return point.x >= -hitRadius && point.x <= size.width + hitRadius
+            && point.y >= -hitRadius && point.y <= size.height + hitRadius
+    }
+
+    @ViewBuilder
+    private func mapOrganizerMarkerHitTarget(
+        for record: UserMapRecord,
+        size: CGSize,
+        safeAreaBottom: CGFloat
+    ) -> some View {
+        // This control deliberately stays structurally identical before and
+        // after edit mode begins. Replacing it midway through a hold is what
+        // made the previous interaction require a release before dragging.
+        Button {
+            guard isOrganizingMapJourneys == false,
+                  journeyOrganizerDrag == nil else {
+                return
+            }
+            selectOnMap(record, size: size, safeAreaBottom: safeAreaBottom)
+        } label: {
+            Circle()
+                .fill(Color.clear)
+                .frame(width: 64, height: 64)
+                .contentShape(Circle())
+                .gesture(
+                    MapOrganizerPressGesture(
+                        isOrganizing: isOrganizingMapJourneys,
+                        onBegan: { location in
+                            guard record.journeyMemberReference != nil else { return }
+                            if isOrganizingMapJourneys == false {
+                                enterMapJourneyOrganization()
+                            }
+                            beginMapJourneyDrag(record, at: location)
+                        },
+                        onChanged: { location in
+                            updateMapJourneyDrag(record, at: location)
+                        },
+                        onEnded: { location in
+                            endMapJourneyDrag(record, at: location)
+                        },
+                        onCancelled: {
+                            cancelMapJourneyDrag(record)
+                        }
+                    )
+                )
+        }
+        .buttonStyle(.plain)
+        .background(mapMarkerTargetFrame(for: record))
+        .accessibilityLabel(record.title)
+        .accessibilityHint(
+            isOrganizingMapJourneys
+                ? "Drag into another memory or Journey"
+                : "Double tap to open. Long press to organize."
+        )
+        .accessibilityIdentifier("mymap.map-marker.\(record.id.uuidString)")
+    }
+
+    private func mapMarkerVisual(for record: UserMapRecord) -> some View {
+        let recordTarget = JourneyOrganizerTarget.record(record.id)
+        let isDropTarget = journeyOrganizerHoveredTarget == recordTarget
+            || journeyOrganizerCompletedTarget == recordTarget
+        let isDragged = journeyOrganizerDrag?.record.id == record.id
+
+        return mapMarker(for: record)
+            .contentShape(Rectangle())
+            .background {
+                if isDropTarget {
+                    Circle()
+                        .fill(Color.white.opacity(0.92))
+                        .frame(width: 58, height: 58)
+                        .overlay {
+                            Circle()
+                                .stroke(Color(Theme.neonPrimary), lineWidth: 2)
+                        }
+                        .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if isDropTarget {
+                    Image(systemName: "plus")
+                        .font(.caption2.weight(.black))
+                        .foregroundStyle(.white)
+                        .frame(width: 18, height: 18)
+                        .background(Color.black, in: Circle())
+                        .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                        .offset(x: 6, y: 6)
+                }
+            }
+            .rotationEffect(isOrganizingMapJourneys ? .degrees(mapJourneyWiggle(for: record.id) * 1.45) : .zero)
+            .offset(y: isOrganizingMapJourneys ? mapJourneyWiggle(for: record.id) * 0.9 : 0)
+            .scaleEffect(isDropTarget ? 1.24 : 1)
+            .opacity(isDragged ? 0.16 : 1)
+            .animation(
+                isOrganizingMapJourneys
+                    ? .easeInOut(duration: 0.16)
+                        .repeatForever(autoreverses: true)
+                        .delay(mapJourneyWiggleDelay(for: record.id))
+                    : .easeOut(duration: 0.16),
+                value: isOrganizingMapJourneys
+            )
+            .animation(.spring(response: 0.24, dampingFraction: 0.7), value: journeyOrganizerHoveredTarget)
+    }
+
+    private func mapMarkerTargetFrame(for record: UserMapRecord) -> some View {
+        GeometryReader { proxy in
+            Color.clear.preference(
+                key: JourneyOrganizerTargetFramePreferenceKey.self,
+                value: isOrganizingMapJourneys
+                    ? [.record(record.id): proxy.frame(in: JourneyOrganizerCoordinateSpace.space)]
+                    : [:]
+            )
+        }
+    }
+
+    private func mapJourneyWiggleDelay(for id: UUID) -> Double {
+        Double(abs(id.uuidString.hashValue % 6)) * 0.018
     }
 
     /// Opens a memory in the already-mounted MyMap canvas. A list row no
@@ -1448,6 +2102,208 @@ struct UserMapHomeView: View {
     }
 }
 
+private struct MapJourneyDragPreview: View {
+    let record: UserMapRecord
+    let user: User?
+
+    var body: some View {
+        draggedMarker
+            .scaleEffect(1.26)
+            .rotationEffect(.degrees(-2))
+            .shadow(color: Color.black.opacity(0.32), radius: 14, y: 9)
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: "plus")
+                    .font(.caption2.weight(.black))
+                    .foregroundStyle(.white)
+                    .frame(width: 19, height: 19)
+                    .background(Color.black, in: Circle())
+                    .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                    .offset(x: 8, y: 8)
+            }
+    }
+
+    @ViewBuilder
+    private var draggedMarker: some View {
+        switch record.kind {
+        case let .poi(rated):
+            UserMapMarker(category: rated.poi.category)
+                .scaleEffect(2.35)
+                .frame(width: 48, height: 48)
+
+        case let .reel(reel):
+            RealMapThumbnail(
+                real: reel,
+                user: user,
+                size: 52,
+                isSelected: true
+            )
+
+        case .journey:
+            MemoryThumbnail(record: record, size: 52, cornerRadius: 15)
+        }
+    }
+}
+
+/// A Journey has no geographic coordinate, so move mode gives it a small
+/// private-photo-folder treatment: the memories are the visual identity, not
+/// another line of map UI chrome.
+private struct MapJourneyFolderDockCover: View {
+    let records: [UserMapRecord]
+    let isDropTarget: Bool
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            coverBackground
+            memoryMosaic
+            dropTargetOverlay
+        }
+        .frame(width: size, height: size)
+        .clipShape(coverShape)
+        .overlay {
+            coverShape
+                .stroke(
+                    isDropTarget ? Color.black : Color.black.opacity(0.12),
+                    lineWidth: isDropTarget ? 2 : 1
+                )
+        }
+    }
+
+    private var coverShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: size * 0.31, style: .continuous)
+    }
+
+    private var coverBackground: some View {
+        coverShape.fill(Color(.secondarySystemBackground))
+    }
+
+    @ViewBuilder
+    private var memoryMosaic: some View {
+        if records.isEmpty {
+            Image(systemName: "folder.fill")
+                .font(.system(size: size * 0.34, weight: .semibold))
+                .foregroundStyle(Color.secondary)
+        } else {
+            ForEach(Array(records.prefix(4).enumerated()), id: \.element.id) { index, record in
+                folderMemoryThumbnail(record, at: index)
+            }
+        }
+    }
+
+    private func folderMemoryThumbnail(
+        _ record: UserMapRecord,
+        at index: Int
+    ) -> some View {
+        MemoryThumbnail(
+            record: record,
+            size: size * 0.54,
+            cornerRadius: size * 0.15,
+            showsKindBadge: false
+        )
+        .offset(
+            x: index.isMultiple(of: 2) ? -size * 0.15 : size * 0.15,
+            y: index < 2 ? -size * 0.15 : size * 0.15
+        )
+    }
+
+    @ViewBuilder
+    private var dropTargetOverlay: some View {
+        if isDropTarget {
+            coverShape.fill(Color.black.opacity(0.52))
+
+            Image(systemName: "plus")
+                .font(.body.weight(.black))
+                .foregroundStyle(.black)
+                .frame(width: 28, height: 28)
+                .background(Color.white, in: Circle())
+                .overlay(Circle().stroke(Color.black.opacity(0.14), lineWidth: 1))
+        }
+    }
+}
+
+/// The only required follow-up to a map-created Folder. It deliberately keeps
+/// the action lightweight: name it now, or keep the sensible default and
+/// continue arranging the map.
+@MainActor
+private struct JourneyFolderNamingSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let folder: JourneyFolder
+    let onSave: (JourneyFolder) -> Void
+
+    @State private var title = ""
+    @FocusState private var isTitleFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "folder.fill")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(Color.black, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Name your Journey")
+                        .font(.title3.weight(.bold))
+
+                    Text(folder.memberReferences.count == 1
+                         ? "Private folder · 1 memory"
+                         : "Private folder · \(folder.memberReferences.count) memories")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            TextField("Untitled Journey", text: $title)
+                .font(.body.weight(.medium))
+                .textInputAutocapitalization(.words)
+                .submitLabel(.done)
+                .focused($isTitleFocused)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 13)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .accessibilityIdentifier("mymap.journey-name")
+                .onSubmit(save)
+
+            HStack(spacing: 12) {
+                Button("Not now") {
+                    dismiss()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(Color(.secondarySystemBackground), in: Capsule(style: .continuous))
+
+                Button(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Keep default" : "Save name") {
+                    save()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(Color.black, in: Capsule(style: .continuous))
+                .accessibilityIdentifier("mymap.save-journey-name")
+            }
+        }
+        .padding(24)
+        .task {
+            isTitleFocused = true
+        }
+    }
+
+    private func save() {
+        var renamedFolder = folder
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        renamedFolder.title = cleanTitle.isEmpty ? folder.title : cleanTitle
+        onSave(renamedFolder)
+        dismiss()
+    }
+}
+
 private enum UserMapCity {
     static func city(from locationLabel: String) -> String? {
         let city = String(locationLabel.split(separator: ",", maxSplits: 1).first ?? "")
@@ -1955,11 +2811,24 @@ struct MemoryThumbnail: View {
     let record: UserMapRecord
     let size: CGFloat
     let cornerRadius: CGFloat
+    let showsKindBadge: Bool
+
+    init(
+        record: UserMapRecord,
+        size: CGFloat,
+        cornerRadius: CGFloat,
+        showsKindBadge: Bool = true
+    ) {
+        self.record = record
+        self.size = size
+        self.cornerRadius = cornerRadius
+        self.showsKindBadge = showsKindBadge
+    }
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             thumbnailContent
-            if case .journey = record.kind {
+            if showsKindBadge, case .journey = record.kind {
                 Image(systemName: "rectangle.stack.fill")
                     .font(.system(size: max(size * 0.16, 8), weight: .bold))
                     .foregroundStyle(.white)
@@ -1967,7 +2836,7 @@ struct MemoryThumbnail: View {
                     .background(Color.black.opacity(0.55), in: Circle())
                     .padding(max(size * 0.07, 3))
             }
-            if case .reel = record.kind {
+            if showsKindBadge, case .reel = record.kind {
                 Image(systemName: "play.fill")
                     .font(.system(size: max(size * 0.15, 8), weight: .heavy))
                     .foregroundStyle(.white)
