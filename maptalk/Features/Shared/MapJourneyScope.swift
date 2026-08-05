@@ -23,6 +23,19 @@ struct MapJourneyScope {
         storyItems = MapStoryFeed.items(for: journey, userProvider: userProvider)
     }
 
+    /// Some Journey scopes are private, hand-arranged folders. They use the
+    /// exact same map, capsule and navigation contract as a published Journey,
+    /// but their member order is intentional rather than chronological.
+    init(
+        journey: JourneyPost,
+        userProvider: @escaping (UUID) -> User?,
+        storyItems: [RealStoriesRow.StoryItem]
+    ) {
+        self.journey = journey
+        self.userProvider = userProvider
+        self.storyItems = storyItems
+    }
+
     var firstStoryItem: RealStoriesRow.StoryItem? {
         storyItems.first
     }

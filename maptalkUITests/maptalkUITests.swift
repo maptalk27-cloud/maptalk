@@ -62,6 +62,93 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
+    func testMyMapJourneyHandleExpandsAndCollapses() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let myMapTab = app.tabBars.buttons["MyMap"]
+        XCTAssertTrue(myMapTab.waitForExistence(timeout: 5))
+        myMapTab.tap()
+
+        let showMap = app.buttons["Show map"]
+        XCTAssertTrue(showMap.waitForExistence(timeout: 5))
+        showMap.tap()
+
+        let handle = app.buttons["mymap.map-journey-handle"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 5))
+        XCTAssertEqual(handle.value as? String, "2 Journeys")
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.map-journey-shelf"].exists)
+        XCTAssertFalse(app.buttons["Done"].exists)
+
+        handle.tap()
+
+        let shelf = app.descendants(matching: .any)["mymap.map-journey-shelf"]
+        XCTAssertTrue(shelf.waitForExistence(timeout: 3))
+        let afterDark = app.buttons[
+            "mymap.map-journey-shelf-folder.00000000-0000-0000-0000-000000008101"
+        ]
+        XCTAssertTrue(afterDark.waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["Done"].exists)
+
+        app.buttons["mymap.map-journey-shelf-collapse"].tap()
+        XCTAssertTrue(handle.waitForExistence(timeout: 3))
+        let shelfHasClosed = expectation(
+            for: NSPredicate(format: "exists == false"),
+            evaluatedWith: shelf
+        )
+        wait(for: [shelfHasClosed], timeout: 2)
+    }
+
+    @MainActor
+    func testMyMapJourneyShelfOpensPrivateFolder() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let myMapTab = app.tabBars.buttons["MyMap"]
+        XCTAssertTrue(myMapTab.waitForExistence(timeout: 5))
+        myMapTab.tap()
+
+        let showMap = app.buttons["Show map"]
+        XCTAssertTrue(showMap.waitForExistence(timeout: 5))
+        showMap.tap()
+
+        // Keep hold of this actual map element: opening a private Journey
+        // must scope this canvas, never push a second map/detail screen.
+        let map = app.descendants(matching: .any)["mymap.map-canvas"]
+        XCTAssertTrue(map.waitForExistence(timeout: 5))
+
+        let handle = app.buttons["mymap.map-journey-handle"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 5))
+        handle.tap()
+
+        let afterDark = app.buttons[
+            "mymap.map-journey-shelf-folder.00000000-0000-0000-0000-000000008101"
+        ]
+        XCTAssertTrue(afterDark.waitForExistence(timeout: 3))
+        afterDark.tap()
+
+        let folderScope = app.descendants(matching: .any)[
+            "mymap.map-folder-scope.00000000-0000-0000-0000-000000008101"
+        ]
+        XCTAssertTrue(folderScope.waitForExistence(timeout: 5))
+        XCTAssertEqual(folderScope.value as? String, "3 memories")
+        XCTAssertTrue(map.exists)
+        XCTAssertEqual(map.value as? String, "Journey: After dark")
+        XCTAssertTrue(app.descendants(matching: .any)["mymap.compact-capsule"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.segmentedControls["Journey view"].exists)
+        XCTAssertFalse(app.buttons["mymap.map-journey-handle"].exists)
+
+        app.buttons["mymap.map-folder-exit"].tap()
+        let scopeHasClosed = expectation(
+            for: NSPredicate(format: "exists == false"),
+            evaluatedWith: folderScope
+        )
+        wait(for: [scopeHasClosed], timeout: 3)
+        XCTAssertEqual(map.value as? String, "All memories")
+        XCTAssertTrue(handle.waitForExistence(timeout: 3))
+    }
+
+    @MainActor
     func testMyMapLongPressAddsMemoryToJourney() throws {
         let app = XCUIApplication()
         app.launch()
@@ -74,7 +161,7 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(showMap.waitForExistence(timeout: 5))
         showMap.tap()
 
-        let source = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000009122"]
+        let source = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000000112"]
         XCTAssertTrue(source.waitForExistence(timeout: 5))
         source.press(forDuration: 0.75)
 
@@ -82,13 +169,20 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Done"].exists)
 
         XCTAssertTrue(app.descendants(matching: .any)["mymap.journey-dock"].exists)
+        XCTAssertFalse(app.buttons["mymap.map-journey-handle"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.map-journey-shelf"].exists)
         let folder = app.descendants(matching: .any)["Journey folder: After dark"]
         XCTAssertTrue(folder.waitForExistence(timeout: 5))
         XCTAssertEqual(folder.value as? String, "3 memories")
 
         let sourcePoint = source.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5))
         let folderPoint = folder.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5))
-        sourcePoint.press(forDuration: 0.2, thenDragTo: folderPoint)
+        sourcePoint.press(
+            forDuration: 0.2,
+            thenDragTo: folderPoint,
+            withVelocity: XCUIGestureVelocity.slow,
+            thenHoldForDuration: 0.3
+        )
 
         XCTAssertFalse(app.textFields["mymap.journey-name"].exists)
         let folderUpdated = expectation(
@@ -117,7 +211,7 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(showMap.waitForExistence(timeout: 5))
         showMap.tap()
 
-        let source = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000009122"]
+        let source = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000000112"]
         let destination = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000009120"]
         XCTAssertTrue(source.waitForExistence(timeout: 5))
         XCTAssertTrue(destination.waitForExistence(timeout: 5))
@@ -126,7 +220,12 @@ final class maptalkUITests: XCTestCase {
         // release and second grab is precisely the interaction we are avoiding.
         let sourcePoint = source.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5))
         let destinationPoint = destination.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5))
-        sourcePoint.press(forDuration: 0.75, thenDragTo: destinationPoint)
+        sourcePoint.press(
+            forDuration: 0.75,
+            thenDragTo: destinationPoint,
+            withVelocity: XCUIGestureVelocity.slow,
+            thenHoldForDuration: 0.3
+        )
 
         let nameField = app.textFields["mymap.journey-name"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 3))
@@ -137,6 +236,103 @@ final class maptalkUITests: XCTestCase {
         let createdFolder = app.descendants(matching: .any)["Journey folder: Night rhythm"]
         XCTAssertTrue(createdFolder.waitForExistence(timeout: 3))
         XCTAssertEqual(createdFolder.value as? String, "2 memories")
+    }
+
+    @MainActor
+    func testMyMapCanCancelNewJourneyCreation() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let myMapTab = app.tabBars.buttons["MyMap"]
+        XCTAssertTrue(myMapTab.waitForExistence(timeout: 5))
+        myMapTab.tap()
+
+        let showMap = app.buttons["Show map"]
+        XCTAssertTrue(showMap.waitForExistence(timeout: 5))
+        showMap.tap()
+
+        let source = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000000112"]
+        let destination = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000009120"]
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        XCTAssertTrue(destination.waitForExistence(timeout: 5))
+
+        source.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5)).press(
+            forDuration: 0.75,
+            thenDragTo: destination.coordinate(withNormalizedOffset: .init(dx: 0.5, dy: 0.5)),
+            withVelocity: XCUIGestureVelocity.slow,
+            thenHoldForDuration: 0.3
+        )
+
+        let cancel = app.buttons["mymap.cancel-journey-creation"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3))
+        cancel.tap()
+
+        XCTAssertFalse(app.textFields["mymap.journey-name"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["Journey folder: Untitled Journey"].exists)
+        XCTAssertTrue(app.buttons["Done"].exists)
+    }
+
+    @MainActor
+    func testMyMapOverlappingMarkersCycleThroughTheirMemories() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let myMapTab = app.tabBars.buttons["MyMap"]
+        XCTAssertTrue(myMapTab.waitForExistence(timeout: 5))
+        myMapTab.tap()
+
+        let showMap = app.buttons["Show map"]
+        XCTAssertTrue(showMap.waitForExistence(timeout: 5))
+        showMap.tap()
+
+        let stack = app.buttons[
+            "mymap.map-marker-stack.00000000-0000-0000-0000-000000000117:00000000-0000-0000-0000-000000007005"
+        ]
+        XCTAssertTrue(stack.waitForExistence(timeout: 5))
+
+        stack.tap()
+        XCTAssertTrue(app.buttons["Thames Fog Ferry"].waitForExistence(timeout: 3))
+
+        stack.tap()
+        XCTAssertTrue(
+            app.buttons["River Thames ferry deck turned tea bar. Fog lasers!"]
+                .waitForExistence(timeout: 3)
+        )
+    }
+
+    @MainActor
+    func testMyMapQuickTapWhileOrganizingDoesNotInterruptOrganization() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let myMapTab = app.tabBars.buttons["MyMap"]
+        XCTAssertTrue(myMapTab.waitForExistence(timeout: 5))
+        myMapTab.tap()
+
+        let showMap = app.buttons["Show map"]
+        XCTAssertTrue(showMap.waitForExistence(timeout: 5))
+        showMap.tap()
+
+        let source = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000000112"]
+        let destination = app.buttons["mymap.map-marker.00000000-0000-0000-0000-000000009120"]
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        XCTAssertTrue(destination.waitForExistence(timeout: 5))
+
+        source.press(forDuration: 0.75)
+        XCTAssertTrue(app.buttons["Done"].exists)
+        let existingFolder = app.descendants(matching: .any)["Journey folder: After dark"]
+        XCTAssertEqual(existingFolder.value as? String, "3 memories")
+
+        // Let the long-press token finish returning before exercising the
+        // separate quick-tap path.
+        Thread.sleep(forTimeInterval: 0.35)
+        destination.tap()
+
+        let capsule = app.descendants(matching: .any)["mymap.compact-capsule"]
+        XCTAssertFalse(capsule.exists)
+        XCTAssertTrue(app.buttons["Done"].exists)
+        XCTAssertFalse(app.textFields["mymap.journey-name"].exists)
+        XCTAssertEqual(existingFolder.value as? String, "3 memories")
     }
 
     @MainActor

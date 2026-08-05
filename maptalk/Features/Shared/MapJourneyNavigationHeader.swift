@@ -8,6 +8,24 @@ struct MapJourneyNavigationHeader: View {
     let selectedJourneyId: UUID?
     let onSelect: (JourneyPost) -> Void
     let onExit: () -> Void
+    let exitAccessibilityLabel: String
+    let exitAccessibilityIdentifier: String
+
+    init(
+        path: [JourneyPost],
+        selectedJourneyId: UUID?,
+        onSelect: @escaping (JourneyPost) -> Void,
+        onExit: @escaping () -> Void,
+        exitAccessibilityLabel: String = "Back",
+        exitAccessibilityIdentifier: String = "map-journey-exit"
+    ) {
+        self.path = path
+        self.selectedJourneyId = selectedJourneyId
+        self.onSelect = onSelect
+        self.onExit = onExit
+        self.exitAccessibilityLabel = exitAccessibilityLabel
+        self.exitAccessibilityIdentifier = exitAccessibilityIdentifier
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -19,6 +37,8 @@ struct MapJourneyNavigationHeader: View {
                     .background(Color.black.opacity(0.45), in: Circle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(exitAccessibilityLabel)
+            .accessibilityIdentifier(exitAccessibilityIdentifier)
 
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
