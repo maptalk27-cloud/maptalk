@@ -31,6 +31,9 @@ struct UserMapView: View {
                 onDeleteJourneyFolder: { id in
                     viewModel.deleteJourneyFolder(id: id)
                 },
+                onRemoveFromMyMap: { reference in
+                    viewModel.removeFromMyMap(reference)
+                },
                 userProvider: userProvider
             )
         }

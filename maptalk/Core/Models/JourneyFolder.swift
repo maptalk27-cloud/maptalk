@@ -27,12 +27,10 @@ struct JourneyFolder: Identifiable, Hashable {
     let id: UUID
     let userId: UUID
     var title: String
-    /// The order is the order the owner arranged inside the folder.
+    /// The order reflects when memories were added to the private folder.
     var memberReferences: [MemberReference]
     let createdAt: Date
     var updatedAt: Date
-    /// A personal timeline can begin at a chosen moment without changing any member's date.
-    var timelineStart: Date?
 
     init(
         id: UUID = UUID(),
@@ -40,8 +38,7 @@ struct JourneyFolder: Identifiable, Hashable {
         title: String,
         memberReferences: [MemberReference] = [],
         createdAt: Date = .init(),
-        updatedAt: Date? = nil,
-        timelineStart: Date? = nil
+        updatedAt: Date? = nil
     ) {
         self.id = id
         self.userId = userId
@@ -49,6 +46,5 @@ struct JourneyFolder: Identifiable, Hashable {
         self.memberReferences = memberReferences
         self.createdAt = createdAt
         self.updatedAt = updatedAt ?? createdAt
-        self.timelineStart = timelineStart
     }
 }

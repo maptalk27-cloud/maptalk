@@ -8,6 +8,7 @@ struct MapJourneyNavigationHeader: View {
     let selectedJourneyId: UUID?
     let onSelect: (JourneyPost) -> Void
     let onExit: () -> Void
+    let subtitleForJourney: (JourneyPost) -> String
     let exitAccessibilityLabel: String
     let exitAccessibilityIdentifier: String
 
@@ -16,6 +17,7 @@ struct MapJourneyNavigationHeader: View {
         selectedJourneyId: UUID?,
         onSelect: @escaping (JourneyPost) -> Void,
         onExit: @escaping () -> Void,
+        subtitleForJourney: @escaping (JourneyPost) -> String = { _ in "Journey" },
         exitAccessibilityLabel: String = "Back",
         exitAccessibilityIdentifier: String = "map-journey-exit"
     ) {
@@ -23,6 +25,7 @@ struct MapJourneyNavigationHeader: View {
         self.selectedJourneyId = selectedJourneyId
         self.onSelect = onSelect
         self.onExit = onExit
+        self.subtitleForJourney = subtitleForJourney
         self.exitAccessibilityLabel = exitAccessibilityLabel
         self.exitAccessibilityIdentifier = exitAccessibilityIdentifier
     }
@@ -46,7 +49,7 @@ struct MapJourneyNavigationHeader: View {
                         ForEach(path, id: \.id) { journey in
                             JourneyBreadcrumbCard(
                                 title: title(for: journey),
-                                subtitle: "Journey",
+                                subtitle: subtitleForJourney(journey),
                                 leadingSymbol: String(title(for: journey).prefix(1)).uppercased(),
                                 isSelected: journey.id == selectedJourneyId
                             )
@@ -66,6 +69,7 @@ struct MapJourneyNavigationHeader: View {
                     scrollToSelected(using: proxy, animated: true)
                 }
             }
+
         }
     }
 

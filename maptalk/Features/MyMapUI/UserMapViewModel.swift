@@ -217,13 +217,12 @@ final class UserMapViewModel: ObservableObject {
         }
     }
 
-    /// Creates a local Journey organizer. Adding something to a folder never
-    /// moves or changes the original POI/Reel.
+    /// Creates a local collection. Adding something to it never moves or
+    /// changes the original POI/Reel.
     @discardableResult
     func createJourneyFolder(
         title: String,
-        memberReferences: [JourneyFolder.MemberReference] = [],
-        timelineStart: Date? = nil
+        memberReferences: [JourneyFolder.MemberReference] = []
     ) -> JourneyFolder? {
         guard canEditJourneyFolders else { return nil }
 
@@ -231,18 +230,16 @@ final class UserMapViewModel: ObservableObject {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let folder = JourneyFolder(
             userId: identity.user.id,
-            title: cleanTitle.isEmpty ? "Untitled Journey" : cleanTitle,
+            title: cleanTitle.isEmpty ? "Untitled Collection" : cleanTitle,
             memberReferences: memberReferences,
             createdAt: now,
-            updatedAt: now,
-            timelineStart: timelineStart
+            updatedAt: now
         )
         journeyFolders.insert(folder, at: 0)
         return folder
     }
 
-    /// Saves the owner's arrangement. This is deliberately kept separate from
-    /// social Reel / POI writes so the folder remains a private tool.
+    /// Saves a local folder without touching the original Reel or POI.
     func saveJourneyFolder(_ folder: JourneyFolder) {
         guard canEditJourneyFolders,
               let index = journeyFolders.firstIndex(where: { $0.id == folder.id }) else {
@@ -251,7 +248,7 @@ final class UserMapViewModel: ObservableObject {
 
         var updated = folder
         let cleanTitle = updated.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        updated.title = cleanTitle.isEmpty ? "Untitled Journey" : cleanTitle
+        updated.title = cleanTitle.isEmpty ? "Untitled Collection" : cleanTitle
         updated.updatedAt = Date()
         journeyFolders[index] = updated
     }
@@ -259,6 +256,34 @@ final class UserMapViewModel: ObservableObject {
     func deleteJourneyFolder(id: UUID) {
         guard canEditJourneyFolders else { return }
         journeyFolders.removeAll { $0.id == id }
+    }
+
+    /// Removes a memory from the private MyMap archive only. It deliberately
+    /// does not mutate a published Reel or public POI elsewhere in the app.
+    func removeFromMyMap(_ reference: JourneyFolder.MemberReference) {
+        guard canEditJourneyFolders else { return }
+
+        switch reference {
+        case let .reel(id):
+            reels.removeAll { $0.id == id }
+        case let .poi(id):
+            footprints.removeAll { $0.id == id }
+        }
+
+        journeyFolders = journeyFolders.map { folder in
+            var updated = folder
+            updated.memberReferences.removeAll { $0 == reference }
+            if updated.memberReferences.count != folder.memberReferences.count {
+                updated.updatedAt = Date()
+            }
+            return updated
+        }
+
+        summary = Summary(
+            footprintCount: footprints.count,
+            reelCount: reels.count,
+            categoryCount: Set(footprints.map { $0.category }).count
+        )
     }
 
     private func personaBio(for user: User) -> String {

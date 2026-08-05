@@ -648,8 +648,7 @@ enum PreviewData {
                     .reel(lagosNightReal.id)
                 ],
                 createdAt: referenceDate.addingTimeInterval(-8 * 60 * 60),
-                updatedAt: referenceDate.addingTimeInterval(-90 * 60),
-                timelineStart: referenceDate.addingTimeInterval(-8 * 60 * 60)
+                updatedAt: referenceDate.addingTimeInterval(-90 * 60)
             ),
             .init(
                 id: revisitsFolderID,
