@@ -377,6 +377,8 @@ extension ExperienceDetailView {
             return Theme.neonAccent
         case .anonymous:
             return Theme.neonWarning
+        case .privateOnly:
+            return Color.white.opacity(0.82)
         }
     }
 
@@ -388,6 +390,8 @@ extension ExperienceDetailView {
             return [Color.black, Theme.neonAccent.opacity(0.28)]
         case .anonymous:
             return [Color.black, Theme.neonWarning.opacity(0.28)]
+        case .privateOnly:
+            return [Color.black, Color.white.opacity(0.12)]
         }
     }
 }

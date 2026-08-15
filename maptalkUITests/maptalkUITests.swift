@@ -52,6 +52,100 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
+    func testMapTalkHasTwoFocusedPublishEntrypoints() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let addPlace = app.buttons["Add a place"]
+        XCTAssertTrue(addPlace.waitForExistence(timeout: 5))
+        XCTAssertTrue(addPlace.isEnabled)
+        addPlace.tap()
+
+        let composer = app.descendants(matching: .any)["maptalk.publish-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 3))
+        // Simulator stays on the capture surface. The library is presented
+        // only after the person explicitly taps its button.
+        XCTAssertTrue(app.staticTexts["Place"].exists)
+        XCTAssertFalse(app.navigationBars["Add a place"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["maptalk.place.add-media"].exists)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["maptalk.place.choose-landmark"].exists
+                || app.textFields["maptalk.place.new-name"].exists
+        )
+        let placeAudience = app.buttons["maptalk.place.audience"]
+        XCTAssertTrue(placeAudience.exists)
+        XCTAssertTrue(app.buttons["Add to MyMap"].exists)
+        placeAudience.tap()
+        let publicAudience = app.buttons["Public"]
+        XCTAssertTrue(publicAudience.waitForExistence(timeout: 2))
+        publicAudience.tap()
+        XCTAssertTrue(app.buttons["Post"].exists)
+
+        let chooseLandmark = app.descendants(matching: .any)["maptalk.place.choose-landmark"]
+        if chooseLandmark.exists {
+            chooseLandmark.tap()
+            XCTAssertTrue(app.staticTexts["Choose a place"].waitForExistence(timeout: 2))
+            XCTAssertFalse(app.descendants(matching: .any)["maptalk.place.add-media"].exists)
+
+            let pickerBack = app.buttons["Back to place"]
+            XCTAssertTrue(pickerBack.waitForExistence(timeout: 2))
+            pickerBack.tap()
+            XCTAssertTrue(
+                app.descendants(matching: .any)["maptalk.place.add-media"].waitForExistence(timeout: 2)
+            )
+        }
+        app.buttons["maptalk.publish.cancel"].tap()
+
+        let shareReel = app.buttons["Share a reel"]
+        XCTAssertTrue(shareReel.waitForExistence(timeout: 3))
+        XCTAssertTrue(shareReel.isEnabled)
+        shareReel.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["maptalk.publish-composer"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["New reel"].exists)
+        XCTAssertFalse(app.navigationBars["Share a reel"].exists)
+        XCTAssertTrue(app.buttons["maptalk.reel.add-media"].exists)
+        XCTAssertTrue(app.textViews["maptalk.reel.text"].exists)
+        let chooseBubble = app.descendants(matching: .any)["maptalk.reel.choose-bubble"]
+        XCTAssertTrue(chooseBubble.exists)
+        XCTAssertTrue(app.buttons["maptalk.reel.audience"].exists)
+        XCTAssertTrue(app.buttons["Share"].exists)
+
+        chooseBubble.tap()
+        XCTAssertTrue(app.staticTexts["Add bubble"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Memories"].exists)
+        XCTAssertTrue(app.buttons["Folders"].exists)
+        XCTAssertFalse(app.buttons["Timeline"].exists)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["maptalk.reel.bubble-date-section.Today"]
+                .waitForExistence(timeout: 2)
+        )
+
+        let firstMemory = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "maptalk.reel.bubble-memory.")
+        ).firstMatch
+        XCTAssertTrue(firstMemory.waitForExistence(timeout: 2))
+        firstMemory.tap()
+        XCTAssertTrue(app.staticTexts["1 memory selected"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["Remove bubble selection"].exists)
+        app.buttons["Back to reel"].tap()
+
+        XCTAssertTrue(chooseBubble.waitForExistence(timeout: 2))
+        XCTAssertTrue(chooseBubble.label.contains("Add"), "Back must discard pending Bubble edits")
+
+        chooseBubble.tap()
+        XCTAssertTrue(firstMemory.waitForExistence(timeout: 2))
+        firstMemory.tap()
+        app.buttons["Done"].tap()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["maptalk.reel.bubble-preview"]
+                .waitForExistence(timeout: 2),
+            "A selected Bubble should preview its memories without replacing the composer"
+        )
+        XCTAssertTrue(chooseBubble.label.contains("1 memory"))
+    }
+
+    @MainActor
     func testMyMapPinStaysOnMapAndOpensCapsule() throws {
         let app = XCUIApplication()
         app.launch()

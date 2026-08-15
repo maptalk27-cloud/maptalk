@@ -1,18 +1,23 @@
 import SwiftUI
 
-struct RealButton: View {
+/// The public-facing name is Reel. In this first version it is a short text
+/// expression tied to the person's live location; the visual keeps the
+/// original MapTalk creation mark instead of adding generic toolbar chrome.
+struct ReelPublishButton: View {
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            ReelBadgeIcon()
+            MomentBadgeIcon()
                 .modifier(Theme.neonGlow(Theme.neonAccent))
         }
-        .buttonStyle(ReelBadgeButtonStyle())
+        .buttonStyle(MomentBadgeButtonStyle())
+        .accessibilityLabel("Share a reel")
+        .accessibilityIdentifier("maptalk.share-reel")
     }
 }
 
-private struct ReelBadgeIcon: View {
+private struct MomentBadgeIcon: View {
     var body: some View {
         ZStack {
             Circle()
@@ -53,7 +58,7 @@ private struct ReelBadgeIcon: View {
     }
 }
 
-private struct ReelBadgeButtonStyle: ButtonStyle {
+private struct MomentBadgeButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.95 : 1)

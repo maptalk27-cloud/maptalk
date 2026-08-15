@@ -3,26 +3,35 @@ import Foundation
 import Observation
 import SwiftUI
 
+@MainActor
 @Observable
 final class AppEnvironment {
     let build: Build
     let location: any LocationService
     let notifications: any NotificationService
     let poiRepo: any POIRepository
+    /// Apple Maps-backed directory used only by the Place publisher.
+    let nearbyPOIRepo: any POIRepository
     let realRepo: any RealRepository
+    /// Shared local ownership for the current person's MyMap memories.
+    let myMapArchive: MyMapArchiveStore
 
     init(
         build: Build,
         location: any LocationService,
         notifications: any NotificationService,
         poiRepo: any POIRepository,
-        realRepo: any RealRepository
+        nearbyPOIRepo: (any POIRepository)? = nil,
+        realRepo: any RealRepository,
+        myMapArchive: MyMapArchiveStore
     ) {
         self.build = build
         self.location = location
         self.notifications = notifications
         self.poiRepo = poiRepo
+        self.nearbyPOIRepo = nearbyPOIRepo ?? poiRepo
         self.realRepo = realRepo
+        self.myMapArchive = myMapArchive
     }
 
     static func bootstrap() -> AppEnvironment {
@@ -34,14 +43,18 @@ final class AppEnvironment {
         let location = LocationServiceImpl()
         let notifications = NotificationServiceImpl()
         let poiRepo = InMemoryPOIRepository()
+        let nearbyPOIRepo = ApplePOIRepository()
         let realRepo = InMemoryRealRepository()
+        let myMapArchive = MyMapArchiveStore()
 
         return AppEnvironment(
             build: build,
             location: location,
             notifications: notifications,
             poiRepo: poiRepo,
-            realRepo: realRepo
+            nearbyPOIRepo: nearbyPOIRepo,
+            realRepo: realRepo,
+            myMapArchive: myMapArchive
         )
     }
 }

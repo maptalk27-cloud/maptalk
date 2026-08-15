@@ -358,7 +358,11 @@ final class TimelineCityResolver: ObservableObject {
             }
         }
 
-        if let best, best.1 < 600_000 {
+        // This is only a synchronous fallback for records that have no
+        // authored/repository city label. Keep it at metro scale: a broad
+        // regional guess (for example Portland → Seattle) is worse than an
+        // honest coordinate until reverse-geocoded metadata is available.
+        if let best, best.1 < 80_000 {
             return best.0
         }
         return String(format: "Lat %.3f, Lon %.3f", coordinate.latitude, coordinate.longitude)

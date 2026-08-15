@@ -207,6 +207,8 @@ struct CompactRealCard: View {
             return Theme.neonAccent
         case .anonymous:
             return Theme.neonWarning
+        case .privateOnly:
+            return Color.white.opacity(0.82)
         }
     }
 

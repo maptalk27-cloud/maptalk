@@ -1,6 +1,7 @@
 import SwiftUI
 
-struct RatingButton: View {
+/// The public-facing name is Place; POI remains an internal data model.
+struct PlacePublishButton: View {
     let action: () -> Void
 
     var body: some View {
@@ -10,6 +11,7 @@ struct RatingButton: View {
         }
         .tint(Theme.neonAccent)
         .modifier(Theme.neonGlow(Theme.neonAccent))
+        .accessibilityLabel("Add a place")
+        .accessibilityIdentifier("maptalk.add-place")
     }
 }
-

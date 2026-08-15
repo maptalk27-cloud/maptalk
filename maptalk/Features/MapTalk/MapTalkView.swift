@@ -26,6 +26,13 @@ struct MapTalkView: View {
     @State private var didApplyInitialStorySelection: Bool = false
     @StateObject private var storyReadStore = StoryReadStore()
     @State private var pendingViewedStoryKey: String?
+    @State private var publishDestination: MapTalkPublishDestination?
+    @State private var queuedPublishDestination: MapTalkPublishDestination?
+    @State private var isActivityPresented = false
+    @State private var isActivityPresentationQueued = false
+    @State private var viewedActivityIDs = Set<String>()
+    @State private var pendingActivityDestination: MapTalkActivityEvent.Target.Destination?
+    @State private var shouldReturnToActivityAfterPreview = false
     @Namespace private var heroNamespace
     private let initialStoryId: UUID?
 
@@ -55,6 +62,20 @@ struct MapTalkView: View {
             let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
 
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
+
+            let activityEvents = MapTalkActivityFeed.events(
+                reals: viewModel.reals,
+                ratedPOIs: viewModel.ratedPOIs,
+                bubbles: environment.myMapArchive.publicBubbleCatalog
+                    + environment.myMapArchive.legacyJourneyCatalog,
+                currentUserID: environment.myMapArchive.currentUserID,
+                userProvider: viewModel.user(for:)
+            )
+            let unreadActivityCount = activityEvents.reduce(into: 0) { count, event in
+                if viewedActivityIDs.contains(event.id) == false {
+                    count += 1
+                }
+            }
 
             let storyItemIds = storyItems.map(\.id)
             let sequenceItems = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
@@ -329,14 +350,34 @@ struct MapTalkView: View {
                     )
                 }
                 .ignoresSafeArea()
+                .onMapCameraChange(frequency: .onEnd) { context in
+                    // Browsing still tracks the visible camera for normal map
+                    // behavior. Publishing deliberately ignores this value
+                    // and always uses the device's live location instead.
+                    currentRegion = context.region
+                }
 
                 VStack(spacing: 6) {
                     if focusedJourneyHeader == nil {
-                        Group {
-                            if let scopedUser = viewModel.scopedUser {
-                                ProfileMapIdentityBadge(user: scopedUser)
-                            } else {
-                                MapTalkHandwrittenBadge()
+                        ZStack {
+                            Group {
+                                if let scopedUser = viewModel.scopedUser {
+                                    ProfileMapIdentityBadge(user: scopedUser)
+                                } else {
+                                    MapTalkHandwrittenBadge()
+                                }
+                            }
+
+                            if viewModel.scopedUser == nil {
+                                HStack {
+                                    Spacer()
+                                    MapTalkActivityButton(
+                                        unreadCount: unreadActivityCount
+                                    ) {
+                                        requestActivity()
+                                    }
+                                    .padding(.trailing, 16)
+                                }
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -406,6 +447,9 @@ struct MapTalkView: View {
                         }
                 }
                 .ignoresSafeArea(edges: .top)
+                .opacity(publishDestination == nil ? 1 : 0)
+                .allowsHitTesting(publishDestination == nil)
+                .animation(.easeOut(duration: 0.16), value: publishDestination)
 
                 if focusedJourneyHeader == nil {
                     VStack {
@@ -428,20 +472,41 @@ struct MapTalkView: View {
                                     flushPendingViewedStory(nil)
                                     viewModel.centerOnUser()
                                 },
-                                onTapRating: {},
-                                onTapReal: {}
+                                onTapPlace: {
+                                    requestPublish(.place)
+                                },
+                                onTapReel: {
+                                    requestPublish(.reel)
+                                },
+                                showsPublishActions: viewModel.isUserScope == false
                             )
                         }
                         .padding(.trailing, 20)
                         .padding(.bottom, controlsBottomPadding)
+                        .opacity(publishDestination == nil ? 1 : 0)
+                        .allowsHitTesting(publishDestination == nil)
+                        .animation(.easeOut(duration: 0.16), value: publishDestination)
                     }
                 }
+
             }
             .sheet(isPresented: $experiencePresentation.isPresented, onDismiss: {
                 guard experiencePresentation.didDismiss() == false else { return }
                 flushPendingViewedStory(nil)
                 selectedRealId = nil
                 selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
+
+                if shouldReturnToActivityAfterPreview {
+                    shouldReturnToActivityAfterPreview = false
+                    clearActivityPreviewJourneyState()
+                    DispatchQueue.main.async {
+                        isActivityPresented = true
+                    }
+                    return
+                }
+
+                presentQueuedPublisherIfNeeded()
+                presentQueuedActivityIfNeeded()
             }) {
                 let isExpanded = experiencePresentation.isExpanded
                 let shouldAnimateSelection = isExpanded == false
@@ -504,6 +569,7 @@ struct MapTalkView: View {
                                     selection: selectionBinding,
                                     isExpanded: isExpanded,
                                     onCollapsedTap: experiencePresentation.expand,
+                                    journeyProvider: viewModel.journey(for:),
                                     userProvider: viewModel.user(for:),
                                     onJourneyAvatarStackTap: { journey in
                                         handleJourneyTap(journey, true, focusedJourneyHeader)
@@ -539,6 +605,73 @@ struct MapTalkView: View {
                         compactDetent: .fraction(ControlsLayout.previewFraction),
                         selection: $experiencePresentation.detent
                     )
+            }
+            .sheet(item: $publishDestination) { destination in
+                GeometryReader { composerGeometry in
+                    MapTalkPublishComposer(
+                        destination: destination,
+                        nearbyPlaces: viewModel.publishableLiveLocation.map {
+                            viewModel.nearbyPlaceOptions(near: $0)
+                        } ?? [],
+                        isLoadingNearbyPlaces: viewModel.isLoadingNearbyPlaces,
+                        folders: environment.myMapArchive.journeyFolders,
+                        myMapRecords: myMapBubbleRecords,
+                        currentUserID: environment.myMapArchive.currentUserID,
+                        userProvider: viewModel.user(for:),
+                        hasLiveLocation: viewModel.publishableLiveLocation != nil,
+                        locationAuthorization: viewModel.locationAuthorization,
+                        topInset: composerGeometry.safeAreaInsets.top,
+                        bottomInset: composerGeometry.safeAreaInsets.bottom,
+                        onCancel: {
+                            publishDestination = nil
+                        },
+                        onPublish: { draft, audience in
+                            completePublishing(
+                                draft,
+                                audience: audience,
+                                destination: destination
+                            )
+                        }
+                    )
+                }
+                .presentationDetents([.fraction(0.84)])
+                .presentationDragIndicator(.hidden)
+                .presentationCornerRadius(30)
+                .presentationBackground(Color.white)
+                .presentationCompactAdaptation(.sheet)
+                .interactiveDismissDisabled()
+            }
+            .fullScreenCover(isPresented: $isActivityPresented, onDismiss: {
+                guard let destination = pendingActivityDestination else { return }
+                pendingActivityDestination = nil
+
+                Task { @MainActor in
+                    await Task.yield()
+                    let opened = openActivityDestination(
+                        destination,
+                        baseStoryItems: baseStoryItems,
+                        selectStoryItem: selectStoryItem,
+                        handleJourneyTap: handleJourneyTap
+                    )
+                    shouldReturnToActivityAfterPreview = opened
+                    if opened == false {
+                        isActivityPresented = true
+                    }
+                }
+            }) {
+                MapTalkActivityView(events: activityEvents) {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        viewedActivityIDs.formUnion(activityEvents.map(\.id))
+                    }
+                } onSelect: { destination in
+                    pendingActivityDestination = destination
+                    isActivityPresented = false
+                }
+                .presentationBackground(Color(.systemBackground))
+            }
+            .onChange(of: activityEvents.map(\.id)) { _, identifiers in
+                guard isActivityPresented else { return }
+                viewedActivityIDs.formUnion(identifiers)
             }
             .onAppear {
                 WorldBasemapPrefetcher.shared.prefetchGlobalBasemapIfNeeded()
@@ -639,6 +772,232 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    func openActivityDestination(
+        _ destination: MapTalkActivityEvent.Target.Destination,
+        baseStoryItems: [RealStoriesRow.StoryItem],
+        selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void,
+        handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void
+    ) -> Bool {
+        switch destination {
+        case let .reel(identifier):
+            guard let item = baseStoryItems.first(where: { item in
+                guard item.id == identifier else { return false }
+                if case .real = item.source { return true }
+                return false
+            }) else {
+                return false
+            }
+            selectStoryItem(item, true, true, .initial)
+            reelAlignTrigger &+= 1
+            return true
+
+        case let .place(identifier):
+            if let item = baseStoryItems.first(where: { item in
+                guard item.id == identifier else { return false }
+                if case .poi = item.source { return true }
+                return false
+            }) {
+                selectStoryItem(item, true, true, .initial)
+                reelAlignTrigger &+= 1
+                return true
+            }
+
+            // Activity can outlive the map's recent-story window. Older places
+            // still need to open instead of becoming a dead notification row.
+            guard let rated = viewModel.ratedPOIs.first(where: { $0.id == identifier }) else {
+                return false
+            }
+            pendingRegionCause = .initial
+            selectedStoryId = nil
+            selectedRealId = nil
+            viewModel.focus(on: rated)
+            activeExperience = .poi(rated: rated, nonce: UUID())
+            experiencePresentation.presentNewContent()
+            return true
+
+        case let .bubble(identifier):
+            guard let bubble = viewModel.journey(for: identifier),
+                  bubble.reels.isEmpty == false || bubble.pois.isEmpty == false else {
+                return false
+            }
+            handleJourneyTap(bubble, true, nil)
+            return true
+        }
+    }
+
+    func clearActivityPreviewJourneyState() {
+        journeyEntryStoryId = nil
+        journeyStack.removeAll()
+        focusedJourneyHeader = nil
+        activeExperience = nil
+    }
+
+    /// The Bubble picker is another view of the person's private MyMap, not of
+    /// the public map underneath the composer. POIs are projected to this
+    /// person's check-ins so a shared landmark never leaks somebody else's
+    /// activity into a Bubble preview.
+    var myMapBubbleRecords: [UserMapRecord] {
+        let archive = environment.myMapArchive
+        let ownerID = archive.currentUserID
+
+        let reelRecords = archive.privateReels
+            .filter { $0.userId == ownerID }
+            .map { reel in
+                UserMapRecord(id: reel.id, timestamp: reel.createdAt, kind: .reel(reel))
+            }
+
+        let placeRecords = archive.privatePOIs.compactMap { rated -> UserMapRecord? in
+            let personalVisits = rated.checkIns.filter { $0.userId == ownerID }
+            guard let latestVisit = personalVisits.map(\.createdAt).max() else { return nil }
+
+            var personalPlace = rated
+            personalPlace.media = []
+            personalPlace.checkIns = personalVisits
+            personalPlace.comments = []
+            personalPlace.endorsements = .init(hype: 0, solid: 0, meh: 0, questionable: 0)
+            personalPlace.tags = []
+            personalPlace.favoritesCount = 0
+            return UserMapRecord(
+                id: personalPlace.id,
+                timestamp: latestVisit,
+                kind: .poi(personalPlace)
+            )
+        }
+
+        return (reelRecords + placeRecords)
+            .sorted { $0.timestamp > $1.timestamp }
+    }
+
+    func completePublishing(
+        _ draft: MapTalkPublishDraft,
+        audience: MapPublishAudience,
+        destination: MapTalkPublishDestination
+    ) -> Bool {
+        // Re-read the location at confirmation. The map may have been browsed
+        // elsewhere, but neither a Place nor a Reel inherits its coordinate.
+        guard let location = viewModel.publishLocation(for: destination) else {
+            environment.location.requestWhenInUse()
+            return false
+        }
+
+        switch draft {
+        case let .place(placeDraft):
+            guard let place = viewModel.publishPlace(
+                placeDraft,
+                at: location,
+                audience: audience
+            ) else {
+                // The person may have walked outside the nearby-place radius
+                // while composing. Keep the capture open in that case.
+                return false
+            }
+            if audience == .livePublic {
+                selectedRealId = nil
+                selectedStoryId = place.id
+            }
+
+        case let .reel(reelDraft):
+            guard let reel = viewModel.publishReel(
+                reelDraft,
+                at: location,
+                audience: audience
+            ) else {
+                return false
+            }
+            if audience == .livePublic {
+                selectedRealId = reel.id
+                selectedStoryId = reel.id
+            }
+        }
+
+        // The marker is the acknowledgement; publishing never moves the map.
+        pendingRegionCause = .other
+        reelAlignTrigger += 1
+        publishDestination = nil
+        return true
+    }
+
+    func requestPublish(_ destination: MapTalkPublishDestination) {
+        guard publishDestination == nil else { return }
+
+        if viewModel.publishLocation(for: destination) == nil {
+            // Both publishers open immediately. Location and nearby POIs can
+            // arrive while the person is already composing.
+            environment.location.requestWhenInUse()
+        }
+
+        centerMapOnLivePublishLocation(for: destination)
+
+        if experiencePresentation.isPresented {
+            // Native sheets cannot hand off cleanly to one another. Finish
+            // reading the current capsule first, then open the chosen creator.
+            queuedPublishDestination = destination
+            experiencePresentation.dismiss()
+        } else {
+            withAnimation(.easeOut(duration: 0.18)) {
+                publishDestination = destination
+            }
+        }
+    }
+
+    func requestActivity() {
+        guard isActivityPresented == false,
+              isActivityPresentationQueued == false,
+              publishDestination == nil else {
+            return
+        }
+
+        if experiencePresentation.isPresented {
+            // Close the map capsule before presenting Activity so there is
+            // never more than one modal competing for the same presenter.
+            isActivityPresentationQueued = true
+            experiencePresentation.dismiss()
+        } else {
+            isActivityPresented = true
+        }
+    }
+
+    func presentQueuedActivityIfNeeded() {
+        guard isActivityPresentationQueued else { return }
+        isActivityPresentationQueued = false
+
+        DispatchQueue.main.async {
+            guard publishDestination == nil else { return }
+            isActivityPresented = true
+        }
+    }
+
+    /// Browsing can look anywhere, but the publishing surface always opens
+    /// over the one place it represents: the device's live location. This is
+    /// deliberately an immediate recenter rather than a cinematic map flight.
+    func centerMapOnLivePublishLocation(for destination: MapTalkPublishDestination) {
+        guard let coordinate = viewModel.publishLocation(for: destination)?.coordinate else { return }
+        let region = MKCoordinateRegion(
+            center: coordinate,
+            span: currentRegion?.span ?? viewModel.region.span
+        )
+
+        flightController.cancelActiveTransition()
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            cameraPosition = .region(region)
+        }
+        currentRegion = region
+    }
+
+    func presentQueuedPublisherIfNeeded() {
+        guard let destination = queuedPublishDestination else { return }
+        queuedPublishDestination = nil
+
+        if viewModel.publishLocation(for: destination) == nil {
+            environment.location.requestWhenInUse()
+        }
+        withAnimation(.easeOut(duration: 0.18)) {
+            publishDestination = destination
+        }
+    }
+
     func journeyBoundingTarget(
         for journey: JourneyPost,
         size: CGSize,
@@ -697,6 +1056,15 @@ private extension MapTalkView {
             experiencePresentation.presentNewContent()
             return
         }
+
+        if shouldReturnToActivityAfterPreview {
+            journeyEntryStoryId = nil
+            focusedJourneyHeader = nil
+            activeExperience = nil
+            experiencePresentation.dismiss()
+            return
+        }
+
         focusedJourneyHeader = nil
         if journeyEntryStoryId == nil, currentJourney == nil {
             activeExperience = nil
@@ -736,6 +1104,52 @@ private struct MapTalkHandwrittenBadge: View {
             .font(handwritingFont.weight(.bold))
             .kerning(-0.8)
             .foregroundStyle(inkGradient)
+    }
+}
+
+private struct MapTalkActivityButton: View {
+    let unreadCount: Int
+    let action: () -> Void
+
+    private var badgeText: String {
+        unreadCount > 99 ? "99+" : unreadCount.formatted()
+    }
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: unreadCount > 0 ? "bell.fill" : "bell")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.black.opacity(0.84))
+                    .frame(width: 40, height: 40)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay {
+                        Circle()
+                            .stroke(Color.white.opacity(0.48), lineWidth: 1)
+                    }
+
+                if unreadCount > 0 {
+                    Text(badgeText)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, unreadCount > 9 ? 4 : 0)
+                        .frame(minWidth: 17, minHeight: 17)
+                        .background(Color.red, in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.white, lineWidth: 1.5)
+                        }
+                        .offset(x: 5, y: -4)
+                }
+            }
+            .shadow(color: Color.black.opacity(0.10), radius: 7, y: 3)
+        }
+        .buttonStyle(.plain)
+        .frame(width: 48, height: 48)
+        .contentShape(Rectangle())
+        .accessibilityLabel("Activity")
+        .accessibilityValue(unreadCount == 0 ? "No new messages" : "\(unreadCount) new messages")
+        .accessibilityIdentifier("maptalk.activity")
     }
 }
 
@@ -804,17 +1218,20 @@ private struct ProfileMapIdentityBadge: View {
 
 private struct MapTalkControls: View {
     let onTapLocate: () -> Void
-    let onTapRating: () -> Void
-    let onTapReal: () -> Void
+    let onTapPlace: () -> Void
+    let onTapReel: () -> Void
+    let showsPublishActions: Bool
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 12) {
             LocateButton(action: onTapLocate)
                 .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
-            RatingButton(action: onTapRating)
-                .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
-            RealButton(action: onTapReal)
-                .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+            if showsPublishActions {
+                PlacePublishButton(action: onTapPlace)
+                    .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+                ReelPublishButton(action: onTapReel)
+                    .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+            }
         }
     }
 }

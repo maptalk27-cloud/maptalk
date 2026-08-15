@@ -112,6 +112,7 @@ final class UserMapViewModel: ObservableObject {
     private let environment: AppEnvironment
     private let context: Context
     private let dataScope: DataScope
+    private var archiveCancellables = Set<AnyCancellable>()
 
     init(
         environment: AppEnvironment,
@@ -122,11 +123,51 @@ final class UserMapViewModel: ObservableObject {
         self.context = context
         self.dataScope = dataScope
         self.identity = Identity(user: context.user, isCurrentUser: context.isCurrentUser)
-        loadSnapshot()
+        if usesSharedPrivateArchive {
+            bindPrivateArchive()
+        } else {
+            loadSnapshot()
+        }
     }
 
     func refresh() {
-        loadSnapshot()
+        if usesSharedPrivateArchive {
+            applyPrivateArchive(
+                pois: environment.myMapArchive.privatePOIs,
+                reels: environment.myMapArchive.privateReels,
+                bubbles: environment.myMapArchive.privateBubbleCatalog,
+                folders: environment.myMapArchive.journeyFolders
+            )
+        } else {
+            loadSnapshot()
+        }
+    }
+
+    private var usesSharedPrivateArchive: Bool {
+        context.isCurrentUser && dataScope == .privateArchive
+    }
+
+    /// MyMap is the private archive's projection, not a second local copy.
+    /// Keeping this subscription here means a publish made from MapTalk appears
+    /// in MyMap immediately, while friend and public-profile screens retain
+    /// their existing static-preview behavior.
+    private func bindPrivateArchive() {
+        let archive = environment.myMapArchive
+        Publishers.CombineLatest4(
+            archive.$privatePOIs,
+            archive.$privateReels,
+            archive.$privateBubbleCatalog,
+            archive.$journeyFolders
+        )
+        .sink { [weak self] pois, reels, bubbles, folders in
+            self?.applyPrivateArchive(
+                pois: pois,
+                reels: reels,
+                bubbles: bubbles,
+                folders: folders
+            )
+        }
+        .store(in: &archiveCancellables)
     }
 
     private func loadSnapshot() {
@@ -184,6 +225,57 @@ final class UserMapViewModel: ObservableObject {
         }
     }
 
+    private func applyPrivateArchive(
+        pois: [RatedPOI],
+        reels: [RealPost],
+        bubbles: [JourneyPost],
+        folders: [JourneyFolder]
+    ) {
+        let currentUserID = environment.myMapArchive.currentUserID
+        let matchedFootprints = pois.compactMap { rated -> Footprint? in
+            let personalVisits = rated.checkIns.filter { $0.userId == currentUserID }
+            guard personalVisits.isEmpty == false else { return nil }
+
+            // A POI can be shared publicly, but MyMap must never turn other
+            // people's visits, media, or activity into the owner's history.
+            // Keep the shared landmark metadata and project only this person's
+            // check-ins into the private timeline.
+            var personalPOI = rated
+            personalPOI.checkIns = personalVisits
+            personalPOI.media = []
+            personalPOI.comments = []
+            personalPOI.endorsements = .init(hype: 0, solid: 0, meh: 0, questionable: 0)
+            personalPOI.tags = personalTagStats(from: personalVisits)
+            personalPOI.favoritesCount = 0
+            return Footprint(ratedPOI: personalPOI, visits: personalVisits)
+        }
+
+        footprints = matchedFootprints
+            .sorted { ($0.latestVisit ?? .distantPast) > ($1.latestVisit ?? .distantPast) }
+        self.reels = reels.sorted { $0.createdAt > $1.createdAt }
+        journeyCatalog = bubbles + environment.myMapArchive.legacyJourneyCatalog
+        journeyFolders = folders
+
+        summary = Summary(
+            footprintCount: matchedFootprints.count,
+            reelCount: reels.count,
+            categoryCount: Set(matchedFootprints.map { $0.category }).count
+        )
+
+        persona = Persona(
+            baseCity: "Seattle, WA",
+            bio: personaBio(for: identity.user),
+            mood: personaMood(for: identity.user),
+            interests: topTags(from: matchedFootprints)
+        )
+
+        if let region = Self.region(for: matchedFootprints) {
+            mapRegion = region
+        } else {
+            mapRegion = Self.defaultRegion
+        }
+    }
+
     private func loadFeed(_ feed: PreviewData.ChengsiMock) {
         let ratedForProfile = PreviewData.profileRatedPOIs(for: feed.user, customPOIs: feed.pois)
         let matchedFootprints: [Footprint] = ratedForProfile.map { rated in
@@ -225,65 +317,30 @@ final class UserMapViewModel: ObservableObject {
         memberReferences: [JourneyFolder.MemberReference] = []
     ) -> JourneyFolder? {
         guard canEditJourneyFolders else { return nil }
-
-        let now = Date()
-        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let folder = JourneyFolder(
-            userId: identity.user.id,
-            title: cleanTitle.isEmpty ? "Untitled Collection" : cleanTitle,
-            memberReferences: memberReferences,
-            createdAt: now,
-            updatedAt: now
+        return environment.myMapArchive.createJourneyFolder(
+            title: title,
+            memberReferences: memberReferences
         )
-        journeyFolders.insert(folder, at: 0)
-        return folder
     }
 
     /// Saves a local folder without touching the original Reel or POI.
     func saveJourneyFolder(_ folder: JourneyFolder) {
-        guard canEditJourneyFolders,
-              let index = journeyFolders.firstIndex(where: { $0.id == folder.id }) else {
+        guard canEditJourneyFolders else {
             return
         }
-
-        var updated = folder
-        let cleanTitle = updated.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        updated.title = cleanTitle.isEmpty ? "Untitled Collection" : cleanTitle
-        updated.updatedAt = Date()
-        journeyFolders[index] = updated
+        _ = environment.myMapArchive.saveJourneyFolder(folder)
     }
 
     func deleteJourneyFolder(id: UUID) {
         guard canEditJourneyFolders else { return }
-        journeyFolders.removeAll { $0.id == id }
+        environment.myMapArchive.deleteJourneyFolder(id: id)
     }
 
     /// Removes a memory from the private MyMap archive only. It deliberately
     /// does not mutate a published Reel or public POI elsewhere in the app.
     func removeFromMyMap(_ reference: JourneyFolder.MemberReference) {
         guard canEditJourneyFolders else { return }
-
-        switch reference {
-        case let .reel(id):
-            reels.removeAll { $0.id == id }
-        case let .poi(id):
-            footprints.removeAll { $0.id == id }
-        }
-
-        journeyFolders = journeyFolders.map { folder in
-            var updated = folder
-            updated.memberReferences.removeAll { $0 == reference }
-            if updated.memberReferences.count != folder.memberReferences.count {
-                updated.updatedAt = Date()
-            }
-            return updated
-        }
-
-        summary = Summary(
-            footprintCount: footprints.count,
-            reelCount: reels.count,
-            categoryCount: Set(footprints.map { $0.category }).count
-        )
+        environment.myMapArchive.removeFromPrivateArchive(reference)
     }
 
     private func personaBio(for user: User) -> String {
@@ -291,6 +348,18 @@ final class UserMapViewModel: ObservableObject {
             return "Sketching neon detours & POI reels in realtime."
         }
         return "@\(user.handle) shares their favorite detours and reels here."
+    }
+
+    private func personalTagStats(
+        from visits: [RatedPOI.CheckIn]
+    ) -> [RatedPOI.TagStat] {
+        let counts = visits.reduce(into: [VisitTag: Int]()) { result, visit in
+            guard let tag = visit.tag else { return }
+            result[tag, default: 0] += 1
+        }
+        return counts
+            .sorted { $0.value > $1.value }
+            .map { .init(tag: $0.key, count: $0.value) }
     }
 
     private func personaMood(for user: User) -> String {

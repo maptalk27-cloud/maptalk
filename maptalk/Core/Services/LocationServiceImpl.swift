@@ -11,6 +11,7 @@ final class LocationServiceImpl: NSObject, LocationService, CLLocationManagerDel
         super.init()
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
+        authorization.send(manager.authorizationStatus)
     }
 
     func requestWhenInUse() {
@@ -26,4 +27,3 @@ final class LocationServiceImpl: NSObject, LocationService, CLLocationManagerDel
         location.send(locations.last)
     }
 }
-

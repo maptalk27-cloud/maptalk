@@ -1194,6 +1194,8 @@ private struct UserMapListCard: View {
             return [Color.black, Theme.neonAccent.opacity(0.25)]
         case .anonymous:
             return [Color.black, Theme.neonWarning.opacity(0.25)]
+        case .privateOnly:
+            return [Color.black, Color.white.opacity(0.12)]
         }
     }
 

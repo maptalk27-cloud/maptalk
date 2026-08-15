@@ -1,9 +1,35 @@
 import Combine
+import CoreLocation
 import Foundation
 import MapKit
 
+/// One consumer-facing landmark choice. Public directory data, friends'
+/// public check-ins, and the person's private MyMap copy are provenance for
+/// the same place, not three duplicate rows in the picker.
+struct MapTalkNearbyPlaceOption: Identifiable {
+    let place: RatedPOI
+    let distanceMeters: CLLocationDistance
+    let isPublicDirectoryPlace: Bool
+    let isInMyMap: Bool
+    let friendUsers: [User]
+    /// Distinct people in public check-ins. This intentionally excludes the
+    /// person's private MyMap history.
+    let publicVisitorCount: Int
+
+    var id: UUID { place.id }
+}
+
 @MainActor
 final class MapTalkViewModel: ObservableObject {
+    /// A normal list stays within roughly one block. GPS accuracy and venue
+    /// centroids get a little breathing room, while a sparse list can quietly
+    /// fill to 150 m. We never expand to the old 250 m neighborhood search.
+    private static let minimumPlaceSelectionRadius: CLLocationDistance = 90
+    private static let maximumPrimaryPlaceSelectionRadius: CLLocationDistance = 120
+    private static let fallbackPlaceSelectionRadius: CLLocationDistance = 150
+    private static let minimumNearbyPlaceCount = 3
+    private static let maximumNearbyPlaceCount = 6
+
     enum Scope {
         case global
         case user(User)
@@ -26,12 +52,25 @@ final class MapTalkViewModel: ObservableObject {
     @Published var ratedPOIs: [RatedPOI] = []
     @Published var reals: [RealPost] = []
     @Published var userCoordinate: CLLocationCoordinate2D?
+    /// The unprojected device reading is kept alongside the coordinate so a
+    /// publish can reject a stale or invalid location instead of silently
+    /// falling back to wherever the map happened to be browsing.
+    @Published private(set) var liveLocation: CLLocation?
+    @Published private(set) var locationAuthorization: CLAuthorizationStatus
+    @Published private(set) var isLoadingNearbyPlaces = true
 
     let scope: Scope
     private let environment: AppEnvironment
+    private var repositoryPOIs: [RatedPOI] = []
+    @Published private var nearbyDirectoryPOIs: [RatedPOI] = []
+    private var repositoryReals: [RealPost] = []
+    private var publishedPOIOverlays: [RatedPOI] = []
+    private var publishedReelOverlays: [RealPost] = []
+    private var cancellables = Set<AnyCancellable>()
     init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
         self.scope = scope
+        locationAuthorization = environment.location.authorization.value
         switch scope {
         case .global:
             bind()
@@ -59,6 +98,14 @@ final class MapTalkViewModel: ObservableObject {
         return PreviewData.user(for: id)
     }
 
+    /// MapTalk exposes only snapshots attached to public Reels. Private Bubble
+    /// snapshots remain reachable from MyMap through its own provider.
+    func journey(for id: UUID) -> JourneyPost? {
+        environment.myMapArchive.publicBubbleCatalog.first { $0.id == id }
+            ?? environment.myMapArchive.legacyJourneyCatalog.first { $0.id == id }
+            ?? PreviewData.journey(for: id)
+    }
+
     var isUserScope: Bool {
         if case .user = scope {
             return true
@@ -71,6 +118,23 @@ final class MapTalkViewModel: ObservableObject {
             return user
         }
         return nil
+    }
+
+    /// Keep the last accuracy-bearing device reading while Core Location
+    /// refreshes in the background. A stationary device (and especially a
+    /// Simulator fixed location) may not emit a new sample every few seconds;
+    /// expiring the value by timestamp made the composer fall back to an
+    /// endless "Locating" state even though its nearby results were valid.
+    var publishableLiveLocation: CLLocation? {
+        guard let liveLocation,
+              liveLocation.horizontalAccuracy >= 0 else {
+            return nil
+        }
+        return liveLocation
+    }
+
+    func publishLocation(for _: MapTalkPublishDestination) -> CLLocation? {
+        publishableLiveLocation
     }
 
     func region(for real: RealPost) -> MKCoordinateRegion {
@@ -109,27 +173,328 @@ final class MapTalkViewModel: ObservableObject {
         region = region(for: journey)
     }
 
+    /// The POI's content belongs to a check-in, rather than becoming a second
+    /// standalone landmark. Selecting an existing landmark therefore adds one
+    /// new check-in to that POI; it never creates a duplicate pin.
+    @discardableResult
+    func publishPlace(
+        _ draft: MapTalkPlaceDraft,
+        at location: CLLocation,
+        audience: MapPublishAudience
+    ) -> RatedPOI? {
+        let hasMedia = draft.media != nil
+        let newCheckIn = RatedPOI.CheckIn(
+            userId: environment.myMapArchive.currentUserID,
+            endorsement: hasMedia ? .solid : nil,
+            media: draft.media.map { [$0] } ?? [],
+            tag: hasMedia ? .explore : nil
+        )
+
+        let privatePlace: RatedPOI
+        let publicPlace: RatedPOI?
+        switch draft.target {
+        case let .existing(existing):
+            let landmarkLocation = CLLocation(
+                latitude: existing.poi.coordinate.latitude,
+                longitude: existing.poi.coordinate.longitude
+            )
+            // A person can select a sparse-list fallback, so submission uses
+            // the same hard ceiling as the picker rather than its usual
+            // tighter radius.
+            guard landmarkLocation.distance(from: location) <= Self.fallbackPlaceSelectionRadius else {
+                return nil
+            }
+
+            privatePlace = appending(newCheckIn, to: existing)
+            publicPlace = audience == .livePublic
+                ? appending(
+                    newCheckIn,
+                    to: publicPOI(withID: existing.id)
+                        ?? emptyPublicPOI(for: existing.poi)
+                )
+                : nil
+
+        case let .new(name, category):
+            let poi = POI(
+                id: UUID(),
+                name: name,
+                coordinate: location.coordinate,
+                category: category
+            )
+            let created = RatedPOI(
+                poi: poi,
+                highlight: nil,
+                secondary: "Added by you",
+                media: [],
+                checkIns: [newCheckIn],
+                comments: [],
+                endorsements: .init(hype: 0, solid: hasMedia ? 1 : 0, meh: 0, questionable: 0),
+                tags: hasMedia ? [.init(tag: .explore, count: 1)] : [],
+                isFavoritedByCurrentUser: true,
+                favoritesCount: 1
+            )
+            privatePlace = created
+            publicPlace = audience == .livePublic
+                ? RatedPOI(
+                    poi: poi,
+                    highlight: nil,
+                    secondary: nil,
+                    media: [],
+                    checkIns: [newCheckIn],
+                    comments: [],
+                    endorsements: .init(
+                        hype: 0,
+                        solid: hasMedia ? 1 : 0,
+                        meh: 0,
+                        questionable: 0
+                    ),
+                    tags: hasMedia ? [.init(tag: .explore, count: 1)] : [],
+                    isFavoritedByCurrentUser: false,
+                    favoritesCount: 0
+                )
+                : nil
+        }
+
+        return environment.myMapArchive.savePOI(
+            privatePlace,
+            publicVersion: publicPlace,
+            audience: audience
+        )
+    }
+
+    @discardableResult
+    func publishReel(
+        _ draft: MapTalkReelDraft,
+        at location: CLLocation,
+        audience: MapPublishAudience
+    ) -> RealPost? {
+        let now = Date.now
+        let bubble = draft.bubbleSource.flatMap {
+            makeBubbleSnapshot(
+                from: $0,
+                at: location.coordinate,
+                createdAt: now,
+                audience: audience
+            )
+        }
+        guard draft.bubbleSource == nil || bubble != nil else { return nil }
+
+        let reel = RealPost(
+            id: UUID(),
+            userId: environment.myMapArchive.currentUserID,
+            center: location.coordinate,
+            radiusMeters: 220,
+            message: draft.text.isEmpty ? nil : draft.text,
+            // The composer already caps selection at nine. Keep the model
+            // boundary defensive so future callers cannot create an
+            // unexpectedly heavy map Reel.
+            attachments: Array(draft.attachments.prefix(9)),
+            capsuleId: bubble?.id,
+            likes: [],
+            comments: [],
+            visibility: audience == .livePublic ? .publicAll : .privateOnly,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(24 * 60 * 60)
+        )
+
+        if let bubble {
+            environment.myMapArchive.saveBubble(bubble, audience: audience)
+        }
+        return environment.myMapArchive.saveReel(reel, audience: audience)
+    }
+
+    /// A Folder is a private editing tool; a Bubble attached to a Reel is a
+    /// frozen publication snapshot. Copying the selected memories here keeps a
+    /// later Folder rename, edit, or deletion from changing an existing Reel.
+    private func makeBubbleSnapshot(
+        from source: MapTalkReelBubbleSource,
+        at coordinate: CLLocationCoordinate2D,
+        createdAt: Date,
+        audience: MapPublishAudience
+    ) -> JourneyPost? {
+        let archive = environment.myMapArchive
+        let references: [JourneyFolder.MemberReference]
+        let title: String
+
+        switch source {
+        case let .memories(selectedReferences):
+            references = unique(selectedReferences)
+            title = "Bubble"
+
+        case let .folder(folderID):
+            guard let folder = archive.journeyFolders.first(where: {
+                $0.id == folderID && $0.userId == archive.currentUserID
+            }) else {
+                return nil
+            }
+            references = unique(folder.memberReferences)
+            title = folder.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "Bubble"
+                : folder.title
+
+        }
+
+        var reels: [RealPost] = []
+        var places: [RatedPOI] = []
+        for reference in references {
+            switch reference {
+            case let .reel(id):
+                guard var reel = archive.privateReels.first(where: {
+                    $0.id == id && $0.userId == archive.currentUserID
+                }) else { continue }
+                // V1 Bubbles do not recursively publish another attached
+                // Bubble. The selected Reel itself remains intact in MyMap.
+                reel.capsuleId = nil
+                reel.likes = []
+                reel.comments = []
+                reel.visibility = audience == .livePublic ? .publicAll : .privateOnly
+                reels.append(reel)
+
+            case let .poi(id):
+                guard let place = archive.privatePOIs.first(where: { $0.id == id }),
+                      let personalPlace = personalBubbleProjection(of: place) else {
+                    continue
+                }
+                places.append(personalPlace)
+            }
+        }
+
+        guard reels.isEmpty == false || places.isEmpty == false else { return nil }
+        return JourneyPost(
+            id: UUID(),
+            userId: archive.currentUserID,
+            title: title,
+            content: "",
+            coordinate: coordinate,
+            createdAt: createdAt,
+            orderedMemberReferences: references,
+            reels: reels,
+            pois: places,
+            likes: [],
+            comments: []
+        )
+    }
+
+    private func personalBubbleProjection(of rated: RatedPOI) -> RatedPOI? {
+        let personalVisits = rated.checkIns.filter {
+            $0.userId == environment.myMapArchive.currentUserID
+        }
+        guard personalVisits.isEmpty == false else { return nil }
+
+        var result = rated
+        result.media = []
+        result.checkIns = personalVisits
+        result.comments = []
+        result.endorsements = .init(hype: 0, solid: 0, meh: 0, questionable: 0)
+        result.tags = personalTagStats(from: personalVisits)
+        result.favoritesCount = 0
+        return result
+    }
+
+    private func personalTagStats(
+        from visits: [RatedPOI.CheckIn]
+    ) -> [RatedPOI.TagStat] {
+        let counts = visits.reduce(into: [VisitTag: Int]()) { result, visit in
+            guard let tag = visit.tag else { return }
+            result[tag, default: 0] += 1
+        }
+        return counts
+            .sorted { $0.value > $1.value }
+            .map { .init(tag: $0.key, count: $0.value) }
+    }
+
+    private func unique(
+        _ references: [JourneyFolder.MemberReference]
+    ) -> [JourneyFolder.MemberReference] {
+        references.reduce(into: []) { result, reference in
+            if result.contains(reference) == false {
+                result.append(reference)
+            }
+        }
+    }
+
     private func bind() {
-        let coordinateStream = environment.location.location
-            .compactMap { $0?.coordinate }
-            .share()
-
-        coordinateStream
-            .map(Optional.init)
+        environment.location.authorization
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .assign(to: &$userCoordinate)
+            .sink { [weak self] status in
+                self?.locationAuthorization = status
+            }
+            .store(in: &cancellables)
 
-        coordinateStream
+        // `location` is a CurrentValueSubject. Keep direct subscriptions so
+        // every branch receives its current value; `share()` would not replay
+        // that value to subscribers attached after the first sink connects.
+        let locationStream = environment.location.location
+
+        locationStream
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] location in
+                self?.liveLocation = location
+                self?.userCoordinate = location?.coordinate
+            }
+            .store(in: &cancellables)
+
+        locationStream
+            .compactMap { $0?.coordinate }
             .flatMap { [environment] coordinate in
                 environment.poiRepo.near(coordinate)
             }
             .receive(on: DispatchQueue.main)
-            .assign(to: &$ratedPOIs)
+            .sink { [weak self] pois in
+                guard let self else { return }
+                self.repositoryPOIs = pois
+                self.rebuildVisibleContent()
+            }
+            .store(in: &cancellables)
+
+        locationStream
+            .compactMap { $0?.coordinate }
+            .removeDuplicates { previous, next in
+                previous.distance(to: next) < 10
+            }
+            .handleEvents(receiveOutput: { [weak self] _ in
+                self?.isLoadingNearbyPlaces = true
+            })
+            .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
+            .map { [environment] coordinate in
+                environment.nearbyPOIRepo.near(coordinate)
+            }
+            .switchToLatest()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] places in
+                self?.nearbyDirectoryPOIs = places
+                self?.isLoadingNearbyPlaces = false
+            }
+            .store(in: &cancellables)
+
+        environment.myMapArchive.$publicPOIOverlays
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] overlays in
+                guard let self else { return }
+                publishedPOIOverlays = overlays
+                rebuildVisibleContent()
+            }
+            .store(in: &cancellables)
+
+        environment.myMapArchive.$publicReelOverlays
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] overlays in
+                guard let self else { return }
+                publishedReelOverlays = overlays
+                rebuildVisibleContent()
+            }
+            .store(in: &cancellables)
 
         environment.realRepo
             .active(in: nil)
             .receive(on: DispatchQueue.main)
-            .assign(to: &$reals)
+            .sink { [weak self] reals in
+                guard let self else { return }
+                self.repositoryReals = reals
+                self.rebuildVisibleContent()
+            }
+            .store(in: &cancellables)
     }
 
     private func loadUserScope(for user: User) {
@@ -137,10 +502,288 @@ final class MapTalkViewModel: ObservableObject {
             environment: environment,
             context: .profileContext(for: user)
         )
-        ratedPOIs = snapshot.footprints.map(\.ratedPOI)
-        reals = snapshot.reels
+        repositoryPOIs = snapshot.footprints.map(\.ratedPOI)
+        repositoryReals = snapshot.reels
+        rebuildVisibleContent()
         userCoordinate = nil
+        liveLocation = nil
         region = snapshot.mapRegion
+    }
+
+    private func rebuildVisibleContent() {
+        ratedPOIs = merge(publishedPOIOverlays, with: repositoryPOIs)
+        reals = merge(publishedReelOverlays, with: repositoryReals)
+    }
+
+    /// POI selection is intentionally proximity-based, not map-visible based.
+    /// Map browsing might be on another continent; the nearby radius is always
+    /// measured against the device reading used to publish. The returned
+    /// choices retain where each landmark came from so the picker can add
+    /// useful social context without duplicating one POI into several lists.
+    func nearbyPlaceOptions(
+        near location: CLLocation,
+        withinMeters radius: CLLocationDistance? = nil
+    ) -> [MapTalkNearbyPlaceOption] {
+        let primaryRadius = radius ?? Self.primaryPlaceSelectionRadius(for: location)
+        let fallbackRadius = radius ?? Self.fallbackPlaceSelectionRadius
+        let directoryIDs = Set(nearbyDirectoryPOIs.map(\.id))
+        let archivedIDs = Set(environment.myMapArchive.privatePOIs.map(\.id))
+        let friendDirectory = PreviewData.sampleFriends.reduce(into: [UUID: User]()) {
+            $0[$1.id] = $1
+        }
+
+        // Keep public social history separate from MyMap so a private check-in
+        // can never be presented as friend activity.
+        var publicSocialCandidates: [UUID: RatedPOI] = [:]
+        for place in repositoryPOIs {
+            if let existing = publicSocialCandidates[place.id] {
+                publicSocialCandidates[place.id] = mergedPOI(
+                    publicVersion: existing,
+                    archivedVersion: place
+                )
+            } else {
+                publicSocialCandidates[place.id] = place
+            }
+        }
+        for overlay in publishedPOIOverlays {
+            if let existing = publicSocialCandidates[overlay.id] {
+                publicSocialCandidates[overlay.id] = mergedPOI(
+                    publicVersion: overlay,
+                    archivedVersion: existing
+                )
+            } else {
+                publicSocialCandidates[overlay.id] = overlay
+            }
+        }
+
+        // Apple directory results and social POIs share one canonical list.
+        // A reducer is intentional here: Dictionary(uniqueKeysWithValues:)
+        // would crash if any provider ever returned a duplicate canonical ID.
+        var publicCandidates: [UUID: RatedPOI] = [:]
+        for place in nearbyDirectoryPOIs {
+            if let existing = publicCandidates[place.id] {
+                publicCandidates[place.id] = mergedPOI(
+                    publicVersion: existing,
+                    archivedVersion: place
+                )
+            } else {
+                publicCandidates[place.id] = place
+            }
+        }
+        for socialPlace in publicSocialCandidates.values {
+            if let existing = publicCandidates[socialPlace.id] {
+                publicCandidates[socialPlace.id] = mergedPOI(
+                    publicVersion: socialPlace,
+                    archivedVersion: existing
+                )
+            } else {
+                publicCandidates[socialPlace.id] = socialPlace
+            }
+        }
+
+        var candidates = publicCandidates
+
+        for archived in environment.myMapArchive.privatePOIs {
+            if let publicVersion = candidates[archived.id] {
+                candidates[archived.id] = mergedPOI(
+                    publicVersion: publicVersion,
+                    archivedVersion: archived
+                )
+            } else {
+                candidates[archived.id] = archived
+            }
+        }
+
+        let sorted = candidates.values
+            .compactMap { rated -> MapTalkNearbyPlaceOption? in
+                let candidate = CLLocation(
+                    latitude: rated.poi.coordinate.latitude,
+                    longitude: rated.poi.coordinate.longitude
+                )
+                let distance = candidate.distance(from: location)
+                guard distance <= fallbackRadius else { return nil }
+
+                // Social proof is derived only from publicly visible source
+                // data. Never infer it from the merged private MyMap copy.
+                let publicCheckIns = publicSocialCandidates[rated.id]?.checkIns ?? []
+                let publicVisitorCount = Set(publicCheckIns.map(\.userId)).count
+                var seenFriendIDs = Set<UUID>()
+                let friends = publicCheckIns
+                    .sorted { $0.createdAt > $1.createdAt }
+                    .compactMap { checkIn -> User? in
+                        guard let friend = friendDirectory[checkIn.userId],
+                              seenFriendIDs.insert(friend.id).inserted else {
+                            return nil
+                        }
+                        return friend
+                    }
+
+                return MapTalkNearbyPlaceOption(
+                    place: rated,
+                    distanceMeters: distance,
+                    isPublicDirectoryPlace: directoryIDs.contains(rated.id),
+                    isInMyMap: archivedIDs.contains(rated.id),
+                    friendUsers: friends,
+                    publicVisitorCount: publicVisitorCount
+                )
+            }
+            .sorted { lhs, rhs in
+                if abs(lhs.distanceMeters - rhs.distanceMeters) > 0.5 {
+                    return lhs.distanceMeters < rhs.distanceMeters
+                }
+                if lhs.isInMyMap != rhs.isInMyMap {
+                    return lhs.isInMyMap
+                }
+                if lhs.friendUsers.isEmpty != rhs.friendUsers.isEmpty {
+                    return lhs.friendUsers.isEmpty == false
+                }
+                return lhs.place.poi.name.localizedCaseInsensitiveCompare(rhs.place.poi.name) == .orderedAscending
+            }
+
+        return Self.curatedNearbyPlaces(
+            from: sorted,
+            primaryRadius: primaryRadius
+        )
+    }
+
+    /// Good GPS usually resolves to 90-100 m here; poorer readings can widen
+    /// the primary list a little, but never beyond 120 m.
+    private static func primaryPlaceSelectionRadius(for location: CLLocation) -> CLLocationDistance {
+        let accuracy = location.horizontalAccuracy.isFinite && location.horizontalAccuracy >= 0
+            ? location.horizontalAccuracy
+            : 10
+        return min(
+            maximumPrimaryPlaceSelectionRadius,
+            max(minimumPlaceSelectionRadius, 80 + accuracy)
+        )
+    }
+
+    /// Preserve the four physically closest choices, then reserve up to two
+    /// slots for nearby places with friend or MyMap context. This keeps the
+    /// selector accurate without letting six anonymous directory results hide
+    /// the one place that already means something to the person.
+    private static func curatedNearbyPlaces(
+        from sorted: [MapTalkNearbyPlaceOption],
+        primaryRadius: CLLocationDistance
+    ) -> [MapTalkNearbyPlaceOption] {
+        let primary = sorted.filter { $0.distanceMeters <= primaryRadius }
+        var selected = Array(primary.prefix(4))
+        var selectedIDs = Set(selected.map(\.id))
+
+        for option in sorted where selected.count < maximumNearbyPlaceCount {
+            guard selectedIDs.contains(option.id) == false,
+                  option.friendUsers.isEmpty == false || option.isInMyMap else {
+                continue
+            }
+            selected.append(option)
+            selectedIDs.insert(option.id)
+        }
+
+        let minimumCount = min(minimumNearbyPlaceCount, sorted.count)
+        for option in sorted where selected.count < maximumNearbyPlaceCount {
+            guard selectedIDs.contains(option.id) == false,
+                  option.distanceMeters <= primaryRadius || selected.count < minimumCount else { continue }
+            selected.append(option)
+            selectedIDs.insert(option.id)
+        }
+
+        return selected.sorted { lhs, rhs in
+            if abs(lhs.distanceMeters - rhs.distanceMeters) > 0.5 {
+                return lhs.distanceMeters < rhs.distanceMeters
+            }
+            return lhs.place.poi.name.localizedCaseInsensitiveCompare(rhs.place.poi.name) == .orderedAscending
+        }
+    }
+
+    /// The world map carries other people's history; MyMap carries the
+    /// current person's history. When the same POI exists in both sources,
+    /// retain the public landmark's metadata while unioning check-ins by ID so
+    /// a second private attachment never overwrites the first one.
+    private func mergedPOI(
+        publicVersion: RatedPOI,
+        archivedVersion: RatedPOI
+    ) -> RatedPOI {
+        var merged = publicVersion
+        let publicCheckInIDs = Set(publicVersion.checkIns.map(\.id))
+        let archiveOnlyCheckIns = archivedVersion.checkIns.filter {
+            publicCheckInIDs.contains($0.id) == false
+        }
+        merged.checkIns = archiveOnlyCheckIns + publicVersion.checkIns
+
+        let publicMediaIDs = Set(publicVersion.media.map(\.id))
+        merged.media = archivedVersion.media.filter { publicMediaIDs.contains($0.id) == false } + publicVersion.media
+        return merged
+    }
+
+    /// Returns only data that is already public. `nearbyPlaceOptions`
+    /// deliberately merges MyMap history for the picker, so its `place`
+    /// cannot be reused as the base of a public projection.
+    private func publicPOI(withID id: UUID) -> RatedPOI? {
+        let sources = [
+            nearbyDirectoryPOIs.first { $0.id == id },
+            repositoryPOIs.first { $0.id == id },
+            environment.myMapArchive.publicPOIOverlays.first { $0.id == id }
+        ].compactMap { $0 }
+
+        guard var result = sources.first else { return nil }
+        for source in sources.dropFirst() {
+            result = mergedPOI(
+                publicVersion: source,
+                archivedVersion: result
+            )
+        }
+        return result
+    }
+
+    private func emptyPublicPOI(for poi: POI) -> RatedPOI {
+        RatedPOI(
+            poi: poi,
+            highlight: nil,
+            secondary: "Added by you",
+            media: [],
+            checkIns: [],
+            comments: [],
+            endorsements: .init(hype: 0, solid: 0, meh: 0, questionable: 0),
+            tags: [],
+            isFavoritedByCurrentUser: false,
+            favoritesCount: 0
+        )
+    }
+
+    private func appending(
+        _ checkIn: RatedPOI.CheckIn,
+        to place: RatedPOI
+    ) -> RatedPOI {
+        var updated = place
+        updated.checkIns.insert(checkIn, at: 0)
+
+        switch checkIn.endorsement {
+        case .hype:
+            updated.endorsements.hype += 1
+        case .solid:
+            updated.endorsements.solid += 1
+        case .meh:
+            updated.endorsements.meh += 1
+        case .questionable:
+            updated.endorsements.questionable += 1
+        case nil:
+            break
+        }
+
+        if let tag = checkIn.tag {
+            if let tagIndex = updated.tags.firstIndex(where: { $0.tag == tag }) {
+                updated.tags[tagIndex].count += 1
+            } else {
+                updated.tags.append(.init(tag: tag, count: 1))
+            }
+        }
+        return updated
+    }
+
+    private func merge<Item: Identifiable>(_ local: [Item], with repository: [Item]) -> [Item]
+    where Item.ID: Hashable {
+        let localIDs = Set(local.map(\.id))
+        return local + repository.filter { localIDs.contains($0.id) == false }
     }
 
     private func regionAround(

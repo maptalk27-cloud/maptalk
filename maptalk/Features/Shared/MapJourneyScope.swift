@@ -20,7 +20,14 @@ struct MapJourneyScope {
     ) {
         self.journey = journey
         self.userProvider = userProvider
-        storyItems = MapStoryFeed.items(for: journey, userProvider: userProvider)
+        if journey.orderedMemberReferences.isEmpty {
+            storyItems = MapStoryFeed.items(for: journey, userProvider: userProvider)
+        } else {
+            storyItems = Self.orderedStoryItems(
+                for: journey,
+                userProvider: userProvider
+            )
+        }
     }
 
     /// Some Journey scopes are private, hand-arranged folders. They use the
@@ -58,6 +65,30 @@ struct MapJourneyScope {
 
     func storyItem(for id: UUID) -> RealStoriesRow.StoryItem? {
         storyItems.first { $0.id == id }
+    }
+
+    private static func orderedStoryItems(
+        for journey: JourneyPost,
+        userProvider: (UUID) -> User?
+    ) -> [RealStoriesRow.StoryItem] {
+        journey.orderedMemberReferences.compactMap { reference in
+            switch reference {
+            case let .reel(id):
+                guard let reel = journey.reels.first(where: { $0.id == id }) else { return nil }
+                return RealStoriesRow.StoryItem(real: reel)
+
+            case let .poi(id):
+                guard let place = journey.pois.first(where: { $0.id == id }),
+                      let group = MapStoryFeed.poiGroup(
+                        for: place,
+                        onlyRecentStories: false,
+                        userProvider: userProvider
+                      ) else {
+                    return nil
+                }
+                return RealStoriesRow.StoryItem(poiGroup: group)
+            }
+        }
     }
 }
 

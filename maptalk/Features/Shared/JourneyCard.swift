@@ -275,25 +275,52 @@ struct JourneyAvatarStack: View {
 
     private var sortedEvents: [JourneyStackEvent] {
         let reelEvents = (reels ?? journey.reels).map { reel in
-            JourneyStackEvent(
-                id: reel.id,
-                date: reel.createdAt,
-                kind: .reel(reel, userProvider(reel.userId))
+            (
+                reference: JourneyFolder.MemberReference.reel(reel.id),
+                event: JourneyStackEvent(
+                    id: reel.id,
+                    date: reel.createdAt,
+                    kind: .reel(reel, userProvider(reel.userId))
+                )
             )
         }
         let poiEvents = (pois ?? journey.pois).map { poi in
-            JourneyStackEvent(
-                id: poi.id,
-                date: poi.checkIns.map(\.createdAt).max() ?? journey.createdAt,
-                kind: .poi(poi)
+            (
+                reference: JourneyFolder.MemberReference.poi(poi.id),
+                event: JourneyStackEvent(
+                    id: poi.id,
+                    date: poi.checkIns.map(\.createdAt).max() ?? journey.createdAt,
+                    kind: .poi(poi)
+                )
             )
         }
-        return (reelEvents + poiEvents).sorted { lhs, rhs in
-            if lhs.date == rhs.date {
-                return lhs.id.uuidString < rhs.id.uuidString
+        let entries = reelEvents + poiEvents
+        let chronological: ([JourneyStackEvent]) -> [JourneyStackEvent] = { events in
+            events.sorted { lhs, rhs in
+                if lhs.date == rhs.date {
+                    return lhs.id.uuidString < rhs.id.uuidString
+                }
+                return lhs.date > rhs.date
             }
-            return lhs.date > rhs.date
         }
+
+        guard journey.orderedMemberReferences.isEmpty == false else {
+            return chronological(entries.map(\.event))
+        }
+
+        let eventByReference = Dictionary(
+            entries.map { ($0.reference, $0.event) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let authored = journey.orderedMemberReferences.compactMap { eventByReference[$0] }
+        let authoredReferences = Set(journey.orderedMemberReferences)
+        let remaining = entries
+            .filter { authoredReferences.contains($0.reference) == false }
+            .map(\.event)
+
+        // A Bubble's cover and its opened pager now tell the same story. Any
+        // defensive leftovers still appear, but only after the authored order.
+        return authored + chronological(remaining)
     }
 
     @ViewBuilder

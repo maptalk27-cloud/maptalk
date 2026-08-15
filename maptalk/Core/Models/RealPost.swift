@@ -2,10 +2,11 @@ import CoreLocation
 import Foundation
 
 struct RealPost: Identifiable, Hashable {
-    enum Visibility {
+    enum Visibility: Hashable {
         case publicAll
         case friendsOnly
         case anonymous
+        case privateOnly
     }
 
     struct Attachment: Identifiable, Hashable {

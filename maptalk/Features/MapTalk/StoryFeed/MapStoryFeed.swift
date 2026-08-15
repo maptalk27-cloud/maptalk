@@ -58,8 +58,10 @@ enum MapStoryFeed {
             let hasStory = storyMedia.isEmpty == false
 
             if onlyRecentStories {
-                guard hasStory,
-                      checkIn.createdAt >= now.addingTimeInterval(-StoryReadKeys.freshWindow) else {
+                // A fresh public check-in is still meaningful without media:
+                // it opens the place card and contributes to the social map.
+                // `hasStory` only controls story-ring/media behavior.
+                guard checkIn.createdAt >= now.addingTimeInterval(-StoryReadKeys.freshWindow) else {
                     return nil
                 }
             }

@@ -11,6 +11,8 @@ extension RealPost.Visibility {
             return "Friends"
         case .anonymous:
             return "Anonymous"
+        case .privateOnly:
+            return "Only me"
         }
     }
 }
