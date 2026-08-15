@@ -4,6 +4,8 @@ struct FriendsView: View {
     @StateObject var viewModel: FriendsViewModel
     @State private var composerDestination: ComposerDestination?
     @State private var selectedChatUser: User?
+    @State private var isSearchPresented = false
+    @State private var chatScrollOffset: CGFloat = 0
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
@@ -40,9 +42,56 @@ struct FriendsView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .toolbar(.hidden, for: .navigationBar)
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y + geometry.contentInsets.top
+            } action: { _, offset in
+                chatScrollOffset = offset
+
+                if offset >= 28,
+                   isSearchPresented,
+                   isSearchFocused == false,
+                   viewModel.searchText.isEmpty {
+                    withAnimation(.easeOut(duration: 0.16)) {
+                        isSearchPresented = false
+                    }
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        guard chatScrollOffset <= 2,
+                              value.translation.height >= 34,
+                              isSearchPresented == false
+                        else { return }
+
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            isSearchPresented = true
+                        }
+                    }
+            )
             .safeAreaInset(edge: .top, spacing: 0) {
-                chatControls
+                if isSearchPresented {
+                    chatSearchBar
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    composeMenu
+                }
+            }
+            .onChange(of: isSearchFocused) { _, isFocused in
+                if isFocused == false, viewModel.searchText.isEmpty {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                        guard isSearchFocused == false,
+                              viewModel.searchText.isEmpty
+                        else { return }
+                        withAnimation(.easeOut(duration: 0.16)) {
+                            isSearchPresented = false
+                        }
+                    }
+                }
             }
             .navigationDestination(item: $selectedChatUser) { user in
                 ChatThreadView(user: user)
@@ -61,49 +110,41 @@ struct FriendsView: View {
         }
     }
 
-    private var chatControls: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 9) {
-                Image(systemName: "magnifyingglass")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
+    private var chatSearchBar: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
 
-                TextField("Search chats or people", text: $viewModel.searchText)
-                    .font(.subheadline)
-                    .focused($isSearchFocused)
-                    .submitLabel(.search)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+            TextField("Search chats or people", text: $viewModel.searchText)
+                .font(.subheadline)
+                .focused($isSearchFocused)
+                .submitLabel(.search)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .accessibilityIdentifier("chats.search")
 
-                if viewModel.searchText.isEmpty == false {
-                    Button {
-                        viewModel.searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear search")
+            if viewModel.searchText.isEmpty == false {
+                Button {
+                    viewModel.searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.tertiary)
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
             }
-            .padding(.horizontal, 12)
-            .frame(height: 38)
-            .background(
-                Color(.secondarySystemBackground),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-            )
-
-            composeMenu
         }
+        .padding(.horizontal, 12)
+        .frame(height: 38)
+        .background(
+            Color(.secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
         .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 11)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
         .background(Color(.systemBackground))
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color(.separator).opacity(0.25))
-                .frame(height: 1)
-        }
     }
 
     private var composeMenu: some View {

@@ -52,6 +52,25 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
+    func testChatsSearchAppearsOnlyAfterPullingDown() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let chatsTab = app.tabBars.buttons["Chats"]
+        XCTAssertTrue(chatsTab.waitForExistence(timeout: 5))
+        chatsTab.tap()
+
+        let search = app.textFields["chats.search"]
+        XCTAssertFalse(search.exists, "Chat search should not occupy the initial layout")
+
+        app.swipeDown()
+        XCTAssertTrue(
+            search.waitForExistence(timeout: 2),
+            "Pulling the chat list down should reveal search"
+        )
+    }
+
+    @MainActor
     func testMapTalkHasTwoFocusedPublishEntrypoints() throws {
         let app = XCUIApplication()
         app.launch()
