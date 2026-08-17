@@ -61,11 +61,17 @@ final class maptalkUITests: XCTestCase {
         chatsTab.tap()
 
         let search = app.textFields["chats.search"]
-        XCTAssertFalse(search.exists, "Chat search should not occupy the initial layout")
+        XCTAssertTrue(search.waitForExistence(timeout: 2))
+        XCTAssertFalse(search.isHittable, "Chat search should begin above the visible layout")
 
         app.swipeDown()
-        XCTAssertTrue(
-            search.waitForExistence(timeout: 2),
+        let searchIsHittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hittable == true"),
+            object: search
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [searchIsHittable], timeout: 2),
+            .completed,
             "Pulling the chat list down should reveal search"
         )
     }

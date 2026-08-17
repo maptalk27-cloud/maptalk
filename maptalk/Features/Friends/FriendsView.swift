@@ -1,78 +1,70 @@
 import SwiftUI
 
 struct FriendsView: View {
+    private static let searchRevealHeight: CGFloat = 54
+    private static let chatListStartID = "chats.list-start"
+
     @StateObject var viewModel: FriendsViewModel
     @State private var composerDestination: ComposerDestination?
     @State private var selectedChatUser: User?
-    @State private var isSearchPresented = false
-    @State private var chatScrollOffset: CGFloat = 0
+    @State private var didPositionChatList = false
     @FocusState private var isSearchFocused: Bool
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    ForEach(viewModel.filteredConversations) { conversation in
-                        NavigationLink {
-                            ChatThreadView(user: conversation.user)
-                        } label: {
-                            ChatPreviewRow(conversation: conversation)
-                        }
-                    }
-                }
+            GeometryReader { container in
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            chatSearchBar
 
-                if viewModel.matchedPeople.isEmpty == false {
-                    Section("People") {
-                        ForEach(viewModel.matchedPeople) { user in
-                            Button {
-                                selectedChatUser = user
-                            } label: {
-                                PersonSearchRow(user: user, actionTitle: "Chat")
+                            Color.clear
+                                .frame(height: 14)
+                                .id(Self.chatListStartID)
+                                .onAppear {
+                                    guard didPositionChatList == false else { return }
+
+                                    DispatchQueue.main.async {
+                                        var transaction = Transaction()
+                                        transaction.disablesAnimations = true
+                                        withTransaction(transaction) {
+                                            proxy.scrollTo(Self.chatListStartID, anchor: .top)
+                                        }
+
+                                        DispatchQueue.main.async {
+                                            didPositionChatList = true
+                                        }
+                                    }
+                                }
+
+                            LazyVStack(alignment: .leading, spacing: 14) {
+                                if viewModel.filteredConversations.isEmpty == false {
+                                    conversationsCard
+                                }
+
+                                if viewModel.matchedPeople.isEmpty == false {
+                                    peopleSection
+                                }
+
+                                if viewModel.filteredConversations.isEmpty && viewModel.matchedPeople.isEmpty {
+                                    Text("No chats or people found.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 30)
+                                }
                             }
-                            .buttonStyle(.plain)
                         }
+                        .padding(.horizontal, 16)
+                        .frame(
+                            minHeight: container.size.height + Self.searchRevealHeight,
+                            alignment: .top
+                        )
                     }
-                }
-
-                if viewModel.filteredConversations.isEmpty && viewModel.matchedPeople.isEmpty {
-                    Text("No chats or people found.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .listRowBackground(Color.clear)
-                }
-            }
-            .listStyle(.insetGrouped)
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y + geometry.contentInsets.top
-            } action: { _, offset in
-                chatScrollOffset = offset
-
-                if offset >= 28,
-                   isSearchPresented,
-                   isSearchFocused == false,
-                   viewModel.searchText.isEmpty {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        isSearchPresented = false
-                    }
-                }
-            }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8)
-                    .onChanged { value in
-                        guard chatScrollOffset <= 2,
-                              value.translation.height >= 34,
-                              isSearchPresented == false
-                        else { return }
-
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            isSearchPresented = true
-                        }
-                    }
-            )
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if isSearchPresented {
-                    chatSearchBar
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                    .scrollDismissesKeyboard(.interactively)
+                    .scrollIndicators(.hidden)
+                    .background(Color(.systemGroupedBackground))
+                    .opacity(didPositionChatList ? 1 : 0)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -81,18 +73,8 @@ struct FriendsView: View {
                     composeMenu
                 }
             }
-            .onChange(of: isSearchFocused) { _, isFocused in
-                if isFocused == false, viewModel.searchText.isEmpty {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                        guard isSearchFocused == false,
-                              viewModel.searchText.isEmpty
-                        else { return }
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            isSearchPresented = false
-                        }
-                    }
-                }
-            }
+            .toolbarBackground(Color(.systemGroupedBackground), for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .navigationDestination(item: $selectedChatUser) { user in
                 ChatThreadView(user: user)
             }
@@ -107,6 +89,74 @@ struct FriendsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var conversationsCard: some View {
+        VStack(spacing: 0) {
+            ForEach(
+                Array(viewModel.filteredConversations.enumerated()),
+                id: \.element.id
+            ) { index, conversation in
+                NavigationLink {
+                    ChatThreadView(user: conversation.user)
+                } label: {
+                    HStack(spacing: 8) {
+                        ChatPreviewRow(conversation: conversation)
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if index < viewModel.filteredConversations.count - 1 {
+                    Divider()
+                        .padding(.leading, 72)
+                        .padding(.trailing, 12)
+                }
+            }
+        }
+        .background(
+            Color(.secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+    }
+
+    private var peopleSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("People")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+
+            VStack(spacing: 0) {
+                ForEach(
+                    Array(viewModel.matchedPeople.enumerated()),
+                    id: \.element.id
+                ) { index, user in
+                    Button {
+                        selectedChatUser = user
+                    } label: {
+                        PersonSearchRow(user: user, actionTitle: "Chat")
+                            .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.plain)
+
+                    if index < viewModel.matchedPeople.count - 1 {
+                        Divider()
+                            .padding(.leading, 66)
+                            .padding(.trailing, 12)
+                    }
+                }
+            }
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+            )
         }
     }
 
@@ -141,10 +191,7 @@ struct FriendsView: View {
             Color(.secondarySystemBackground),
             in: RoundedRectangle(cornerRadius: 10, style: .continuous)
         )
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 10)
-        .background(Color(.systemBackground))
+        .frame(height: Self.searchRevealHeight)
     }
 
     private var composeMenu: some View {
