@@ -11,11 +11,17 @@ struct MapTalkView: View {
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var selectedRealId: UUID?
     @State private var selectedStoryId: UUID?
+    @State private var selectedFriendFootprintID: String?
     @State private var activeExperience: ActiveExperience?
     @StateObject private var experiencePresentation = MapExperiencePresentation(
         compactDetent: .fraction(ControlsLayout.previewFraction)
     )
     @State private var currentRegion: MKCoordinateRegion?
+    @State private var currentCamera: MapCamera?
+    @State private var settledFriendFootprintRegion: MKCoordinateRegion?
+    @State private var friendFootprintVisibility: FriendFootprintScreenVisibility?
+    @StateObject private var friendFootprintInteractionGate =
+        FriendFootprintMapInteractionGate()
     @State private var pendingRegionCause: RegionChangeCause = .initial
     @State private var reelAlignTrigger: Int = 0
     @State private var controlsBottomPadding: CGFloat = 0
@@ -62,6 +68,43 @@ struct MapTalkView: View {
             let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
 
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
+            let friendFootprintTopExclusion = MapTalkTopChromeLayout.height(
+                safeAreaTop: geometry.safeAreaInsets.top,
+                showsStories: storyItems.isEmpty == false
+            )
+            let friendFootprintLayoutRevision = viewModel.friendFootprints.map { footprint in
+                MapMarkerLayoutRevision(
+                    id: footprint.id,
+                    latitude: footprint.coordinate.latitude,
+                    longitude: footprint.coordinate.longitude,
+                    weight: footprint.friendIDs.count
+                )
+            }
+            let currentLocationLayoutRevision = viewModel.userCoordinate.map { coordinate in
+                [
+                    MapMarkerLayoutRevision(
+                        id: "current-location",
+                        latitude: coordinate.latitude,
+                        longitude: coordinate.longitude,
+                        weight: 0
+                    )
+                ]
+            } ?? []
+            let primaryMarkerLayoutRevision = viewModel.reals.map { real in
+                MapMarkerLayoutRevision(
+                    id: "reel-\(real.id)",
+                    latitude: real.center.latitude,
+                    longitude: real.center.longitude,
+                    weight: 0
+                )
+            } + viewModel.ratedPOIs.map { rated in
+                MapMarkerLayoutRevision(
+                    id: "poi-\(rated.id)",
+                    latitude: rated.poi.coordinate.latitude,
+                    longitude: rated.poi.coordinate.longitude,
+                    weight: 0
+                )
+            } + currentLocationLayoutRevision
 
             let activityEvents = MapTalkActivityFeed.events(
                 reals: viewModel.reals,
@@ -175,6 +218,7 @@ struct MapTalkView: View {
 
             let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
                 flushPendingViewedStory(item.readKey)
+                selectedFriendFootprintID = nil
                 selectedStoryId = item.id
                 if shouldPresent || experiencePresentation.isPresented {
                     if case .poi = item.source {
@@ -228,6 +272,7 @@ struct MapTalkView: View {
             }
 
             let handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void = { journey, presentSheet, parent in
+                selectedFriendFootprintID = nil
                 let isTappingCurrentFocusedJourney = (focusedJourneyHeader?.id == journey.id)
                 if experiencePresentation.isPresented,
                    experiencePresentation.isExpanded,
@@ -284,6 +329,7 @@ struct MapTalkView: View {
                         experiencePresentation.presentNewContent()
                     }
                 }
+
             }
 
             let focusJourneyFromBreadcrumb: (JourneyPost) -> Void = { journey in
@@ -324,40 +370,170 @@ struct MapTalkView: View {
             }
 
             ZStack(alignment: .top) {
-                Map(position: $cameraPosition, interactionModes: .all) {
-                    MapOverlays(
-                        ratedPOIs: focusedJourneyHeader?.pois ?? viewModel.ratedPOIs,
-                        reals: focusedJourneyHeader?.reels ?? viewModel.reals,
-                        journeys: [],
-                        userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
-                        heroNamespace: journeyNamespace,
-                        useTimelineStyle: focusedJourneyHeader != nil,
-                        displayMode: viewModel.isUserScope ? .content : .people,
-                        selectedStoryId: selectedStoryId,
-                        userProvider: viewModel.user(for:),
-                        isRealUnseen: isRealUnseen,
-                        isPOIUnseen: isPOIUnseen,
-                        onTapReal: { real in
-                            guard let item = storyItemForReal(real) else { return }
-                            selectStoryItem(item, true, false, nil)
-                            reelAlignTrigger &+= 1
-                        },
-                        onTapPOI: { rated in
-                            guard let item = storyItemForPOI(rated) else { return }
-                            selectStoryItem(item, true, false, nil)
-                            reelAlignTrigger &+= 1
+                MapReader { mapProxy in
+                    let selectFriendFootprint: (MapTalkFriendFootprint) -> Void = { tapped in
+                        let nextID = FriendFootprintTapSelectionPolicy.nextID(
+                            tappedID: tapped.id,
+                            selectedID: selectedFriendFootprintID,
+                            visibleFootprints: viewModel.friendFootprints
+                        )
+                        let footprint = viewModel.friendFootprints.first {
+                            $0.id == nextID
+                        } ?? tapped
+
+                        flushPendingViewedStory(nil)
+                        selectedRealId = nil
+                        selectedStoryId = nil
+                        let feedback = UISelectionFeedbackGenerator()
+                        feedback.prepare()
+                        feedback.selectionChanged()
+                        withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                            selectedFriendFootprintID = footprint.id
                         }
-                    )
-                }
-                .ignoresSafeArea()
-                .onMapCameraChange(frequency: .onEnd) { context in
-                    // Browsing still tracks the visible camera for normal map
-                    // behavior. Publishing deliberately ignores this value
-                    // and always uses the device's live location instead.
-                    currentRegion = context.region
+                        keepFriendFootprintVisible(
+                            footprint: footprint,
+                            projectedPoint: mapProxy.convert(
+                                footprint.coordinate,
+                                to: .local
+                            ),
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion
+                        )
+                        activeExperience = .friendPlace(
+                            rated: footprint.ratedPOI,
+                            sourceID: footprint.id,
+                            nonce: UUID()
+                        )
+                        experiencePresentation.presentNewContent()
+                    }
+
+                    Map(position: $cameraPosition, interactionModes: .all) {
+                        if focusedJourneyHeader == nil,
+                           viewModel.isUserScope == false,
+                           let friendFootprintVisibility {
+                            FriendFootprintOverlay(
+                                footprints: viewModel.friendFootprints,
+                                selectedID: selectedFriendFootprintID,
+                                visibility: friendFootprintVisibility,
+                                allowsCompactActivation: {
+                                    friendFootprintInteractionGate.allowsCompactTap()
+                                },
+                                onTap: selectFriendFootprint
+                            )
+                        }
+
+                        MapOverlays(
+                            ratedPOIs: focusedJourneyHeader?.pois ?? viewModel.ratedPOIs,
+                            reals: focusedJourneyHeader?.reels ?? viewModel.reals,
+                            journeys: [],
+                            userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
+                            heroNamespace: journeyNamespace,
+                            useTimelineStyle: focusedJourneyHeader != nil,
+                            displayMode: viewModel.isUserScope ? .content : .people,
+                            selectedStoryId: selectedStoryId,
+                            userProvider: viewModel.user(for:),
+                            isRealUnseen: isRealUnseen,
+                            isPOIUnseen: isPOIUnseen,
+                            onTapReal: { real in
+                                guard let item = storyItemForReal(real) else { return }
+                                selectStoryItem(item, true, false, nil)
+                                reelAlignTrigger &+= 1
+                            },
+                            onTapPOI: { rated in
+                                if let item = storyItemForPOI(rated) {
+                                    selectStoryItem(item, true, false, nil)
+                                    reelAlignTrigger &+= 1
+                                    return
+                                }
+
+                                // The map keeps older public places visible even
+                                // after they leave the 24-hour story shelf. They
+                                // still open as places; they just do not join the
+                                // horizontal story sequence again.
+                                flushPendingViewedStory(nil)
+                                pendingViewedStoryKey = nil
+                                selectedFriendFootprintID = nil
+                                selectedRealId = nil
+                                selectedStoryId = rated.id
+                                activeExperience = .poi(rated: rated, nonce: UUID())
+                                experiencePresentation.presentNewContent()
+                            }
+                        )
+                    }
+                    .ignoresSafeArea()
+                    .accessibilityIdentifier("maptalk.map-canvas")
+                    .onMapCameraChange(frequency: .continuous) { _ in
+                        friendFootprintInteractionGate.noteCameraMotion()
+                    }
+                    .onMapCameraChange(frequency: .onEnd) { context in
+                        friendFootprintInteractionGate.noteCameraMotion()
+                        let preservesSettledRepresentatives =
+                            FriendFootprintSamplingContinuityPolicy
+                                .shouldPreserveRepresentatives(
+                                    from: settledFriendFootprintRegion,
+                                    to: context.region
+                                )
+                        // Browsing still tracks the visible camera for normal map
+                        // behavior. Publishing deliberately ignores this value
+                        // and always uses the device's live location instead.
+                        currentRegion = context.region
+                        currentCamera = context.camera
+                        settledFriendFootprintRegion = context.region
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: context.region,
+                            preserveVisibleRepresentatives: preservesSettledRepresentatives
+                        )
+                    }
+                    .onChangeCompat(of: friendFootprintTopExclusion) { _ in
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region,
+                            preserveVisibleRepresentatives: false
+                        )
+                    }
+                    .onChangeCompat(of: geometry.size) { _ in
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region,
+                            preserveVisibleRepresentatives: false
+                        )
+                    }
+                    .onChangeCompat(of: friendFootprintLayoutRevision) { _ in
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region,
+                            preserveVisibleRepresentatives: false
+                        )
+                    }
+                    .onChangeCompat(of: selectedFriendFootprintID) { _ in
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region
+                        )
+                    }
+                    .onChangeCompat(of: primaryMarkerLayoutRevision) { _ in
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region
+                        )
+                    }
                 }
 
-                VStack(spacing: 6) {
+                VStack(spacing: MapTalkTopChromeLayout.storySpacing) {
                     if focusedJourneyHeader == nil {
                         ZStack {
                             Group {
@@ -381,6 +557,7 @@ struct MapTalkView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .center)
+                        .frame(height: MapTalkTopChromeLayout.titleHeight)
                     }
 
                     if let journeyHeader = focusedJourneyHeader {
@@ -427,8 +604,8 @@ struct MapTalkView: View {
                     }
                 }
                 .padding(.horizontal, 0)
-                .padding(.top, geometry.safeAreaInsets.top + 10)
-                .padding(.bottom, 10)
+                .padding(.top, geometry.safeAreaInsets.top + MapTalkTopChromeLayout.topPadding)
+                .padding(.bottom, MapTalkTopChromeLayout.bottomPadding)
                 .frame(maxWidth: .infinity, alignment: .top)
                 .background {
                     Rectangle()
@@ -488,13 +665,13 @@ struct MapTalkView: View {
                         .animation(.easeOut(duration: 0.16), value: publishDestination)
                     }
                 }
-
             }
             .sheet(isPresented: $experiencePresentation.isPresented, onDismiss: {
                 guard experiencePresentation.didDismiss() == false else { return }
                 flushPendingViewedStory(nil)
                 selectedRealId = nil
                 selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
+                selectedFriendFootprintID = nil
 
                 if shouldReturnToActivityAfterPreview {
                     shouldReturnToActivityAfterPreview = false
@@ -594,6 +771,19 @@ struct MapTalkView: View {
                             )
                             .id("\(rated.id)-\(nonce)")
                         )
+                    case let .friendPlace(rated: rated, sourceID: sourceID, nonce: nonce):
+                        return AnyView(
+                            ExperienceDetailView(
+                                ratedPOI: rated,
+                                isExpanded: isExpanded,
+                                onCollapsedTap: experiencePresentation.expand,
+                                userProvider: viewModel.user(for:),
+                                onPOIContributorViewed: markStoryReadKeysViewed,
+                                isPOIContributorUnseen: isPOIContributorUnseen
+                            )
+                            .accessibilityIdentifier("maptalk.friend-place-preview")
+                            .id("\(sourceID)-\(nonce)")
+                        )
                     default:
                         return AnyView(EmptyView())
                     }
@@ -678,6 +868,7 @@ struct MapTalkView: View {
                 let initialRegion = viewModel.region
                 cameraPosition = .region(initialRegion)
                 currentRegion = initialRegion
+                settledFriendFootprintRegion = initialRegion
                 pendingRegionCause = .initial
                 viewModel.onAppear()
                 controlsBottomPadding = baseControlsPadding
@@ -700,8 +891,10 @@ struct MapTalkView: View {
                 if ids.isEmpty {
                     selectedRealId = nil
                     selectedStoryId = nil
-                    activeExperience = nil
-                    experiencePresentation.dismiss()
+                    if case .sequence = activeExperience {
+                        activeExperience = nil
+                        experiencePresentation.dismiss()
+                    }
                     flushPendingViewedStory(nil)
                     return
                 }
@@ -772,6 +965,100 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    func refreshFriendFootprintVisibility(
+        using mapProxy: MapProxy,
+        canvasSize: CGSize,
+        topChromeBottom: CGFloat,
+        region: MKCoordinateRegion,
+        preserveVisibleRepresentatives: Bool = true
+    ) {
+        guard focusedJourneyHeader == nil, viewModel.isUserScope == false else {
+            friendFootprintVisibility = nil
+            return
+        }
+
+        let layout = FriendFootprintViewportPolicy.layout(
+            footprints: viewModel.friendFootprints,
+            in: region,
+            retaining: selectedFriendFootprintID
+        )
+        let projectedPlaces = layout.places.compactMap { footprint in
+            mapProxy.convert(footprint.coordinate, to: .local).map { point in
+                FriendFootprintProjectedPlace(
+                    id: footprint.id,
+                    point: point,
+                    friendCount: footprint.friendIDs.count
+                )
+            }
+        }
+        let primaryCoordinates = viewModel.reals.map(\.center)
+            + viewModel.ratedPOIs.map(\.poi.coordinate)
+            + [viewModel.userCoordinate].compactMap { $0 }
+        let reservedPoints = Array(
+            primaryCoordinates.lazy.filter { coordinate in
+                FriendFootprintViewportPolicy.contains(
+                    coordinate,
+                    in: region,
+                    overscanFactor: 1.25
+                )
+            }.compactMap { coordinate in
+                mapProxy.convert(coordinate, to: .local)
+            }
+        )
+        let newVisibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: projectedPlaces,
+            reservedPoints: reservedPoints,
+            canvasSize: canvasSize,
+            topChromeBottom: topChromeBottom,
+            selectedID: selectedFriendFootprintID,
+            previouslyVisibleIDs: preserveVisibleRepresentatives
+                ? friendFootprintVisibility?.placeIDs ?? []
+                : [],
+            previouslyExpandedIDs: friendFootprintVisibility?.expandedPlaceIDs ?? [],
+            previousDensityStyle: friendFootprintVisibility?.densityStyle
+        )
+
+        if friendFootprintVisibility != newVisibility {
+            friendFootprintVisibility = newVisibility
+        }
+    }
+
+    func keepFriendFootprintVisible(
+        footprint: MapTalkFriendFootprint,
+        projectedPoint: CGPoint?,
+        using mapProxy: MapProxy,
+        canvasSize: CGSize,
+        topChromeBottom: CGFloat
+    ) {
+        guard let camera = currentCamera,
+              let targetPoint = FriendFootprintSelectionCameraPolicy.targetPoint(
+            projectedPoint: projectedPoint,
+            canvasSize: canvasSize,
+            topChromeBottom: topChromeBottom,
+            compactSheetFraction: ControlsLayout.previewFraction
+        ),
+              let coordinateAtTarget = mapProxy.convert(targetPoint, from: .local) else {
+            return
+        }
+        let adjustedCenter = FriendFootprintSelectionCameraPolicy.adjustedCenter(
+            selectedCoordinate: footprint.coordinate,
+            coordinateAtTargetPoint: coordinateAtTarget,
+            currentCenter: camera.centerCoordinate
+        )
+        let adjustedCamera = MapCamera(
+            centerCoordinate: adjustedCenter,
+            distance: camera.distance,
+            heading: camera.heading,
+            pitch: camera.pitch
+        )
+
+        pendingRegionCause = .other
+        flightController.cancelActiveTransition()
+        withAnimation(.easeOut(duration: 0.16)) {
+            cameraPosition = .camera(adjustedCamera)
+        }
+    }
+
     func openActivityDestination(
         _ destination: MapTalkActivityEvent.Target.Destination,
         baseStoryItems: [RealStoriesRow.StoryItem],
@@ -1240,6 +1527,7 @@ private enum ActiveExperience: Identifiable {
     case sequence(nonce: UUID)
     case journey(journey: JourneyPost, nonce: UUID)
     case poi(rated: RatedPOI, nonce: UUID)
+    case friendPlace(rated: RatedPOI, sourceID: String, nonce: UUID)
 
     var id: UUID {
         switch self {
@@ -1248,6 +1536,8 @@ private enum ActiveExperience: Identifiable {
         case let .journey(_, nonce):
             return nonce
         case let .poi(_, nonce):
+            return nonce
+        case let .friendPlace(_, _, nonce):
             return nonce
         }
     }
@@ -1260,6 +1550,31 @@ private enum ActiveExperience: Identifiable {
             return nil
         }
     }
+}
+
+private enum MapTalkTopChromeLayout {
+    static let topPadding: CGFloat = 10
+    static let titleHeight: CGFloat = 52
+    static let storySpacing: CGFloat = 6
+    static let bottomPadding: CGFloat = 10
+
+    static func height(safeAreaTop: CGFloat, showsStories: Bool) -> CGFloat {
+        safeAreaTop
+            + topPadding
+            + titleHeight
+            + (showsStories ? storySpacing + RealStoriesRow.layoutHeight : 0)
+            + bottomPadding
+    }
+}
+
+/// Equatable layout input, separate from model identity. A marker that moves or
+/// gains friend activity must refresh ranking and collision even when its ID is
+/// unchanged.
+private struct MapMarkerLayoutRevision: Equatable {
+    let id: String
+    let latitude: CLLocationDegrees
+    let longitude: CLLocationDegrees
+    let weight: Int
 }
 
 private enum ControlsLayout {

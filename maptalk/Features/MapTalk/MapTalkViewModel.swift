@@ -60,12 +60,14 @@ final class MapTalkViewModel: ObservableObject {
     @Published private(set) var isLoadingNearbyPlaces = true
 
     let scope: Scope
+    let friendFootprints: [MapTalkFriendFootprint]
     private let environment: AppEnvironment
     private var repositoryPOIs: [RatedPOI] = []
     @Published private var nearbyDirectoryPOIs: [RatedPOI] = []
     private var repositoryReals: [RealPost] = []
     private var publishedPOIOverlays: [RatedPOI] = []
     private var publishedReelOverlays: [RealPost] = []
+    private var shouldCenterWhenLocationArrives = false
     private var cancellables = Set<AnyCancellable>()
     init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
@@ -73,8 +75,10 @@ final class MapTalkViewModel: ObservableObject {
         locationAuthorization = environment.location.authorization.value
         switch scope {
         case .global:
+            friendFootprints = MapTalkFriendFootprint.previewData
             bind()
         case let .user(user):
+            friendFootprints = []
             loadUserScope(for: user)
         }
     }
@@ -86,9 +90,18 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func centerOnUser() {
-        guard let location = environment.location.location.value else { return }
+        guard let location = environment.location.location.value else {
+            shouldCenterWhenLocationArrives = true
+            environment.location.requestWhenInUse()
+            return
+        }
+        shouldCenterWhenLocationArrives = false
+        centerRegion(on: location.coordinate)
+    }
+
+    private func centerRegion(on coordinate: CLLocationCoordinate2D) {
         let span = region.span
-        region = MKCoordinateRegion(center: location.coordinate, span: span)
+        region = MKCoordinateRegion(center: coordinate, span: span)
     }
 
     func user(for id: UUID) -> User? {
@@ -419,6 +432,9 @@ final class MapTalkViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 self?.locationAuthorization = status
+                if status == .denied || status == .restricted {
+                    self?.shouldCenterWhenLocationArrives = false
+                }
             }
             .store(in: &cancellables)
 
@@ -430,8 +446,13 @@ final class MapTalkViewModel: ObservableObject {
         locationStream
             .receive(on: DispatchQueue.main)
             .sink { [weak self] location in
-                self?.liveLocation = location
-                self?.userCoordinate = location?.coordinate
+                guard let self else { return }
+                liveLocation = location
+                userCoordinate = location?.coordinate
+                if shouldCenterWhenLocationArrives, let location {
+                    shouldCenterWhenLocationArrives = false
+                    centerRegion(on: location.coordinate)
+                }
             }
             .store(in: &cancellables)
 

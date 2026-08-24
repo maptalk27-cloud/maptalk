@@ -1,6 +1,8 @@
 import SwiftUI
 
 struct RealStoriesRow: View {
+    static let layoutHeight: CGFloat = 108
+
     enum DisplayMode {
         case people
         case content
@@ -117,7 +119,7 @@ struct RealStoriesRow: View {
                 centerOnSelected(using: proxy, animated: true)
             }
         }
-        .frame(height: 108)
+        .frame(height: Self.layoutHeight)
     }
 
     @ViewBuilder

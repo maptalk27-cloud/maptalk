@@ -171,6 +171,100 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
+    func testMapTalkHistoryLayerKeepsMapGesturesPrimary() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        let map = app.descendants(matching: .any)["maptalk.map-canvas"]
+        XCTAssertTrue(map.waitForExistence(timeout: 8))
+
+        let compactMarkers = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "maptalk.friend-place.compact."
+            )
+        )
+        let expandedMarkers = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "maptalk.friend-place.expanded."
+            )
+        )
+        let compactMarker = compactMarkers.firstMatch
+        XCTAssertTrue(compactMarker.waitForExistence(timeout: 8))
+        XCTAssertLessThanOrEqual(
+            expandedMarkers.count,
+            8,
+            "Only a small ranked set of friend places should expand into large controls"
+        )
+        XCTAssertEqual(compactMarker.frame.width, 16, accuracy: 1)
+        XCTAssertEqual(compactMarker.frame.height, 16, accuracy: 1)
+
+        let preview = app.descendants(matching: .any)["maptalk.friend-place-preview"]
+        XCTAssertFalse(preview.exists)
+
+        let compactCenter = compactMarker.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)
+        )
+        compactCenter.withOffset(CGVector(dx: 10, dy: 0)).tap()
+        XCTAssertFalse(
+            preview.waitForExistence(timeout: 0.5),
+            "Tapping just outside a compact circle must remain an ordinary map tap"
+        )
+
+        let draggedMarkerID = compactMarker.identifier
+        let originalMarkerFrame = compactMarker.frame
+        compactCenter.press(
+            forDuration: 0.05,
+            thenDragTo: compactCenter.withOffset(CGVector(dx: 52, dy: 32))
+        )
+        XCTAssertFalse(
+            preview.waitForExistence(timeout: 0.5),
+            "Dragging from a compact circle must not be interpreted as a tap"
+        )
+        let draggedMarker = app.buttons[draggedMarkerID]
+        XCTAssertTrue(
+            draggedMarker.exists == false
+                || abs(draggedMarker.frame.midX - originalMarkerFrame.midX) > 2
+                || abs(draggedMarker.frame.midY - originalMarkerFrame.midY) > 2,
+            "The map must still pan when a drag begins on a compact friend button"
+        )
+
+        map.pinch(withScale: 1.35, velocity: 1.1)
+        XCTAssertFalse(
+            preview.waitForExistence(timeout: 0.5),
+            "Pinching the map must not open friend history"
+        )
+
+        let refreshedCompactMarkers = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "maptalk.friend-place.compact."
+            )
+        )
+        let refreshedExpandedMarkers = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "maptalk.friend-place.expanded."
+            )
+        )
+        let refreshedCompactMarker = refreshedCompactMarkers.firstMatch
+        XCTAssertTrue(refreshedCompactMarker.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(
+            refreshedExpandedMarkers.count,
+            8,
+            "Zooming must preserve the large-control budget"
+        )
+        XCTAssertEqual(refreshedCompactMarker.frame.width, 16, accuracy: 1)
+        XCTAssertEqual(refreshedCompactMarker.frame.height, 16, accuracy: 1)
+        refreshedCompactMarker.tap()
+        XCTAssertTrue(
+            preview.waitForExistence(timeout: 5),
+            "A direct tap on a compact friend button must open its preview"
+        )
+    }
+
+    @MainActor
     func testMyMapPinStaysOnMapAndOpensCapsule() throws {
         let app = XCUIApplication()
         app.launch()

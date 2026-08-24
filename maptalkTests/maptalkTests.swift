@@ -1,9 +1,63 @@
+import Combine
 import CoreLocation
 import Foundation
+import MapKit
 import Testing
 @testable import maptalk
 
 struct maptalkTests {
+
+    @Test
+    @MainActor
+    func locateCompletesWhenTheFirstRealLocationArrives() async {
+        let location = DelayedLocationService()
+        let environment = AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: .mock),
+            location: location,
+            notifications: NotificationServiceImpl(),
+            poiRepo: InMemoryPOIRepository(),
+            realRepo: InMemoryRealRepository(),
+            myMapArchive: MyMapArchiveStore()
+        )
+        let viewModel = MapTalkViewModel(environment: environment)
+        let initialCenter = viewModel.region.center
+        let currentLocation = CLLocation(latitude: 37.3318, longitude: -122.0312)
+
+        viewModel.centerOnUser()
+
+        #expect(location.requestCount == 1)
+        #expect(viewModel.region.center.latitude == initialCenter.latitude)
+        #expect(viewModel.region.center.longitude == initialCenter.longitude)
+
+        location.location.send(currentLocation)
+        await Task.yield()
+
+        #expect(abs(viewModel.region.center.latitude - currentLocation.coordinate.latitude) < 0.000_001)
+        #expect(abs(viewModel.region.center.longitude - currentLocation.coordinate.longitude) < 0.000_001)
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintUsesCanonicalPOIDataForTheSharedCard() {
+        let friendIDs = [UUID(), UUID(), UUID()]
+        let coordinate = CLLocationCoordinate2D(latitude: 37.3318, longitude: -122.0312)
+        let footprint = MapTalkFriendFootprint(
+            id: "nearby-coffee",
+            placeName: "Nearby Coffee",
+            coordinate: coordinate,
+            category: .coffee,
+            friendIDs: friendIDs
+        )
+
+        #expect(footprint.ratedPOI.poi.name == footprint.placeName)
+        #expect(footprint.ratedPOI.poi.coordinate.latitude == coordinate.latitude)
+        #expect(footprint.ratedPOI.poi.coordinate.longitude == coordinate.longitude)
+        #expect(footprint.ratedPOI.poi.category == footprint.category)
+        #expect(footprint.ratedPOI.checkIns.map(\.userId) == friendIDs)
+        #expect(footprint.ratedPOI.tags == [.init(tag: .explore, count: friendIDs.count)])
+        #expect(footprint.ratedPOI.media.isEmpty)
+        #expect(footprint.ratedPOI.comments.isEmpty)
+    }
 
     @Test
     @MainActor
@@ -411,6 +465,978 @@ struct maptalkTests {
         #expect(scope.storyItems.map(\.id) == [place.id, reel.id])
     }
 
+    @Test
+    @MainActor
+    func friendFootprintViewportUsesOverscanAndRetainsSelection() {
+        let region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+            span: MKCoordinateSpan(latitudeDelta: 0.2, longitudeDelta: 0.2)
+        )
+        let bufferedEdge = footprint(id: "edge", latitude: 0.15, longitude: 0)
+        let outside = footprint(id: "outside", latitude: 0.151, longitude: 0)
+        let selectedOutside = footprint(id: "selected", latitude: 1, longitude: 1)
+        let invalid = footprint(id: "invalid", latitude: .nan, longitude: 0)
+
+        let layout = FriendFootprintViewportPolicy.layout(
+            footprints: [bufferedEdge, outside, selectedOutside, invalid],
+            in: region,
+            retaining: selectedOutside.id
+        )
+
+        #expect(layout.places.map(\.id) == [bufferedEdge.id, selectedOutside.id])
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintViewportWrapsAcrossDateLine() {
+        let region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 0, longitude: 179.9),
+            span: MKCoordinateSpan(latitudeDelta: 0.4, longitudeDelta: 0.4)
+        )
+        let acrossDateLine = footprint(id: "across", latitude: 0, longitude: -179.9)
+        let tooFar = footprint(id: "far", latitude: 0, longitude: -179.5)
+
+        let layout = FriendFootprintViewportPolicy.layout(
+            footprints: [acrossDateLine, tooFar],
+            in: region,
+            retaining: nil
+        )
+
+        #expect(layout.places.map(\.id) == [acrossDateLine.id])
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintUnderBudgetKeepsEveryPointVisible() {
+        let canvas = CGSize(width: 393, height: 852)
+        let chromeBottom: CGFloat = 220
+        let first = FriendFootprintProjectedPlace(
+            id: "first",
+            point: CGPoint(x: 80, y: 360),
+            friendCount: 5
+        )
+        let overlapping = FriendFootprintProjectedPlace(
+            id: "second",
+            point: CGPoint(x: 84, y: 360),
+            friendCount: 4
+        )
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [first, overlapping],
+            reservedPoints: [],
+            canvasSize: canvas,
+            topChromeBottom: chromeBottom,
+            selectedID: nil
+        )
+
+        #expect(visibility.placeIDs == [first.id, overlapping.id])
+        #expect(visibility.expandedPlaceIDs == [first.id])
+        #expect(visibility.densityStyle == .sparse)
+    }
+
+    @Test
+    @MainActor
+    func isolatedFriendFootprintsAutomaticallyExpand() {
+        let first = FriendFootprintProjectedPlace(
+            id: "first",
+            point: CGPoint(x: 70, y: 360),
+            friendCount: 5
+        )
+        let second = FriendFootprintProjectedPlace(
+            id: "second",
+            point: CGPoint(x: 180, y: 360),
+            friendCount: 4
+        )
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [first, second],
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+
+        #expect(visibility.placeIDs == [first.id, second.id])
+        #expect(visibility.expandedPlaceIDs == [first.id, second.id])
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintDetailLODUsesHysteresis() {
+        let first = FriendFootprintProjectedPlace(
+            id: "first",
+            point: CGPoint(x: 80, y: 360),
+            friendCount: 5
+        )
+        let second = FriendFootprintProjectedPlace(
+            id: "second",
+            point: CGPoint(x: 154, y: 360),
+            friendCount: 4
+        )
+        let newlyCalculated = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [first, second],
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+        let retained = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [first, second],
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil,
+            previouslyExpandedIDs: [first.id, second.id]
+        )
+
+        #expect(newlyCalculated.expandedPlaceIDs == [first.id])
+        #expect(retained.expandedPlaceIDs == [first.id, second.id])
+    }
+
+    @Test
+    @MainActor
+    func denseNeighborsShareOneRepresentativeDiamond() {
+        let first = FriendFootprintProjectedPlace(
+            id: "first",
+            point: CGPoint(x: 80, y: 360),
+            friendCount: 5
+        )
+        let closeNeighbor = FriendFootprintProjectedPlace(
+            id: "neighbor",
+            point: CGPoint(x: 120, y: 360),
+            friendCount: 4
+        )
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [first, closeNeighbor],
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+
+        #expect(visibility.placeIDs == [first.id, closeNeighbor.id])
+        #expect(visibility.expandedPlaceIDs == [first.id])
+    }
+
+    @Test
+    @MainActor
+    func selectedFriendFootprintAlwaysExpandsInDenseArea() {
+        let selected = FriendFootprintProjectedPlace(
+            id: "selected",
+            point: CGPoint(x: 80, y: 360),
+            friendCount: 2
+        )
+        let closeNeighbor = FriendFootprintProjectedPlace(
+            id: "neighbor",
+            point: CGPoint(x: 120, y: 360),
+            friendCount: 5
+        )
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [selected, closeNeighbor],
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: selected.id
+        )
+
+        #expect(visibility.placeIDs == [selected.id, closeNeighbor.id])
+        #expect(visibility.expandedPlaceIDs == [selected.id])
+    }
+
+    @Test
+    @MainActor
+    func automaticFriendFootprintDiamondsRespectScreenBudget() {
+        let projectedPlaces = (0..<20).map { index in
+            FriendFootprintProjectedPlace(
+                id: "place-\(index)",
+                point: CGPoint(x: 60 + CGFloat(index) * 100, y: 400),
+                friendCount: 20 - index
+            )
+        }
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: projectedPlaces,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 2_100, height: 1_000),
+            topChromeBottom: 1,
+            selectedID: nil
+        )
+
+        #expect(
+            visibility.expandedPlaceIDs.count
+                == FriendFootprintScreenLayoutPolicy.maximumExpandedMarkerCapacity
+        )
+        #expect(visibility.placeIDs == Set(projectedPlaces.map(\.id)))
+        #expect(visibility.expandedPlaceIDs.isSubset(of: visibility.placeIDs))
+        #expect(visibility.densityStyle == .sparse)
+    }
+
+    @Test
+    @MainActor
+    func sunnyvalePreviewProvidesHundredsOfStableFootprints() {
+        let footprints = MapTalkFriendFootprint.previewData.filter {
+            $0.id.hasPrefix("sunnyvale-")
+        }
+        let regenerated = MapTalkFriendFootprint.previewData.filter {
+            $0.id.hasPrefix("sunnyvale-")
+        }
+        let identifiers = Set(footprints.map(\.id))
+
+        #expect((300...500).contains(footprints.count))
+        #expect(identifiers.count == footprints.count)
+        #expect(footprints.allSatisfy { footprint in
+            footprint.coordinate.latitude >= 37.335
+                && footprint.coordinate.latitude <= 37.423
+                && footprint.coordinate.longitude >= -122.08
+                && footprint.coordinate.longitude <= -121.99
+                && footprint.friendIDs.isEmpty == false
+                && footprint.friendIDs.count <= 8
+        })
+        #expect(regenerated.count == footprints.count)
+        #expect(zip(footprints, regenerated).allSatisfy { lhs, rhs in
+            lhs.id == rhs.id
+                && lhs.coordinate.latitude == rhs.coordinate.latitude
+                && lhs.coordinate.longitude == rhs.coordinate.longitude
+                && lhs.category == rhs.category
+                && lhs.friendIDs == rhs.friendIDs
+        })
+    }
+
+    @Test
+    @MainActor
+    func sunnyvalePreviewCoversTheCityWithoutCopiedFlowerClusters() {
+        let footprints = MapTalkFriendFootprint.previewData.filter {
+            $0.id.hasPrefix("sunnyvale-")
+        }
+        let latitudeBounds = 37.335...37.423
+        let longitudeBounds = -122.08 ... -121.99
+        let gridSize = 8
+        var cellCounts: [Int: Int] = [:]
+
+        for footprint in footprints {
+            let latitudeProgress = (
+                footprint.coordinate.latitude - latitudeBounds.lowerBound
+            ) / (latitudeBounds.upperBound - latitudeBounds.lowerBound)
+            let longitudeProgress = (
+                footprint.coordinate.longitude - longitudeBounds.lowerBound
+            ) / (longitudeBounds.upperBound - longitudeBounds.lowerBound)
+            let row = min(
+                gridSize - 1,
+                max(0, Int(latitudeProgress * Double(gridSize)))
+            )
+            let column = min(
+                gridSize - 1,
+                max(0, Int(longitudeProgress * Double(gridSize)))
+            )
+            cellCounts[row * gridSize + column, default: 0] += 1
+        }
+
+        #expect(cellCounts.count >= 40)
+        #expect((cellCounts.values.max() ?? 0) <= 30)
+
+        let mapPoints = footprints.map { MKMapPoint($0.coordinate) }
+        let neighborCounts = mapPoints.enumerated().map { index, point in
+            mapPoints.enumerated().reduce(into: 0) { count, candidate in
+                guard candidate.offset != index else { return }
+                if point.distance(to: candidate.element) <= 400 {
+                    count += 1
+                }
+            }
+        }
+        let sortedNeighborCounts = neighborCounts.sorted()
+        let percentileIndex = Int(
+            Double(max(0, sortedNeighborCounts.count - 1)) * 0.95
+        )
+
+        #expect(sortedNeighborCounts[percentileIndex] <= 22)
+        #expect((sortedNeighborCounts.max() ?? 0) <= 30)
+    }
+
+    @Test
+    @MainActor
+    func sunnyvalePreviewCategoriesDoNotFormArtificialRainbows() {
+        let footprints = MapTalkFriendFootprint.previewData.filter {
+            $0.id.hasPrefix("sunnyvale-")
+        }
+        let mapPoints = footprints.map { MKMapPoint($0.coordinate) }
+        let sameCategoryRatios = footprints.indices.map { index in
+            let nearestIndices = footprints.indices
+                .filter { $0 != index }
+                .sorted {
+                    mapPoints[index].distance(to: mapPoints[$0])
+                        < mapPoints[index].distance(to: mapPoints[$1])
+                }
+                .prefix(5)
+            let sameCategoryCount = nearestIndices.reduce(into: 0) { count, neighborIndex in
+                if footprints[neighborIndex].category == footprints[index].category {
+                    count += 1
+                }
+            }
+            return Double(sameCategoryCount) / Double(max(1, nearestIndices.count))
+        }
+        let averageSameCategoryRatio = sameCategoryRatios.reduce(0, +)
+            / Double(max(1, sameCategoryRatios.count))
+
+        #expect(averageSameCategoryRatio >= 0.08)
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintLayoutKeepsSeparatedPlaces() {
+        let projectedPlaces = (0..<12).map { index in
+            FriendFootprintProjectedPlace(
+                id: "place-\(index)",
+                point: CGPoint(
+                    x: 35 + CGFloat(index % 4) * 95,
+                    y: 280 + CGFloat(index / 4) * 130
+                ),
+                friendCount: 12 - index
+            )
+        }
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: projectedPlaces,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+
+        #expect(visibility.placeIDs.count == projectedPlaces.count)
+    }
+
+    @Test
+    @MainActor
+    func primaryMarkerCollisionYieldsQuietHistoryUnlessSelected() {
+        let selected = FriendFootprintProjectedPlace(
+            id: "selected",
+            point: CGPoint(x: 196, y: 420),
+            friendCount: 2
+        )
+        let hidden = FriendFootprintProjectedPlace(
+            id: "hidden",
+            point: CGPoint(x: 260, y: 420),
+            friendCount: 5
+        )
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [selected, hidden],
+            reservedPoints: [selected.point, hidden.point],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: selected.id
+        )
+
+        #expect(visibility.placeIDs == [selected.id])
+        #expect(visibility.expandedPlaceIDs == [selected.id])
+    }
+
+    @Test
+    @MainActor
+    func liveMarkerCornerClearanceRemovesAnUnreachableHistoryMarker() {
+        let liveMarkerCenter = CGPoint(x: 100, y: 420)
+        let insideSquareCorner = FriendFootprintProjectedPlace(
+            id: "inside-live-hit-corner",
+            point: CGPoint(x: 142, y: 462),
+            friendCount: 6
+        )
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [insideSquareCorner],
+            reservedPoints: [liveMarkerCenter],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+
+        #expect(visibility.placeIDs.isEmpty)
+        #expect(visibility.expandedPlaceIDs.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func denseFriendFootprintLayoutUsesStableRenderBudget() {
+        let projectedPlaces = (0..<300).map { index in
+            FriendFootprintProjectedPlace(
+                id: "place-\(index)",
+                point: CGPoint(
+                    x: 24 + CGFloat(index % 20) * 17,
+                    y: 250 + CGFloat(index / 20) * 38
+                ),
+                friendCount: index
+            )
+        }
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: projectedPlaces,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+
+        let reversedVisibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: Array(projectedPlaces.reversed()),
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+        let capacity = FriendFootprintScreenLayoutPolicy.visibleMarkerCapacity(
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            densityStyle: .dense
+        )
+
+        #expect(visibility.placeIDs.count <= capacity)
+        #expect(visibility.placeIDs.count < projectedPlaces.count)
+        #expect(visibility.placeIDs.count > 60)
+        #expect(visibility.placeIDs == reversedVisibility.placeIDs)
+        #expect(visibility.expandedPlaceIDs.isSubset(of: visibility.placeIDs))
+        #expect(visibility.expandedPlaceIDs.count <= 2)
+        #expect(visibility.densityStyle == .dense)
+    }
+
+    @Test
+    @MainActor
+    func rankedSamplingChoosesTheStrongestPlacePerAreaAndCoversTheScreen() {
+        var projectedPlaces: [FriendFootprintProjectedPlace] = []
+        var expectedIDs = Set<String>()
+
+        for row in 0..<3 {
+            for column in 0..<3 {
+                for rank in 0..<5 {
+                    let id = "cell-\(row)-\(column)-rank-\(rank)"
+                    projectedPlaces.append(
+                        FriendFootprintProjectedPlace(
+                            id: id,
+                            point: CGPoint(
+                                x: 45 + CGFloat(column) * 60,
+                                y: 55 + CGFloat(row) * 60
+                            ),
+                            friendCount: rank + 1
+                        )
+                    )
+                    if rank == 4 { expectedIDs.insert(id) }
+                }
+            }
+        }
+
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: projectedPlaces,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 220, height: 240),
+            topChromeBottom: 20,
+            selectedID: nil
+        )
+        let reversed = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: Array(projectedPlaces.reversed()),
+            reservedPoints: [],
+            canvasSize: CGSize(width: 220, height: 240),
+            topChromeBottom: 20,
+            selectedID: nil
+        )
+
+        #expect(visibility.densityStyle == .dense)
+        #expect(visibility.placeIDs == expectedIDs)
+        #expect(reversed.placeIDs == expectedIDs)
+    }
+
+    @Test
+    @MainActor
+    func rankedSamplingKeepsThePreviousRepresentativeUntilAnExplicitRerank() {
+        let candidates = [
+            FriendFootprintProjectedPlace(
+                id: "stronger-newcomer",
+                point: CGPoint(x: 50, y: 60),
+                friendCount: 20
+            ),
+            FriendFootprintProjectedPlace(
+                id: "previous",
+                point: CGPoint(x: 50, y: 60),
+                friendCount: 2
+            )
+        ]
+        let lowerRanked = (0..<8).map { index in
+            FriendFootprintProjectedPlace(
+                id: "lower-\(index)",
+                point: CGPoint(x: 50, y: 60),
+                friendCount: 1
+            )
+        }
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: candidates + lowerRanked,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 100, height: 100),
+            topChromeBottom: 1,
+            selectedID: nil,
+            previouslyVisibleIDs: ["previous"]
+        )
+        let reranked = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: candidates + lowerRanked,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 100, height: 100),
+            topChromeBottom: 1,
+            selectedID: nil,
+            previouslyVisibleIDs: []
+        )
+
+        #expect(visibility.densityStyle == .dense)
+        #expect(visibility.placeIDs == ["previous"])
+        #expect(reranked.placeIDs == ["stronger-newcomer"])
+    }
+
+    @Test
+    @MainActor
+    func rankedSamplingRetainsAdjacentRepresentativesAcrossAGridBoundaryShift() {
+        let first = FriendFootprintProjectedPlace(
+            id: "first",
+            point: CGPoint(x: 31, y: 60),
+            friendCount: 2
+        )
+        let second = FriendFootprintProjectedPlace(
+            id: "second",
+            point: CGPoint(x: 33, y: 60),
+            friendCount: 20
+        )
+        let fillers = (0..<14).map { index in
+            FriendFootprintProjectedPlace(
+                id: "filler-\(index)",
+                point: CGPoint(x: 85, y: 60),
+                friendCount: 1
+            )
+        }
+        let initial = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [first, second] + fillers,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 140, height: 120),
+            topChromeBottom: 1,
+            selectedID: nil
+        )
+        let shiftedCandidates = ([first, second] + fillers).map { place in
+            FriendFootprintProjectedPlace(
+                id: place.id,
+                point: CGPoint(x: place.point.x + 2, y: place.point.y),
+                friendCount: place.friendCount
+            )
+        }
+        let shifted = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: shiftedCandidates,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 140, height: 120),
+            topChromeBottom: 1,
+            selectedID: nil,
+            previouslyVisibleIDs: initial.placeIDs,
+            previousDensityStyle: initial.densityStyle
+        )
+
+        #expect(initial.densityStyle == .dense)
+        #expect(initial.placeIDs.contains(first.id))
+        #expect(initial.placeIDs.contains(second.id))
+        #expect(shifted.placeIDs.contains(first.id))
+        #expect(shifted.placeIDs.contains(second.id))
+    }
+
+    @Test
+    @MainActor
+    func representativeContinuityKeepsPansButReranksMeaningfulZooms() {
+        let initial = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 37.37, longitude: -122.03),
+            span: MKCoordinateSpan(latitudeDelta: 0.08, longitudeDelta: 0.08)
+        )
+        let panned = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 37.39, longitude: -122.01),
+            span: MKCoordinateSpan(latitudeDelta: 0.081, longitudeDelta: 0.079)
+        )
+        let zoomedOut = MKCoordinateRegion(
+            center: panned.center,
+            span: MKCoordinateSpan(latitudeDelta: 0.095, longitudeDelta: 0.095)
+        )
+
+        #expect(
+            FriendFootprintSamplingContinuityPolicy.shouldPreserveRepresentatives(
+                from: initial,
+                to: panned
+            )
+        )
+        #expect(
+            FriendFootprintSamplingContinuityPolicy.shouldPreserveRepresentatives(
+                from: panned,
+                to: zoomedOut
+            ) == false
+        )
+        #expect(
+            FriendFootprintSamplingContinuityPolicy.shouldPreserveRepresentatives(
+                from: nil,
+                to: initial
+            ) == false
+        )
+    }
+
+    @Test
+    @MainActor
+    func selectedLowRankFootprintReplacesTheCellRepresentative() {
+        let selected = FriendFootprintProjectedPlace(
+            id: "selected",
+            point: CGPoint(x: 50, y: 60),
+            friendCount: 1
+        )
+        let stronger = FriendFootprintProjectedPlace(
+            id: "stronger",
+            point: CGPoint(x: 50, y: 60),
+            friendCount: 20
+        )
+        let fillers = (0..<8).map { index in
+            FriendFootprintProjectedPlace(
+                id: "filler-\(index)",
+                point: CGPoint(x: 50, y: 60),
+                friendCount: 5
+            )
+        }
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [selected, stronger] + fillers,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 100, height: 100),
+            topChromeBottom: 1,
+            selectedID: selected.id
+        )
+
+        #expect(visibility.placeIDs == [selected.id])
+        #expect(visibility.expandedPlaceIDs == [selected.id])
+    }
+
+    @Test
+    @MainActor
+    func exactlyOverlappingFootprintsRemainRepresented() {
+        let point = CGPoint(x: 196, y: 420)
+        let first = FriendFootprintProjectedPlace(
+            id: "first",
+            point: point,
+            friendCount: 3
+        )
+        let second = FriendFootprintProjectedPlace(
+            id: "second",
+            point: point,
+            friendCount: 2
+        )
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: [first, second],
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+
+        #expect(visibility.placeIDs == [first.id, second.id])
+        #expect(visibility.expandedPlaceIDs == [first.id])
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintCompactCircleKeepsOneSizeAcrossDensity() {
+        let usableArea: CGFloat = 100_000
+
+        #expect(
+            FriendFootprintScreenLayoutPolicy.densityStyle(
+                visibleCount: 29,
+                usableArea: usableArea
+            ) == .sparse
+        )
+        #expect(
+            FriendFootprintScreenLayoutPolicy.densityStyle(
+                visibleCount: 30,
+                usableArea: usableArea
+            ) == .medium
+        )
+        #expect(
+            FriendFootprintScreenLayoutPolicy.densityStyle(
+                visibleCount: 90,
+                usableArea: usableArea
+            ) == .dense
+        )
+        #expect(FriendFootprintDensityStyle.sparse.compactMarkerSize == 12)
+        #expect(FriendFootprintDensityStyle.medium.compactMarkerSize == 12)
+        #expect(FriendFootprintDensityStyle.dense.compactMarkerSize == 12)
+        #expect(FriendFootprintDensityStyle.sparse.compactMarkerStrokeWidth > 0)
+        #expect(FriendFootprintDensityStyle.medium.compactMarkerStrokeWidth > 0)
+        #expect(FriendFootprintDensityStyle.dense.compactMarkerStrokeWidth > 0)
+        for style in [
+            FriendFootprintDensityStyle.sparse,
+            .medium,
+            .dense
+        ] {
+            #expect(style.compactControlSize == 16)
+            #expect(style.compactControlSize >= style.compactMarkerSize)
+            #expect(style.compactControlSize < style.visibleMarkerCellSize)
+            #expect(style.compactMarkerOpacity == 0.84)
+            #expect(style.compactMarkerStrokeOpacity == 0.9)
+            #expect(style.compactMarkerStrokeWidth == 1)
+        }
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.compactMarkerClearance
+                >= FriendFootprintDensityStyle.sparse.compactMarkerSize / 2
+        )
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintDensityStyleUsesHysteresisAtTierBoundaries() {
+        let usableArea: CGFloat = 100_000
+
+        #expect(
+            FriendFootprintScreenLayoutPolicy.densityStyle(
+                visibleCount: 75,
+                usableArea: usableArea,
+                previousStyle: .dense
+            ) == .dense
+        )
+        #expect(
+            FriendFootprintScreenLayoutPolicy.densityStyle(
+                visibleCount: 69,
+                usableArea: usableArea,
+                previousStyle: .dense
+            ) == .medium
+        )
+        #expect(
+            FriendFootprintScreenLayoutPolicy.densityStyle(
+                visibleCount: 25,
+                usableArea: usableArea,
+                previousStyle: .medium
+            ) == .medium
+        )
+        #expect(
+            FriendFootprintScreenLayoutPolicy.densityStyle(
+                visibleCount: 19,
+                usableArea: usableArea,
+                previousStyle: .medium
+            ) == .sparse
+        )
+    }
+
+    @Test
+    @MainActor
+    func compactFriendFootprintButtonWaitsForMapMotionToSettle() {
+        let gate = FriendFootprintMapInteractionGate()
+
+        #expect(gate.allowsCompactTap(at: 10))
+        gate.noteCameraMotion(at: 10)
+        #expect(gate.allowsCompactTap(at: 10.149) == false)
+        #expect(gate.allowsCompactTap(at: 10.15))
+
+        gate.noteCameraMotion(at: 20)
+        gate.noteCameraMotion(at: 20.1)
+        #expect(gate.allowsCompactTap(at: 20.2) == false)
+        #expect(gate.allowsCompactTap(at: 20.25))
+    }
+
+    @Test
+    @MainActor
+    func seattleLowDensityFootprintsAreNotNeedlesslySampled() {
+        let seattle = MapTalkFriendFootprint.previewData.filter {
+            $0.id.hasPrefix("sunnyvale-") == false
+        }
+        let projected = seattle.enumerated().map { index, footprint in
+            FriendFootprintProjectedPlace(
+                id: footprint.id,
+                point: CGPoint(
+                    x: 35 + CGFloat(index % 4) * 90,
+                    y: 270 + CGFloat(index / 4) * 100
+                ),
+                friendCount: footprint.friendIDs.count
+            )
+        }
+        let visibility = FriendFootprintScreenLayoutPolicy.visibility(
+            projectedPlaces: projected,
+            reservedPoints: [],
+            canvasSize: CGSize(width: 393, height: 852),
+            topChromeBottom: 220,
+            selectedID: nil
+        )
+
+        #expect(seattle.count == 17)
+        #expect(visibility.densityStyle == .sparse)
+        #expect(visibility.placeIDs == Set(seattle.map(\.id)))
+    }
+
+    @Test
+    @MainActor
+    func repeatedTapsCycleFootprintsAtTheSameRealPlace() {
+        let first = footprint(
+            id: "first",
+            latitude: 37.3769,
+            longitude: -122.0300
+        )
+        let second = footprint(
+            id: "second",
+            latitude: 37.3769,
+            longitude: -122.0300
+        )
+        let topmost = footprint(
+            id: "topmost",
+            latitude: 37.3769,
+            longitude: -122.0300
+        )
+        let nearbyButSeparate = footprint(
+            id: "separate",
+            latitude: 37.3770,
+            longitude: -122.0300
+        )
+        let visible = [first, second, topmost, nearbyButSeparate]
+
+        let initial = FriendFootprintTapSelectionPolicy.nextID(
+            tappedID: topmost.id,
+            selectedID: nil,
+            visibleFootprints: visible
+        )
+        let next = FriendFootprintTapSelectionPolicy.nextID(
+            tappedID: topmost.id,
+            selectedID: topmost.id,
+            visibleFootprints: visible
+        )
+        let afterNext = FriendFootprintTapSelectionPolicy.nextID(
+            tappedID: topmost.id,
+            selectedID: next,
+            visibleFootprints: visible
+        )
+
+        #expect(initial == topmost.id)
+        #expect(next == first.id)
+        #expect(afterNext == second.id)
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintSelectionCameraOnlyMovesCoveredPointAndKeepsZoom() {
+        let canvas = CGSize(width: 393, height: 852)
+
+        let alreadyVisible = FriendFootprintSelectionCameraPolicy.targetPoint(
+            projectedPoint: CGPoint(x: 196, y: 420),
+            canvasSize: canvas,
+            topChromeBottom: 220,
+            compactSheetFraction: 0.35
+        )
+        let covered = FriendFootprintSelectionCameraPolicy.targetPoint(
+            projectedPoint: CGPoint(x: 196, y: 760),
+            canvasSize: canvas,
+            topChromeBottom: 220,
+            compactSheetFraction: 0.35
+        )
+        let adjustedCenter = FriendFootprintSelectionCameraPolicy.adjustedCenter(
+            selectedCoordinate: CLLocationCoordinate2D(latitude: 47.60, longitude: -122.30),
+            coordinateAtTargetPoint: CLLocationCoordinate2D(
+                latitude: 47.64,
+                longitude: -122.34
+            ),
+            currentCenter: CLLocationCoordinate2D(latitude: 47.61, longitude: -122.33)
+        )
+
+        #expect(alreadyVisible == nil)
+        #expect(covered?.x == 196)
+        #expect(abs((covered?.y ?? 0) - 481.8) < 0.000_001)
+        #expect(abs(adjustedCenter.latitude - 47.5836) < 0.000_001)
+        #expect(abs(adjustedCenter.longitude - -122.3036) < 0.000_001)
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintCompactModeKeepsEveryPlaceAtItsRealCoordinate() {
+        let first = footprint(
+            id: "first",
+            latitude: 47.61,
+            longitude: -122.33,
+            friendIDs: [UUID(), UUID()]
+        )
+        let second = footprint(
+            id: "second",
+            latitude: 47.611,
+            longitude: -122.331,
+            friendIDs: [UUID()]
+        )
+        let region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 47.61, longitude: -122.33),
+            span: MKCoordinateSpan(latitudeDelta: 0.5, longitudeDelta: 0.5)
+        )
+
+        let layout = FriendFootprintViewportPolicy.layout(
+            footprints: [first, second],
+            in: region,
+            retaining: nil
+        )
+
+        #expect(layout.places.map(\.id) == [first.id, second.id])
+        #expect(layout.places[0].coordinate.latitude == first.coordinate.latitude)
+        #expect(layout.places[0].coordinate.longitude == first.coordinate.longitude)
+        #expect(layout.places[1].coordinate.latitude == second.coordinate.latitude)
+        #expect(layout.places[1].coordinate.longitude == second.coordinate.longitude)
+    }
+
+    @Test
+    @MainActor
+    func friendFootprintMarkersYieldToTopStoryChromeWithoutMovingCoordinates() {
+        let canvas = CGSize(width: 393, height: 852)
+        let chromeBottom: CGFloat = 220
+
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.isOccluded(
+                projectedPoint: CGPoint(x: 196, y: 251),
+                canvasSize: canvas,
+                topChromeBottom: chromeBottom
+            )
+        )
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.isOccluded(
+                projectedPoint: CGPoint(x: 196, y: 252),
+                canvasSize: canvas,
+                topChromeBottom: chromeBottom
+            ) == false
+        )
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.isOccluded(
+                projectedPoint: CGPoint(x: 196, y: 235),
+                canvasSize: canvas,
+                topChromeBottom: chromeBottom,
+                clearance: FriendFootprintScreenOcclusionPolicy.compactMarkerClearance
+            )
+        )
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.isOccluded(
+                projectedPoint: CGPoint(x: 196, y: 236),
+                canvasSize: canvas,
+                topChromeBottom: chromeBottom,
+                clearance: FriendFootprintScreenOcclusionPolicy.compactMarkerClearance
+            ) == false
+        )
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.isOccluded(
+                projectedPoint: CGPoint(x: -80, y: 100),
+                canvasSize: canvas,
+                topChromeBottom: chromeBottom
+            ) == false
+        )
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.isOccluded(
+                projectedPoint: CGPoint(x: 196, y: -80),
+                canvasSize: canvas,
+                topChromeBottom: chromeBottom
+            ) == false
+        )
+        #expect(
+            FriendFootprintScreenOcclusionPolicy.isOccluded(
+                projectedPoint: CGPoint(x: 196, y: 400),
+                canvasSize: canvas,
+                topChromeBottom: 0
+            )
+        )
+    }
+
+    private func footprint(
+        id: String,
+        latitude: CLLocationDegrees,
+        longitude: CLLocationDegrees,
+        friendIDs: [UUID] = [UUID()]
+    ) -> MapTalkFriendFootprint {
+        MapTalkFriendFootprint(
+            id: id,
+            placeName: id,
+            coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+            category: .viewpoint,
+            friendIDs: friendIDs
+        )
+    }
+
     @MainActor
     private func makeEnvironment(archive: MyMapArchiveStore) -> AppEnvironment {
         AppEnvironment(
@@ -440,5 +1466,15 @@ struct maptalkTests {
             likes: [],
             comments: []
         )
+    }
+}
+
+private final class DelayedLocationService: LocationService {
+    let authorization = CurrentValueSubject<CLAuthorizationStatus, Never>(.notDetermined)
+    let location = CurrentValueSubject<CLLocation?, Never>(nil)
+    private(set) var requestCount = 0
+
+    func requestWhenInUse() {
+        requestCount += 1
     }
 }
