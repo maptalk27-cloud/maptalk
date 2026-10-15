@@ -28,7 +28,6 @@ struct MapTalkActivityEvent: Identifiable {
 
     let id: String
     let actor: User
-    let actorSuffix: String?
     let kind: Kind
     let action: String
     let detail: String?
@@ -55,7 +54,6 @@ enum MapTalkActivityFeed {
                 return MapTalkActivityEvent(
                     id: "reel-comment-\(comment.id.uuidString)",
                     actor: actor,
-                    actorSuffix: nil,
                     kind: .comment,
                     action: "Comment on Reel",
                     detail: comment.text,
@@ -78,7 +76,6 @@ enum MapTalkActivityFeed {
                 return MapTalkActivityEvent(
                     id: "bubble-comment-\(comment.id.uuidString)",
                     actor: actor,
-                    actorSuffix: nil,
                     kind: .comment,
                     action: "Comment on Bubble",
                     detail: comment.text,
@@ -101,7 +98,6 @@ enum MapTalkActivityFeed {
                     return MapTalkActivityEvent(
                         id: "place-comment-\(comment.id.uuidString)",
                         actor: actor,
-                        actorSuffix: nil,
                         kind: .comment,
                         action: "Comment at Place",
                         detail: detail(for: comment.content),
@@ -112,33 +108,26 @@ enum MapTalkActivityFeed {
             }
 
         let comments = newest(reelComments + bubbleComments + placeComments)
-        let likes = groupedLikeEvents(
+        let likes = individualLikeEvents(
             for: ownedReels,
             bubbles: ownedBubbles,
             currentUserID: currentUserID,
             userProvider: userProvider
         )
 
-        // One activity stream, with likes grouped by post and comments kept
-        // individual. The row treatment carries the distinction; the person
-        // should not have to classify the interaction before reading it.
-        var selected: [MapTalkActivityEvent] = []
-        for index in 0..<3 {
+        // Keep one mixed stream, with one row per person's interaction.
+        // Likes do not have timestamps yet, so retain the existing mixed
+        // ordering without fabricating dates or dropping older rows.
+        var events: [MapTalkActivityEvent] = []
+        for index in 0..<max(likes.count, comments.count) {
             if likes.indices.contains(index) {
-                selected.append(likes[index])
+                events.append(likes[index])
             }
             if comments.indices.contains(index) {
-                selected.append(comments[index])
+                events.append(comments[index])
             }
         }
-
-        if selected.count < 6 {
-            let selectedIDs = Set(selected.map(\.id))
-            let remaining = (likes + comments).filter { selectedIDs.contains($0.id) == false }
-            selected.append(contentsOf: remaining.prefix(6 - selected.count))
-        }
-
-        return Array(selected.prefix(6))
+        return events
     }
 
     private static func newest(_ events: [MapTalkActivityEvent]) -> [MapTalkActivityEvent] {
@@ -150,7 +139,7 @@ enum MapTalkActivityFeed {
         return bubbles.filter { seen.insert($0.id).inserted }
     }
 
-    private static func groupedLikeEvents(
+    private static func individualLikeEvents(
         for reals: [RealPost],
         bubbles: [JourneyPost],
         currentUserID: UUID,
@@ -158,65 +147,51 @@ enum MapTalkActivityFeed {
     ) -> [MapTalkActivityEvent] {
         let reelEvents = reals
             .sorted(by: { $0.createdAt > $1.createdAt })
-            .compactMap { reel -> MapTalkActivityEvent? in
-            let people = reel.likes.filter { $0 != currentUserID }
-            guard let firstID = people.first,
-                  let actor = userProvider(firstID) else {
-                return nil
-            }
+            .flatMap { reel -> [MapTalkActivityEvent] in
+                var seen = Set<UUID>()
+                return reel.likes.compactMap { userID in
+                    guard userID != currentUserID,
+                          seen.insert(userID).inserted,
+                          let actor = userProvider(userID) else {
+                        return nil
+                    }
 
-            let others = people.count - 1
-            return MapTalkActivityEvent(
-                id: "reel-likes-\(reel.id.uuidString)-\(people.count)",
-                actor: actor,
-                actorSuffix: others == 0
-                    ? nil
-                    : "and \(others) other\(others == 1 ? "" : "s")",
-                kind: .like,
-                action: "Liked your Reel",
-                detail: nil,
-                // RealPost currently stores who liked, but not when. Avoid
-                // inventing a precise time until the backend provides one.
-                timestamp: nil,
-                target: target(for: reel)
-            )
-        }
+                    return MapTalkActivityEvent(
+                        id: "reel-like-\(reel.id.uuidString)-\(userID.uuidString)",
+                        actor: actor,
+                        kind: .like,
+                        action: "Liked your Reel",
+                        detail: nil,
+                        // Likes currently store the person, but not the time.
+                        timestamp: nil,
+                        target: target(for: reel)
+                    )
+                }
+            }
 
         let bubbleEvents = bubbles
             .sorted(by: { $0.createdAt > $1.createdAt })
-            .compactMap { bubble -> MapTalkActivityEvent? in
-                let people = bubble.likes.filter { $0 != currentUserID }
-                guard let firstID = people.first,
-                      let actor = userProvider(firstID) else {
-                    return nil
+            .flatMap { bubble -> [MapTalkActivityEvent] in
+                var seen = Set<UUID>()
+                return bubble.likes.compactMap { userID in
+                    guard userID != currentUserID,
+                          seen.insert(userID).inserted,
+                          let actor = userProvider(userID) else {
+                        return nil
+                    }
+
+                    return MapTalkActivityEvent(
+                        id: "bubble-like-\(bubble.id.uuidString)-\(userID.uuidString)",
+                        actor: actor,
+                        kind: .like,
+                        action: "Liked your Bubble",
+                        detail: nil,
+                        timestamp: nil,
+                        target: target(for: bubble)
+                    )
                 }
-
-                let others = people.count - 1
-                return MapTalkActivityEvent(
-                    id: "bubble-likes-\(bubble.id.uuidString)-\(people.count)",
-                    actor: actor,
-                    actorSuffix: others == 0
-                        ? nil
-                        : "and \(others) other\(others == 1 ? "" : "s")",
-                    kind: .like,
-                    action: "Liked your Bubble",
-                    detail: nil,
-                    timestamp: nil,
-                    target: target(for: bubble)
-                )
             }
-
-        // Two Reels plus one Bubble make the social model legible without
-        // turning the first version into a filterable inbox.
-        var result = Array(reelEvents.prefix(2))
-        if let bubble = bubbleEvents.first {
-            result.append(bubble)
-        }
-        let selectedIDs = Set(result.map(\.id))
-        result.append(contentsOf: (reelEvents + bubbleEvents).filter {
-            selectedIDs.contains($0.id) == false
-        })
-        return result
+        return reelEvents + bubbleEvents
     }
 
     private static func detail(for content: RatedPOI.Comment.Content) -> String {
@@ -382,8 +357,8 @@ private struct MapTalkActivityRow: View {
 
             if event.kind == .like {
                 HStack(spacing: 6) {
-                    Text(headlineText)
-                        .font(.subheadline)
+                    Text(event.actor.handle)
+                        .font(.subheadline.bold())
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
@@ -426,27 +401,13 @@ private struct MapTalkActivityRow: View {
         .accessibilityLabel(accessibilityText)
     }
 
-    private var headlineText: AttributedString {
-        var text = AttributedString(event.actor.handle)
-        text.font = .subheadline.bold()
-
-        if let actorSuffix = event.actorSuffix {
-            var suffix = AttributedString(" \(actorSuffix)")
-            suffix.foregroundColor = .secondary
-            text += suffix
-        }
-
-        return text
-    }
-
     private var timeText: String? {
         event.timestamp?.formatted(.relative(presentation: .named))
     }
 
     private var accessibilityText: String {
-        let actor = [event.actor.handle, event.actorSuffix].compactMap { $0 }.joined(separator: " ")
         let time = timeText.map { ", \($0)" } ?? ""
-        return "\(actor), \(event.action), \(event.target.title)\(time)"
+        return "\(event.actor.handle), \(event.action), \(event.target.title)\(time)"
     }
 }
 

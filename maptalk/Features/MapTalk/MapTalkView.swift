@@ -26,7 +26,7 @@ struct MapTalkView: View {
     @State private var reelAlignTrigger: Int = 0
     @State private var controlsBottomPadding: CGFloat = 0
     @State private var focusedJourneyHeader: JourneyPost?
-    @State private var journeyEntryStoryId: UUID?
+    @State private var journeyEntry: JourneyEntry?
     @State private var journeyStack: [JourneyPost] = []
     @State private var suppressJourneySelectionUpdate: Bool = false
     @State private var didApplyInitialStorySelection: Bool = false
@@ -58,16 +58,21 @@ struct MapTalkView: View {
                 .storyItems
             }
 
-            let baseStoryItems = MapStoryFeed.items(
-                reals: viewModel.reals,
-                ratedPOIs: viewModel.ratedPOIs,
-                onlyRecentPOIStories: viewModel.isUserScope == false,
-                userProvider: viewModel.user(for:)
-            )
+            // The rail is a stable public feed snapshot. Map search results
+            // live in `ratedPOIs` and never decide membership here.
+            let baseStoryItems = viewModel.activeFeedItems
 
             let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
 
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
+            let mapRatedPOIs = viewModel.mapRenderPOIs(
+                retaining: selectedStoryId,
+                selectedMapPOI: selectedStandalonePOI
+            )
+            let mapReels = viewModel.mapRenderReels(
+                retaining: selectedStoryId,
+                selectedMapReel: selectedStandaloneReel
+            )
             let friendFootprintTopExclusion = MapTalkTopChromeLayout.height(
                 safeAreaTop: geometry.safeAreaInsets.top,
                 showsStories: storyItems.isEmpty == false
@@ -90,14 +95,14 @@ struct MapTalkView: View {
                     )
                 ]
             } ?? []
-            let primaryMarkerLayoutRevision = viewModel.reals.map { real in
+            let primaryMarkerLayoutRevision = mapReels.map { real in
                 MapMarkerLayoutRevision(
                     id: "reel-\(real.id)",
                     latitude: real.center.latitude,
                     longitude: real.center.longitude,
                     weight: 0
                 )
-            } + viewModel.ratedPOIs.map { rated in
+            } + mapRatedPOIs.map { rated in
                 MapMarkerLayoutRevision(
                     id: "poi-\(rated.id)",
                     latitude: rated.poi.coordinate.latitude,
@@ -107,8 +112,8 @@ struct MapTalkView: View {
             } + currentLocationLayoutRevision
 
             let activityEvents = MapTalkActivityFeed.events(
-                reals: viewModel.reals,
-                ratedPOIs: viewModel.ratedPOIs,
+                reals: viewModel.activityReels,
+                ratedPOIs: viewModel.activityPOIs,
                 bubbles: environment.myMapArchive.publicBubbleCatalog
                     + environment.myMapArchive.legacyJourneyCatalog,
                 currentUserID: environment.myMapArchive.currentUserID,
@@ -218,6 +223,7 @@ struct MapTalkView: View {
 
             let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
                 flushPendingViewedStory(item.readKey)
+                viewModel.retainActiveFeedItem(id: item.id)
                 selectedFriendFootprintID = nil
                 selectedStoryId = item.id
                 if shouldPresent || experiencePresentation.isPresented {
@@ -283,7 +289,18 @@ struct MapTalkView: View {
                     }
                 }
                 if focusedJourneyHeader == nil {
-                    journeyEntryStoryId = selectedStoryId ?? selectedRealId
+                    switch activeExperience {
+                    case let .real(real, _):
+                        journeyEntry = .reel(real)
+                    case let .poi(rated, _):
+                        journeyEntry = .poi(rated)
+                    default:
+                        if let identifier = selectedStoryId ?? selectedRealId {
+                            journeyEntry = .feedItem(identifier)
+                        } else {
+                            journeyEntry = nil
+                        }
+                    }
                 }
                 if let parent, parent.id != journey.id {
                     journeyStack.append(parent)
@@ -382,6 +399,7 @@ struct MapTalkView: View {
                         } ?? tapped
 
                         flushPendingViewedStory(nil)
+                        viewModel.releaseRetainedActiveFeedItem()
                         selectedRealId = nil
                         selectedStoryId = nil
                         let feedback = UISelectionFeedbackGenerator()
@@ -424,8 +442,8 @@ struct MapTalkView: View {
                         }
 
                         MapOverlays(
-                            ratedPOIs: focusedJourneyHeader?.pois ?? viewModel.ratedPOIs,
-                            reals: focusedJourneyHeader?.reels ?? viewModel.reals,
+                            ratedPOIs: focusedJourneyHeader?.pois ?? mapRatedPOIs,
+                            reals: focusedJourneyHeader?.reels ?? mapReels,
                             journeys: [],
                             userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
                             heroNamespace: journeyNamespace,
@@ -436,9 +454,19 @@ struct MapTalkView: View {
                             isRealUnseen: isRealUnseen,
                             isPOIUnseen: isPOIUnseen,
                             onTapReal: { real in
-                                guard let item = storyItemForReal(real) else { return }
-                                selectStoryItem(item, true, false, nil)
-                                reelAlignTrigger &+= 1
+                                if let item = storyItemForReal(real) {
+                                    selectStoryItem(item, true, false, nil)
+                                    reelAlignTrigger &+= 1
+                                    return
+                                }
+
+                                flushPendingViewedStory(nil)
+                                viewModel.releaseRetainedActiveFeedItem()
+                                selectedFriendFootprintID = nil
+                                selectedRealId = real.id
+                                selectedStoryId = real.id
+                                activeExperience = .real(real: real, nonce: UUID())
+                                experiencePresentation.presentNewContent()
                             },
                             onTapPOI: { rated in
                                 if let item = storyItemForPOI(rated) {
@@ -452,6 +480,7 @@ struct MapTalkView: View {
                                 // still open as places; they just do not join the
                                 // horizontal story sequence again.
                                 flushPendingViewedStory(nil)
+                                viewModel.releaseRetainedActiveFeedItem()
                                 pendingViewedStoryKey = nil
                                 selectedFriendFootprintID = nil
                                 selectedRealId = nil
@@ -480,6 +509,9 @@ struct MapTalkView: View {
                         currentRegion = context.region
                         currentCamera = context.camera
                         settledFriendFootprintRegion = context.region
+                        if focusedJourneyHeader == nil {
+                            viewModel.searchMap(in: context.region)
+                        }
                         refreshFriendFootprintVisibility(
                             using: mapProxy,
                             canvasSize: geometry.size,
@@ -647,6 +679,7 @@ struct MapTalkView: View {
                                     activeExperience = nil
                                     experiencePresentation.dismiss()
                                     flushPendingViewedStory(nil)
+                                    viewModel.releaseRetainedActiveFeedItem()
                                     viewModel.centerOnUser()
                                 },
                                 onTapPlace: {
@@ -672,6 +705,7 @@ struct MapTalkView: View {
                 selectedRealId = nil
                 selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
                 selectedFriendFootprintID = nil
+                viewModel.releaseRetainedActiveFeedItem()
 
                 if shouldReturnToActivityAfterPreview {
                     shouldReturnToActivityAfterPreview = false
@@ -770,6 +804,29 @@ struct MapTalkView: View {
                                 isPOIContributorUnseen: isPOIContributorUnseen
                             )
                             .id("\(rated.id)-\(nonce)")
+                        )
+                    case let .real(real: real, nonce: nonce):
+                        let pager = ExperienceDetailView.SequencePager(
+                            items: [
+                                .init(
+                                    id: real.id,
+                                    mode: .real(real, viewModel.user(for: real.userId))
+                                )
+                            ]
+                        )
+                        return AnyView(
+                            ExperienceDetailView(
+                                sequencePager: pager,
+                                selection: .constant(real.id),
+                                isExpanded: isExpanded,
+                                onCollapsedTap: experiencePresentation.expand,
+                                onJourneyAvatarStackTap: { journey in
+                                    handleJourneyTap(journey, true, focusedJourneyHeader)
+                                },
+                                journeyProvider: viewModel.journey(for:),
+                                userProvider: viewModel.user(for:)
+                            )
+                            .id("\(real.id)-\(nonce)")
                         )
                     case let .friendPlace(rated: rated, sourceID: sourceID, nonce: nonce):
                         return AnyView(
@@ -888,6 +945,16 @@ struct MapTalkView: View {
                 }
             }
             .onChangeCompat(of: storyItemIds) { ids in
+                // Feed membership belongs to the sequence pager. A standalone
+                // map-search preview has its own selected snapshot and must not
+                // lose that selection when the public feed refreshes or expires.
+                switch activeExperience {
+                case .real, .poi, .friendPlace:
+                    return
+                default:
+                    break
+                }
+
                 if ids.isEmpty {
                     selectedRealId = nil
                     selectedStoryId = nil
@@ -915,13 +982,36 @@ struct MapTalkView: View {
                 if identifier != nil {
                     return
                 }
-                guard let entryId = journeyEntryStoryId else { return }
-                if let item = storyItemForId(entryId) {
-                    selectStoryItem(item, true, true, nil)
-                } else {
-                    selectedStoryId = entryId
+                guard let entry = journeyEntry else { return }
+                journeyEntry = nil
+
+                switch entry {
+                case let .feedItem(identifier):
+                    if let item = storyItemForId(identifier) {
+                        selectStoryItem(item, true, true, nil)
+                    } else {
+                        selectedStoryId = nil
+                        selectedRealId = nil
+                        activeExperience = nil
+                        experiencePresentation.dismiss()
+                    }
+                case let .reel(real):
+                    selectedFriendFootprintID = nil
+                    selectedStoryId = real.id
+                    selectedRealId = real.id
+                    pendingRegionCause = .real
+                    viewModel.focus(on: real)
+                    activeExperience = .real(real: real, nonce: UUID())
+                    experiencePresentation.presentNewContent()
+                case let .poi(rated):
+                    selectedFriendFootprintID = nil
+                    selectedStoryId = rated.id
+                    selectedRealId = nil
+                    pendingRegionCause = .poi
+                    viewModel.focus(on: rated)
+                    activeExperience = .poi(rated: rated, nonce: UUID())
+                    experiencePresentation.presentNewContent()
                 }
-                journeyEntryStoryId = nil
             }
             .onChangeCompat(of: experiencePresentation.isPresented) { isActive in
                 if isActive == false {
@@ -965,6 +1055,16 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    var selectedStandalonePOI: RatedPOI? {
+        guard case let .poi(rated, _)? = activeExperience else { return nil }
+        return rated
+    }
+
+    var selectedStandaloneReel: RealPost? {
+        guard case let .real(real, _)? = activeExperience else { return nil }
+        return real
+    }
+
     func refreshFriendFootprintVisibility(
         using mapProxy: MapProxy,
         canvasSize: CGSize,
@@ -991,8 +1091,14 @@ private extension MapTalkView {
                 )
             }
         }
-        let primaryCoordinates = viewModel.reals.map(\.center)
-            + viewModel.ratedPOIs.map(\.poi.coordinate)
+        let primaryCoordinates = viewModel.mapRenderReels(
+            retaining: selectedStoryId,
+            selectedMapReel: selectedStandaloneReel
+        ).map(\.center)
+            + viewModel.mapRenderPOIs(
+                retaining: selectedStoryId,
+                selectedMapPOI: selectedStandalonePOI
+            ).map(\.poi.coordinate)
             + [viewModel.userCoordinate].compactMap { $0 }
         let reservedPoints = Array(
             primaryCoordinates.lazy.filter { coordinate in
@@ -1067,15 +1173,27 @@ private extension MapTalkView {
     ) -> Bool {
         switch destination {
         case let .reel(identifier):
-            guard let item = baseStoryItems.first(where: { item in
+            if let item = baseStoryItems.first(where: { item in
                 guard item.id == identifier else { return false }
                 if case .real = item.source { return true }
                 return false
-            }) else {
+            }) {
+                selectStoryItem(item, true, true, .initial)
+                reelAlignTrigger &+= 1
+                return true
+            }
+
+            guard let real = viewModel.activityReels.first(where: { $0.id == identifier }) else {
                 return false
             }
-            selectStoryItem(item, true, true, .initial)
-            reelAlignTrigger &+= 1
+            viewModel.releaseRetainedActiveFeedItem()
+            pendingRegionCause = .initial
+            selectedFriendFootprintID = nil
+            selectedStoryId = real.id
+            selectedRealId = real.id
+            viewModel.focus(on: real)
+            activeExperience = .real(real: real, nonce: UUID())
+            experiencePresentation.presentNewContent()
             return true
 
         case let .place(identifier):
@@ -1091,11 +1209,13 @@ private extension MapTalkView {
 
             // Activity can outlive the map's recent-story window. Older places
             // still need to open instead of becoming a dead notification row.
-            guard let rated = viewModel.ratedPOIs.first(where: { $0.id == identifier }) else {
+            guard let rated = viewModel.activityPOIs.first(where: { $0.id == identifier })
+                ?? viewModel.ratedPOIs.first(where: { $0.id == identifier }) else {
                 return false
             }
+            viewModel.releaseRetainedActiveFeedItem()
             pendingRegionCause = .initial
-            selectedStoryId = nil
+            selectedStoryId = rated.id
             selectedRealId = nil
             viewModel.focus(on: rated)
             activeExperience = .poi(rated: rated, nonce: UUID())
@@ -1113,7 +1233,7 @@ private extension MapTalkView {
     }
 
     func clearActivityPreviewJourneyState() {
-        journeyEntryStoryId = nil
+        journeyEntry = nil
         journeyStack.removeAll()
         focusedJourneyHeader = nil
         activeExperience = nil
@@ -1345,7 +1465,7 @@ private extension MapTalkView {
         }
 
         if shouldReturnToActivityAfterPreview {
-            journeyEntryStoryId = nil
+            journeyEntry = nil
             focusedJourneyHeader = nil
             activeExperience = nil
             experiencePresentation.dismiss()
@@ -1353,7 +1473,7 @@ private extension MapTalkView {
         }
 
         focusedJourneyHeader = nil
-        if journeyEntryStoryId == nil, currentJourney == nil {
+        if journeyEntry == nil, currentJourney == nil {
             activeExperience = nil
             experiencePresentation.dismiss()
         }
@@ -1526,6 +1646,7 @@ private struct MapTalkControls: View {
 private enum ActiveExperience: Identifiable {
     case sequence(nonce: UUID)
     case journey(journey: JourneyPost, nonce: UUID)
+    case real(real: RealPost, nonce: UUID)
     case poi(rated: RatedPOI, nonce: UUID)
     case friendPlace(rated: RatedPOI, sourceID: String, nonce: UUID)
 
@@ -1534,6 +1655,8 @@ private enum ActiveExperience: Identifiable {
         case let .sequence(nonce):
             return nonce
         case let .journey(_, nonce):
+            return nonce
+        case let .real(_, nonce):
             return nonce
         case let .poi(_, nonce):
             return nonce
@@ -1550,6 +1673,12 @@ private enum ActiveExperience: Identifiable {
             return nil
         }
     }
+}
+
+private enum JourneyEntry {
+    case feedItem(UUID)
+    case reel(RealPost)
+    case poi(RatedPOI)
 }
 
 private enum MapTalkTopChromeLayout {

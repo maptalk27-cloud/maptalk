@@ -51,6 +51,13 @@ final class MapTalkViewModel: ObservableObject {
     )
     @Published var ratedPOIs: [RatedPOI] = []
     @Published var reals: [RealPost] = []
+    /// Stable public feed snapshots. Camera movement, selection and read state
+    /// never rebuild these arrays; only feed sources or an explicit expiry do.
+    @Published private(set) var activeFeedItems: [RealStoriesRow.StoryItem] = []
+    @Published private(set) var activeFeedPOIs: [RatedPOI] = []
+    @Published private(set) var activeFeedReels: [RealPost] = []
+    @Published private(set) var activityPOIs: [RatedPOI] = []
+    @Published private(set) var activityReels: [RealPost] = []
     @Published var userCoordinate: CLLocationCoordinate2D?
     /// The unprojected device reading is kept alongside the coordinate so a
     /// publish can reject a stale or invalid location instead of silently
@@ -62,12 +69,18 @@ final class MapTalkViewModel: ObservableObject {
     let scope: Scope
     let friendFootprints: [MapTalkFriendFootprint]
     private let environment: AppEnvironment
+    private let mapSearchRegion = PassthroughSubject<MKCoordinateRegion, Never>()
     private var repositoryPOIs: [RatedPOI] = []
+    private var nearbySocialPOIs: [RatedPOI] = []
+    private var repositoryActivePOIs: [RatedPOI] = []
     @Published private var nearbyDirectoryPOIs: [RatedPOI] = []
-    private var repositoryReals: [RealPost] = []
+    private var repositoryMapReels: [RealPost] = []
+    private var repositoryActiveReels: [RealPost] = []
     private var publishedPOIOverlays: [RatedPOI] = []
     private var publishedReelOverlays: [RealPost] = []
     private var shouldCenterWhenLocationArrives = false
+    private var retainedActiveFeedItemID: UUID?
+    private var activeFeedExpiryWorkItem: DispatchWorkItem?
     private var cancellables = Set<AnyCancellable>()
     init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
@@ -86,7 +99,67 @@ final class MapTalkViewModel: ObservableObject {
     func onAppear() {
         if case .global = scope {
             environment.location.requestWhenInUse()
+            searchMap(in: region)
+            rebuildActiveFeed(asOf: .now)
         }
+    }
+
+    /// Search-render input follows the map camera. It is intentionally
+    /// independent from the device coordinate and the top active feed.
+    func searchMap(in region: MKCoordinateRegion) {
+        guard case .global = scope else { return }
+        mapSearchRegion.send(region)
+    }
+
+    /// A feed item can be selected before the camera search response arrives.
+    /// Retain that one canonical place so focusing it never lands on an empty
+    /// map; closing or selecting another item releases it naturally.
+    func mapRenderPOIs(
+        retaining selectedID: UUID?,
+        selectedMapPOI: RatedPOI? = nil
+    ) -> [RatedPOI] {
+        var result = mergePOIs(
+            preferred: activeFeedPOIs,
+            fallback: ratedPOIs
+        )
+        if let selectedID,
+           let selectedMapPOI,
+           selectedMapPOI.id == selectedID {
+            result = mergePOIs(preferred: [selectedMapPOI], fallback: result)
+        }
+        return result
+    }
+
+    func mapRenderReels(
+        retaining selectedID: UUID?,
+        selectedMapReel: RealPost? = nil
+    ) -> [RealPost] {
+        var result = merge(activeFeedReels, with: reals)
+        if let selectedID,
+           let selectedMapReel,
+           selectedMapReel.id == selectedID {
+            result = merge([selectedMapReel], with: result)
+        }
+        return result
+    }
+
+    /// Keep the currently opened feed item stable if its TTL crosses while
+    /// the card is on screen. It leaves the normal feed as soon as the user
+    /// closes or chooses another context.
+    func retainActiveFeedItem(id: UUID) {
+        guard activeFeedItems.contains(where: { $0.id == id }) else { return }
+        let previousID = retainedActiveFeedItemID
+        guard previousID != id else { return }
+        retainedActiveFeedItemID = id
+        if previousID != nil {
+            rebuildActiveFeed(asOf: .now)
+        }
+    }
+
+    func releaseRetainedActiveFeedItem() {
+        guard retainedActiveFeedItemID != nil else { return }
+        retainedActiveFeedItemID = nil
+        rebuildActiveFeed(asOf: .now)
     }
 
     func centerOnUser() {
@@ -458,14 +531,43 @@ final class MapTalkViewModel: ObservableObject {
 
         locationStream
             .compactMap { $0?.coordinate }
-            .flatMap { [environment] coordinate in
+            .removeDuplicates { previous, next in
+                previous.distance(to: next) < 25
+            }
+            .debounce(for: .milliseconds(250), scheduler: DispatchQueue.main)
+            .map { [environment] coordinate in
                 environment.poiRepo.near(coordinate)
             }
+            .switchToLatest()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] pois in
+                self?.nearbySocialPOIs = pois
+            }
+            .store(in: &cancellables)
+
+        mapSearchRegion
+            .map { [environment] region in
+                environment.poiRepo.near(region.center)
+            }
+            .switchToLatest()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] pois in
                 guard let self else { return }
-                self.repositoryPOIs = pois
-                self.rebuildVisibleContent()
+                repositoryPOIs = pois
+                rebuildMapRenderContent()
+            }
+            .store(in: &cancellables)
+
+        mapSearchRegion
+            .map { [environment] region in
+                environment.realRepo.active(in: Self.mapRect(for: region))
+            }
+            .switchToLatest()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] reals in
+                guard let self else { return }
+                repositoryMapReels = reals
+                rebuildMapRenderContent()
             }
             .store(in: &cancellables)
 
@@ -494,7 +596,8 @@ final class MapTalkViewModel: ObservableObject {
             .sink { [weak self] overlays in
                 guard let self else { return }
                 publishedPOIOverlays = overlays
-                rebuildVisibleContent()
+                rebuildMapRenderContent()
+                rebuildActiveFeed(asOf: .now)
             }
             .store(in: &cancellables)
 
@@ -503,7 +606,18 @@ final class MapTalkViewModel: ObservableObject {
             .sink { [weak self] overlays in
                 guard let self else { return }
                 publishedReelOverlays = overlays
-                rebuildVisibleContent()
+                rebuildMapRenderContent()
+                rebuildActiveFeed(asOf: .now)
+            }
+            .store(in: &cancellables)
+
+        environment.activePOIRepo
+            .active(in: nil)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] places in
+                guard let self else { return }
+                repositoryActivePOIs = places
+                rebuildActiveFeed(asOf: .now)
             }
             .store(in: &cancellables)
 
@@ -512,10 +626,12 @@ final class MapTalkViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] reals in
                 guard let self else { return }
-                self.repositoryReals = reals
-                self.rebuildVisibleContent()
+                self.repositoryActiveReels = reals
+                self.rebuildActiveFeed(asOf: .now)
             }
             .store(in: &cancellables)
+
+        searchMap(in: region)
     }
 
     private func loadUserScope(for user: User) {
@@ -524,16 +640,105 @@ final class MapTalkViewModel: ObservableObject {
             context: .profileContext(for: user)
         )
         repositoryPOIs = snapshot.footprints.map(\.ratedPOI)
-        repositoryReals = snapshot.reels
-        rebuildVisibleContent()
+        repositoryMapReels = snapshot.reels
+        repositoryActiveReels = snapshot.reels
+        rebuildMapRenderContent()
+        activeFeedPOIs = repositoryPOIs
+        activeFeedReels = repositoryActiveReels
+        activityPOIs = repositoryPOIs
+        activityReels = repositoryActiveReels
+        activeFeedItems = MapStoryFeed.items(
+            reals: repositoryActiveReels,
+            ratedPOIs: repositoryPOIs,
+            onlyRecentPOIStories: false,
+            userProvider: user(for:),
+            now: .now
+        )
         userCoordinate = nil
         liveLocation = nil
         region = snapshot.mapRegion
     }
 
-    private func rebuildVisibleContent() {
-        ratedPOIs = merge(publishedPOIOverlays, with: repositoryPOIs)
-        reals = merge(publishedReelOverlays, with: repositoryReals)
+    private func rebuildMapRenderContent() {
+        ratedPOIs = mergePOIs(
+            preferred: publishedPOIOverlays,
+            fallback: repositoryPOIs
+        )
+        reals = merge(publishedReelOverlays, with: repositoryMapReels)
+    }
+
+    /// Builds one feed snapshot for a deliberate source/lifecycle event.
+    /// SwiftUI body recomputation (including a tap) only reads this snapshot,
+    /// so wall-clock filtering can no longer make an item disappear mid-tap.
+    private func rebuildActiveFeed(asOf now: Date) {
+        guard case .global = scope else { return }
+
+        activeFeedExpiryWorkItem?.cancel()
+
+        let feedPOIs = mergePOIs(
+            preferred: publishedPOIOverlays,
+            fallback: repositoryActivePOIs
+        )
+        let allFeedReels = merge(publishedReelOverlays, with: repositoryActiveReels)
+        activityPOIs = feedPOIs
+        activityReels = allFeedReels
+        let feedReels = allFeedReels
+            .filter { $0.expiresAt >= now }
+        var items = MapStoryFeed.items(
+            reals: feedReels,
+            ratedPOIs: feedPOIs,
+            onlyRecentPOIStories: true,
+            userProvider: user(for:),
+            now: now
+        )
+        if let retainedActiveFeedItemID,
+           items.contains(where: { $0.id == retainedActiveFeedItemID }) == false,
+           let retained = activeFeedItems.first(where: { $0.id == retainedActiveFeedItemID }) {
+            items.append(retained)
+            items.sort { $0.timestamp > $1.timestamp }
+        }
+
+        activeFeedItems = items
+        activeFeedReels = items.compactMap { item in
+            guard case let .real(real) = item.source else { return nil }
+            return real
+        }
+        activeFeedPOIs = items.compactMap { item in
+            guard case let .poi(group) = item.source else { return nil }
+            return group.ratedPOI
+        }
+
+        scheduleNextActiveFeedExpiry(from: items, asOf: now)
+    }
+
+    private func scheduleNextActiveFeedExpiry(
+        from items: [RealStoriesRow.StoryItem],
+        asOf now: Date
+    ) {
+        let expiryDates = items.flatMap { item -> [Date] in
+            switch item.source {
+            case let .real(real):
+                return [real.expiresAt]
+            case let .poi(group):
+                return group.sharers.map {
+                    $0.timestamp.addingTimeInterval(StoryReadKeys.freshWindow)
+                }
+            case .journey:
+                return []
+            }
+        }
+        .filter { $0 >= now }
+
+        guard let nextExpiry = expiryDates.min() else { return }
+        let delay = max(0.05, nextExpiry.timeIntervalSince(now) + 0.01)
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.rebuildActiveFeed(asOf: .now)
+        }
+        activeFeedExpiryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + delay,
+            execute: workItem
+        )
     }
 
     /// POI selection is intentionally proximity-based, not map-visible based.
@@ -556,7 +761,7 @@ final class MapTalkViewModel: ObservableObject {
         // Keep public social history separate from MyMap so a private check-in
         // can never be presented as friend activity.
         var publicSocialCandidates: [UUID: RatedPOI] = [:]
-        for place in repositoryPOIs {
+        for place in nearbySocialPOIs + repositoryActivePOIs {
             if let existing = publicSocialCandidates[place.id] {
                 publicSocialCandidates[place.id] = mergedPOI(
                     publicVersion: existing,
@@ -742,7 +947,9 @@ final class MapTalkViewModel: ObservableObject {
     private func publicPOI(withID id: UUID) -> RatedPOI? {
         let sources = [
             nearbyDirectoryPOIs.first { $0.id == id },
+            nearbySocialPOIs.first { $0.id == id },
             repositoryPOIs.first { $0.id == id },
+            repositoryActivePOIs.first { $0.id == id },
             environment.myMapArchive.publicPOIOverlays.first { $0.id == id }
         ].compactMap { $0 }
 
@@ -805,6 +1012,60 @@ final class MapTalkViewModel: ObservableObject {
     where Item.ID: Hashable {
         let localIDs = Set(local.map(\.id))
         return local + repository.filter { localIDs.contains($0.id) == false }
+    }
+
+    /// The same canonical place can arrive from the active server stream and
+    /// an optimistic local publish. Keep one place while unioning check-ins;
+    /// whole-object replacement would drop another person's active visit.
+    private func mergePOIs(
+        preferred: [RatedPOI],
+        fallback: [RatedPOI]
+    ) -> [RatedPOI] {
+        var result = fallback
+        for place in preferred.reversed() {
+            if let index = result.firstIndex(where: { $0.id == place.id }) {
+                result[index] = mergedPOI(
+                    publicVersion: place,
+                    archivedVersion: result[index]
+                )
+            } else {
+                result.insert(place, at: 0)
+            }
+        }
+        return result
+    }
+
+    private static func mapRect(for region: MKCoordinateRegion) -> MKMapRect {
+        if region.span.latitudeDelta >= 180 || region.span.longitudeDelta >= 360 {
+            return .world
+        }
+
+        let halfLatitude = region.span.latitudeDelta / 2
+        let halfLongitude = region.span.longitudeDelta / 2
+        let west = region.center.longitude - halfLongitude
+        let east = region.center.longitude + halfLongitude
+        if west < -180 || east > 180 {
+            return .world
+        }
+        let mercatorLatitudeLimit = 85.051_128_78
+        let northWest = MKMapPoint(
+            CLLocationCoordinate2D(
+                latitude: min(mercatorLatitudeLimit, region.center.latitude + halfLatitude),
+                longitude: west
+            )
+        )
+        let southEast = MKMapPoint(
+            CLLocationCoordinate2D(
+                latitude: max(-mercatorLatitudeLimit, region.center.latitude - halfLatitude),
+                longitude: east
+            )
+        )
+        return MKMapRect(
+            x: min(northWest.x, southEast.x),
+            y: min(northWest.y, southEast.y),
+            width: abs(southEast.x - northWest.x),
+            height: abs(southEast.y - northWest.y)
+        )
     }
 
     private func regionAround(

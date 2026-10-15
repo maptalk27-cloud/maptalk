@@ -15,6 +15,7 @@ struct maptalkTests {
             build: .init(configuration: .debug, featureFlags: .mock),
             location: location,
             notifications: NotificationServiceImpl(),
+            activePOIRepo: InMemoryPOIRepository(),
             poiRepo: InMemoryPOIRepository(),
             realRepo: InMemoryRealRepository(),
             myMapArchive: MyMapArchiveStore()
@@ -96,6 +97,7 @@ struct maptalkTests {
             build: .init(configuration: .debug, featureFlags: .mock),
             location: LocationServiceImpl(),
             notifications: NotificationServiceImpl(),
+            activePOIRepo: InMemoryPOIRepository(),
             poiRepo: InMemoryPOIRepository(),
             realRepo: InMemoryRealRepository(),
             myMapArchive: archive
@@ -135,6 +137,7 @@ struct maptalkTests {
             build: .init(configuration: .debug, featureFlags: .mock),
             location: LocationServiceImpl(),
             notifications: NotificationServiceImpl(),
+            activePOIRepo: InMemoryPOIRepository(),
             poiRepo: InMemoryPOIRepository(),
             realRepo: InMemoryRealRepository(),
             myMapArchive: archive
@@ -176,6 +179,7 @@ struct maptalkTests {
             build: .init(configuration: .debug, featureFlags: .mock),
             location: LocationServiceImpl(),
             notifications: NotificationServiceImpl(),
+            activePOIRepo: InMemoryPOIRepository(),
             poiRepo: InMemoryPOIRepository(),
             realRepo: InMemoryRealRepository(),
             myMapArchive: archive
@@ -263,6 +267,335 @@ struct maptalkTests {
         #expect(publicPlace.comments.isEmpty)
         #expect(publicPlace.tags.isEmpty)
         #expect(publicPlace.endorsements.solid == 0)
+    }
+
+    @Test
+    @MainActor
+    func activeFeedUsesAnInclusiveFixedTwentyFourHourCutoff() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let boundary = makeActiveFeedPOI(
+            name: "Boundary place",
+            checkInDates: [now.addingTimeInterval(-StoryReadKeys.freshWindow)]
+        )
+        let expired = makeActiveFeedPOI(
+            name: "Expired place",
+            checkInDates: [now.addingTimeInterval(-StoryReadKeys.freshWindow - 0.001)]
+        )
+
+        let items = MapStoryFeed.items(
+            reals: [],
+            ratedPOIs: [expired, boundary],
+            onlyRecentPOIStories: true,
+            userProvider: { _ in nil },
+            now: now
+        )
+
+        #expect(items.map(\.id) == [boundary.id])
+        let item = try #require(items.first)
+        guard case let .poi(group) = item.source else {
+            Issue.record("The active boundary item must remain a POI")
+            return
+        }
+        #expect(group.sharers.map(\.timestamp) == [now.addingTimeInterval(-StoryReadKeys.freshWindow)])
+    }
+
+    @Test
+    @MainActor
+    func activeFeedSnapshotKeepsPOIIdentityAcrossFocusSearchAndReadState() async throws {
+        let now = Date.now
+        let activePlace = makeActiveFeedPOI(
+            name: "Active feed place",
+            checkInDates: [now.addingTimeInterval(-60)],
+            includesMedia: true
+        )
+        let mapSearchPlace = makeActiveFeedPOI(
+            name: "Map search only",
+            checkInDates: [now.addingTimeInterval(-30)]
+        )
+        let mapDuplicate = makeActiveFeedPOI(
+            id: activePlace.id,
+            name: "Directory shell",
+            checkInDates: []
+        )
+        let activeReel = makeActiveFeedReel(createdAt: now.addingTimeInterval(-20))
+        let mapSearchReel = makeActiveFeedReel(createdAt: now.addingTimeInterval(-10))
+        let mapRepository = MutablePOIRepository(places: [mapDuplicate, mapSearchPlace])
+        let location = DelayedLocationService()
+        let environment = AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: .mock),
+            location: location,
+            notifications: NotificationServiceImpl(),
+            activePOIRepo: FixedPOIRepository(places: [activePlace]),
+            poiRepo: mapRepository,
+            realRepo: FixedRealRepository(
+                activeReals: [activeReel],
+                mapReals: [mapSearchReel]
+            ),
+            myMapArchive: MyMapArchiveStore()
+        )
+        let viewModel = MapTalkViewModel(environment: environment)
+        for _ in 0..<5 {
+            if viewModel.activeFeedItems.count == 2,
+               viewModel.ratedPOIs.map(\.id) == [activePlace.id, mapSearchPlace.id],
+               viewModel.reals.map(\.id) == [mapSearchReel.id] {
+                break
+            }
+            await Task.yield()
+        }
+        let beforeIDs = viewModel.activeFeedItems.map(\.id)
+        let suiteName = "MapTalk.active-feed-stability.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let readStore = StoryReadStore(defaults: defaults, storageKey: "viewed")
+        let readKeys = viewModel.activeFeedItems.flatMap { item -> [String] in
+            guard case let .poi(group) = item.source else { return [] }
+            return group.unreadCandidateKeys
+        }
+
+        viewModel.retainActiveFeedItem(id: activePlace.id)
+        viewModel.focus(on: activePlace)
+        viewModel.searchMap(
+            in: MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 40.7128, longitude: -74.0060),
+                span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
+            )
+        )
+        readStore.markViewed(readKeys)
+        await Task.yield()
+
+        #expect(beforeIDs == [activeReel.id, activePlace.id])
+        #expect(viewModel.activeFeedItems.map(\.id) == beforeIDs)
+        #expect(viewModel.activeFeedPOIs.map(\.id) == [activePlace.id])
+        #expect(viewModel.activeFeedReels.map(\.id) == [activeReel.id])
+        #expect(viewModel.ratedPOIs.map(\.id) == [activePlace.id, mapSearchPlace.id])
+        #expect(viewModel.reals.map(\.id) == [mapSearchReel.id])
+        #expect(readKeys.isEmpty == false)
+        #expect(readKeys.allSatisfy(readStore.isViewed))
+
+        let initialRender = viewModel.mapRenderPOIs(retaining: nil)
+        #expect(Set(initialRender.map(\.id)) == Set([activePlace.id, mapSearchPlace.id]))
+        #expect(initialRender.first(where: { $0.id == activePlace.id })?.poi.name == "Active feed place")
+
+        mapRepository.send([])
+        for _ in 0..<5 {
+            if viewModel.ratedPOIs.isEmpty { break }
+            await Task.yield()
+        }
+        let retainedRender = viewModel.mapRenderPOIs(
+            retaining: mapSearchPlace.id,
+            selectedMapPOI: mapSearchPlace
+        )
+        #expect(Set(retainedRender.map(\.id)) == Set([activePlace.id, mapSearchPlace.id]))
+    }
+
+    @Test
+    @MainActor
+    func activeFeedRefreshKeepsStandaloneSearchOnlyMarkersRenderEligible() async {
+        let now = Date.now
+        let initialActivePOI = makeActiveFeedPOI(
+            name: "Initial active place",
+            checkInDates: [now.addingTimeInterval(-60)]
+        )
+        let replacementActivePOI = makeActiveFeedPOI(
+            name: "Replacement active place",
+            checkInDates: [now.addingTimeInterval(-30)]
+        )
+        let selectedSearchPOI = makeActiveFeedPOI(
+            name: "Selected search-only place",
+            checkInDates: []
+        )
+        let initialActiveReel = makeActiveFeedReel(createdAt: now.addingTimeInterval(-50))
+        let replacementActiveReel = makeActiveFeedReel(createdAt: now.addingTimeInterval(-20))
+        let selectedSearchReel = makeActiveFeedReel(createdAt: now.addingTimeInterval(-10))
+        let activePOIRepository = MutableActivePOIRepository(places: [initialActivePOI])
+        let mapPOIRepository = MutablePOIRepository(places: [selectedSearchPOI])
+        let realRepository = MutableRealRepository(
+            activeReals: [initialActiveReel],
+            mapReals: [selectedSearchReel]
+        )
+        let environment = AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: .mock),
+            location: DelayedLocationService(),
+            notifications: NotificationServiceImpl(),
+            activePOIRepo: activePOIRepository,
+            poiRepo: mapPOIRepository,
+            realRepo: realRepository,
+            myMapArchive: MyMapArchiveStore()
+        )
+        let viewModel = MapTalkViewModel(environment: environment)
+        for _ in 0..<10 {
+            if Set(viewModel.activeFeedItems.map(\.id))
+                == Set([initialActivePOI.id, initialActiveReel.id]),
+               viewModel.ratedPOIs.map(\.id) == [selectedSearchPOI.id],
+               viewModel.reals.map(\.id) == [selectedSearchReel.id] {
+                break
+            }
+            await Task.yield()
+        }
+
+        mapPOIRepository.send([])
+        realRepository.sendMap([])
+        activePOIRepository.send([replacementActivePOI])
+        realRepository.sendActive([replacementActiveReel])
+        for _ in 0..<20 {
+            if Set(viewModel.activeFeedItems.map(\.id))
+                == Set([replacementActivePOI.id, replacementActiveReel.id]),
+               viewModel.ratedPOIs.isEmpty,
+               viewModel.reals.isEmpty {
+                break
+            }
+            await Task.yield()
+        }
+
+        let unretainedPOIIDs = Set(viewModel.mapRenderPOIs(retaining: nil).map(\.id))
+        let retainedPOIIDs = Set(
+            viewModel.mapRenderPOIs(
+                retaining: selectedSearchPOI.id,
+                selectedMapPOI: selectedSearchPOI
+            ).map(\.id)
+        )
+        let unretainedReelIDs = Set(viewModel.mapRenderReels(retaining: nil).map(\.id))
+        let retainedReelIDs = Set(
+            viewModel.mapRenderReels(
+                retaining: selectedSearchReel.id,
+                selectedMapReel: selectedSearchReel
+            ).map(\.id)
+        )
+
+        #expect(Set(viewModel.activeFeedItems.map(\.id)) == Set([
+            replacementActivePOI.id,
+            replacementActiveReel.id
+        ]))
+        #expect(unretainedPOIIDs == Set([replacementActivePOI.id]))
+        #expect(retainedPOIIDs == Set([replacementActivePOI.id, selectedSearchPOI.id]))
+        #expect(unretainedReelIDs == Set([replacementActiveReel.id]))
+        #expect(retainedReelIDs == Set([replacementActiveReel.id, selectedSearchReel.id]))
+    }
+
+    @Test
+    @MainActor
+    func switchingFeedSelectionReleasesAnExpiredRetainedPOI() async {
+        let now = Date.now
+        let firstID = UUID()
+        let firstFresh = makeActiveFeedPOI(
+            id: firstID,
+            name: "First active place",
+            checkInDates: [now.addingTimeInterval(-60)]
+        )
+        let firstExpired = makeActiveFeedPOI(
+            id: firstID,
+            name: "First active place",
+            checkInDates: [now.addingTimeInterval(-StoryReadKeys.freshWindow - 60)]
+        )
+        let second = makeActiveFeedPOI(
+            name: "Second active place",
+            checkInDates: [now.addingTimeInterval(-30)]
+        )
+        let activeRepository = MutableActivePOIRepository(places: [firstFresh, second])
+        let environment = AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: .mock),
+            location: DelayedLocationService(),
+            notifications: NotificationServiceImpl(),
+            activePOIRepo: activeRepository,
+            poiRepo: FixedPOIRepository(places: []),
+            realRepo: FixedRealRepository(reals: []),
+            myMapArchive: MyMapArchiveStore()
+        )
+        let viewModel = MapTalkViewModel(environment: environment)
+        for _ in 0..<5 {
+            if viewModel.activeFeedItems.count == 2 { break }
+            await Task.yield()
+        }
+
+        viewModel.retainActiveFeedItem(id: firstID)
+        activeRepository.send([firstExpired, second])
+        for _ in 0..<20 {
+            let sourceTimestamp = viewModel.activityPOIs
+                .first(where: { $0.id == firstID })?
+                .checkIns.first?.createdAt
+            if sourceTimestamp == firstExpired.checkIns.first?.createdAt { break }
+            await Task.yield()
+        }
+        #expect(Set(viewModel.activeFeedItems.map(\.id)) == Set([firstID, second.id]))
+
+        viewModel.retainActiveFeedItem(id: second.id)
+        #expect(viewModel.activeFeedItems.map(\.id) == [second.id])
+    }
+
+    @Test
+    @MainActor
+    func historicalFriendFootprintNeverEntersTheActiveFeed() async {
+        let now = Date.now
+        let activePlace = makeActiveFeedPOI(
+            name: "Active place",
+            checkInDates: [now.addingTimeInterval(-60)]
+        )
+        let historicalPlace = makeActiveFeedPOI(
+            name: "Historical friend place",
+            checkInDates: [now.addingTimeInterval(-StoryReadKeys.freshWindow - 1)]
+        )
+        let footprint = MapTalkFriendFootprint(
+            id: "historical-friend-place",
+            ratedPOI: historicalPlace,
+            friendIDs: [UUID()]
+        )
+        let environment = AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: .mock),
+            location: DelayedLocationService(),
+            notifications: NotificationServiceImpl(),
+            activePOIRepo: FixedPOIRepository(places: [activePlace]),
+            poiRepo: FixedPOIRepository(places: [footprint.ratedPOI]),
+            realRepo: FixedRealRepository(reals: []),
+            myMapArchive: MyMapArchiveStore()
+        )
+        let viewModel = MapTalkViewModel(environment: environment)
+        for _ in 0..<5 {
+            if viewModel.activeFeedItems.isEmpty == false,
+               viewModel.ratedPOIs.isEmpty == false {
+                break
+            }
+            await Task.yield()
+        }
+
+        let historicalIDs = Set(viewModel.friendFootprints.map { $0.ratedPOI.id })
+            .union([footprint.ratedPOI.id])
+        let mapSearchInputIDs = Set(viewModel.ratedPOIs.map(\.id))
+
+        #expect(mapSearchInputIDs == Set([footprint.ratedPOI.id]))
+        #expect(viewModel.activeFeedItems.map(\.id) == [activePlace.id])
+        #expect(Set(viewModel.activeFeedItems.map(\.id)).isDisjoint(with: historicalIDs))
+    }
+
+    @Test
+    @MainActor
+    func activeFeedMixesReelsAndRecentPOIsInRecencyOrder() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let reel = makeActiveFeedReel(createdAt: now.addingTimeInterval(-60))
+        let place = makeActiveFeedPOI(
+            name: "Recent place",
+            checkInDates: [now.addingTimeInterval(-120)]
+        )
+
+        let items = MapStoryFeed.items(
+            reals: [reel],
+            ratedPOIs: [place],
+            onlyRecentPOIStories: true,
+            userProvider: { _ in nil },
+            now: now
+        )
+
+        #expect(items.map(\.id) == [reel.id, place.id])
+        #expect(items.count == 2)
+        if items.count == 2 {
+            guard case .real = items[0].source else {
+                Issue.record("The newest active item must remain a Reel")
+                return
+            }
+            guard case .poi = items[1].source else {
+                Issue.record("The recent place must remain a POI in the mixed feed")
+                return
+            }
+        }
     }
 
     @Test
@@ -1437,12 +1770,70 @@ struct maptalkTests {
         )
     }
 
+    private func makeActiveFeedPOI(
+        id: UUID = UUID(),
+        name: String,
+        checkInDates: [Date],
+        includesMedia: Bool = false
+    ) -> RatedPOI {
+        RatedPOI(
+            poi: POI(
+                id: id,
+                name: name,
+                coordinate: CLLocationCoordinate2D(latitude: 37.3318, longitude: -122.0312),
+                category: .viewpoint
+            ),
+            highlight: nil,
+            secondary: nil,
+            media: [],
+            checkIns: checkInDates.map { date in
+                RatedPOI.CheckIn(
+                    userId: UUID(),
+                    createdAt: date,
+                    media: includesMedia
+                        ? [
+                            RatedPOI.Media(
+                                kind: .photo(URL(fileURLWithPath: "/tmp/active-feed.jpg"))
+                            )
+                        ]
+                        : []
+                )
+            },
+            comments: [],
+            endorsements: .init(hype: 0, solid: 0, meh: 0, questionable: 0),
+            tags: [],
+            isFavoritedByCurrentUser: false,
+            favoritesCount: 0
+        )
+    }
+
+    private func makeActiveFeedReel(
+        id: UUID = UUID(),
+        createdAt: Date
+    ) -> RealPost {
+        RealPost(
+            id: id,
+            userId: UUID(),
+            center: CLLocationCoordinate2D(latitude: 37.3318, longitude: -122.0312),
+            radiusMeters: 200,
+            message: "Active Reel",
+            attachments: [],
+            capsuleId: nil,
+            likes: [],
+            comments: [],
+            visibility: .publicAll,
+            createdAt: createdAt,
+            expiresAt: createdAt.addingTimeInterval(StoryReadKeys.freshWindow)
+        )
+    }
+
     @MainActor
     private func makeEnvironment(archive: MyMapArchiveStore) -> AppEnvironment {
         AppEnvironment(
             build: .init(configuration: .debug, featureFlags: .mock),
             location: LocationServiceImpl(),
             notifications: NotificationServiceImpl(),
+            activePOIRepo: InMemoryPOIRepository(),
             poiRepo: InMemoryPOIRepository(),
             realRepo: InMemoryRealRepository(),
             myMapArchive: archive
@@ -1476,5 +1867,94 @@ private final class DelayedLocationService: LocationService {
 
     func requestWhenInUse() {
         requestCount += 1
+    }
+}
+
+private final class FixedPOIRepository: POIRepository, ActivePOIRepository {
+    let places: [RatedPOI]
+
+    init(places: [RatedPOI]) {
+        self.places = places
+    }
+
+    func near(_: CLLocationCoordinate2D) -> AnyPublisher<[RatedPOI], Never> {
+        Just(places).eraseToAnyPublisher()
+    }
+
+    func active(in _: MKMapRect?) -> AnyPublisher<[RatedPOI], Never> {
+        Just(places).eraseToAnyPublisher()
+    }
+}
+
+private final class MutableActivePOIRepository: ActivePOIRepository {
+    private let subject: CurrentValueSubject<[RatedPOI], Never>
+
+    init(places: [RatedPOI]) {
+        subject = CurrentValueSubject(places)
+    }
+
+    func active(in _: MKMapRect?) -> AnyPublisher<[RatedPOI], Never> {
+        subject.eraseToAnyPublisher()
+    }
+
+    func send(_ places: [RatedPOI]) {
+        subject.send(places)
+    }
+}
+
+private final class MutablePOIRepository: POIRepository {
+    private let subject: CurrentValueSubject<[RatedPOI], Never>
+
+    init(places: [RatedPOI]) {
+        subject = CurrentValueSubject(places)
+    }
+
+    func near(_: CLLocationCoordinate2D) -> AnyPublisher<[RatedPOI], Never> {
+        subject.eraseToAnyPublisher()
+    }
+
+    func send(_ places: [RatedPOI]) {
+        subject.send(places)
+    }
+}
+
+private final class FixedRealRepository: RealRepository {
+    let activeReals: [RealPost]
+    let mapReals: [RealPost]
+
+    init(reals: [RealPost]) {
+        activeReals = reals
+        mapReals = reals
+    }
+
+    init(activeReals: [RealPost], mapReals: [RealPost]) {
+        self.activeReals = activeReals
+        self.mapReals = mapReals
+    }
+
+    func active(in region: MKMapRect?) -> AnyPublisher<[RealPost], Never> {
+        Just(region == nil ? activeReals : mapReals).eraseToAnyPublisher()
+    }
+}
+
+private final class MutableRealRepository: RealRepository {
+    private let activeSubject: CurrentValueSubject<[RealPost], Never>
+    private let mapSubject: CurrentValueSubject<[RealPost], Never>
+
+    init(activeReals: [RealPost], mapReals: [RealPost]) {
+        activeSubject = CurrentValueSubject(activeReals)
+        mapSubject = CurrentValueSubject(mapReals)
+    }
+
+    func active(in region: MKMapRect?) -> AnyPublisher<[RealPost], Never> {
+        (region == nil ? activeSubject : mapSubject).eraseToAnyPublisher()
+    }
+
+    func sendActive(_ reals: [RealPost]) {
+        activeSubject.send(reals)
+    }
+
+    func sendMap(_ reals: [RealPost]) {
+        mapSubject.send(reals)
     }
 }
