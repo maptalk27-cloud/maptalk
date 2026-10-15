@@ -35,10 +35,8 @@ struct MapTalkView: View {
     @State private var publishDestination: MapTalkPublishDestination?
     @State private var queuedPublishDestination: MapTalkPublishDestination?
     @State private var isActivityPresented = false
-    @State private var isActivityPresentationQueued = false
+    @State private var isActivityOverExperiencePresented = false
     @State private var viewedActivityIDs = Set<String>()
-    @State private var pendingActivityDestination: MapTalkActivityEvent.Target.Destination?
-    @State private var shouldReturnToActivityAfterPreview = false
     @Namespace private var heroNamespace
     private let initialStoryId: UUID?
 
@@ -190,6 +188,17 @@ struct MapTalkView: View {
             }
             let isPOIContributorUnseen: ([String]) -> Bool = { keys in
                 keys.contains { storyReadStore.isViewed($0) == false }
+            }
+            let activityContent = MapTalkActivityFlow(
+                events: activityEvents,
+                reals: viewModel.activityReels,
+                places: viewModel.activityPOIs,
+                journeyProvider: viewModel.journey(for:),
+                userProvider: viewModel.user(for:),
+                onPOIContributorViewed: markStoryReadKeysViewed,
+                isPOIContributorUnseen: isPOIContributorUnseen
+            ) {
+                viewedActivityIDs.formUnion(activityEvents.map(\.id))
             }
             let flushPendingViewedStory: (String?) -> Void = { excludingKey in
                 guard let pendingKey = pendingViewedStoryKey,
@@ -707,17 +716,7 @@ struct MapTalkView: View {
                 selectedFriendFootprintID = nil
                 viewModel.releaseRetainedActiveFeedItem()
 
-                if shouldReturnToActivityAfterPreview {
-                    shouldReturnToActivityAfterPreview = false
-                    clearActivityPreviewJourneyState()
-                    DispatchQueue.main.async {
-                        isActivityPresented = true
-                    }
-                    return
-                }
-
                 presentQueuedPublisherIfNeeded()
-                presentQueuedActivityIfNeeded()
             }) {
                 let isExpanded = experiencePresentation.isExpanded
                 let shouldAnimateSelection = isExpanded == false
@@ -852,6 +851,10 @@ struct MapTalkView: View {
                         compactDetent: .fraction(ControlsLayout.previewFraction),
                         selection: $experiencePresentation.detent
                     )
+                    .fullScreenCover(isPresented: $isActivityOverExperiencePresented) {
+                        activityContent
+                            .presentationBackground(Color(.systemBackground))
+                    }
             }
             .sheet(item: $publishDestination) { destination in
                 GeometryReader { composerGeometry in
@@ -888,36 +891,12 @@ struct MapTalkView: View {
                 .presentationCompactAdaptation(.sheet)
                 .interactiveDismissDisabled()
             }
-            .fullScreenCover(isPresented: $isActivityPresented, onDismiss: {
-                guard let destination = pendingActivityDestination else { return }
-                pendingActivityDestination = nil
-
-                Task { @MainActor in
-                    await Task.yield()
-                    let opened = openActivityDestination(
-                        destination,
-                        baseStoryItems: baseStoryItems,
-                        selectStoryItem: selectStoryItem,
-                        handleJourneyTap: handleJourneyTap
-                    )
-                    shouldReturnToActivityAfterPreview = opened
-                    if opened == false {
-                        isActivityPresented = true
-                    }
-                }
-            }) {
-                MapTalkActivityView(events: activityEvents) {
-                    withAnimation(.easeOut(duration: 0.16)) {
-                        viewedActivityIDs.formUnion(activityEvents.map(\.id))
-                    }
-                } onSelect: { destination in
-                    pendingActivityDestination = destination
-                    isActivityPresented = false
-                }
-                .presentationBackground(Color(.systemBackground))
+            .fullScreenCover(isPresented: $isActivityPresented) {
+                activityContent
+                    .presentationBackground(Color(.systemBackground))
             }
             .onChange(of: activityEvents.map(\.id)) { _, identifiers in
-                guard isActivityPresented else { return }
+                guard isActivityPresented || isActivityOverExperiencePresented else { return }
                 viewedActivityIDs.formUnion(identifiers)
             }
             .onAppear {
@@ -1165,80 +1144,6 @@ private extension MapTalkView {
         }
     }
 
-    func openActivityDestination(
-        _ destination: MapTalkActivityEvent.Target.Destination,
-        baseStoryItems: [RealStoriesRow.StoryItem],
-        selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void,
-        handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void
-    ) -> Bool {
-        switch destination {
-        case let .reel(identifier):
-            if let item = baseStoryItems.first(where: { item in
-                guard item.id == identifier else { return false }
-                if case .real = item.source { return true }
-                return false
-            }) {
-                selectStoryItem(item, true, true, .initial)
-                reelAlignTrigger &+= 1
-                return true
-            }
-
-            guard let real = viewModel.activityReels.first(where: { $0.id == identifier }) else {
-                return false
-            }
-            viewModel.releaseRetainedActiveFeedItem()
-            pendingRegionCause = .initial
-            selectedFriendFootprintID = nil
-            selectedStoryId = real.id
-            selectedRealId = real.id
-            viewModel.focus(on: real)
-            activeExperience = .real(real: real, nonce: UUID())
-            experiencePresentation.presentNewContent()
-            return true
-
-        case let .place(identifier):
-            if let item = baseStoryItems.first(where: { item in
-                guard item.id == identifier else { return false }
-                if case .poi = item.source { return true }
-                return false
-            }) {
-                selectStoryItem(item, true, true, .initial)
-                reelAlignTrigger &+= 1
-                return true
-            }
-
-            // Activity can outlive the map's recent-story window. Older places
-            // still need to open instead of becoming a dead notification row.
-            guard let rated = viewModel.activityPOIs.first(where: { $0.id == identifier })
-                ?? viewModel.ratedPOIs.first(where: { $0.id == identifier }) else {
-                return false
-            }
-            viewModel.releaseRetainedActiveFeedItem()
-            pendingRegionCause = .initial
-            selectedStoryId = rated.id
-            selectedRealId = nil
-            viewModel.focus(on: rated)
-            activeExperience = .poi(rated: rated, nonce: UUID())
-            experiencePresentation.presentNewContent()
-            return true
-
-        case let .bubble(identifier):
-            guard let bubble = viewModel.journey(for: identifier),
-                  bubble.reels.isEmpty == false || bubble.pois.isEmpty == false else {
-                return false
-            }
-            handleJourneyTap(bubble, true, nil)
-            return true
-        }
-    }
-
-    func clearActivityPreviewJourneyState() {
-        journeyEntry = nil
-        journeyStack.removeAll()
-        focusedJourneyHeader = nil
-        activeExperience = nil
-    }
-
     /// The Bubble picker is another view of the person's private MyMap, not of
     /// the public map underneath the composer. POIs are projected to this
     /// person's check-ins so a shared landmark never leaks somebody else's
@@ -1349,27 +1254,16 @@ private extension MapTalkView {
 
     func requestActivity() {
         guard isActivityPresented == false,
-              isActivityPresentationQueued == false,
+              isActivityOverExperiencePresented == false,
               publishDestination == nil else {
             return
         }
 
         if experiencePresentation.isPresented {
-            // Close the map capsule before presenting Activity so there is
-            // never more than one modal competing for the same presenter.
-            isActivityPresentationQueued = true
-            experiencePresentation.dismiss()
+            // Present from the existing capsule so its selection and detent
+            // remain intact underneath this independent notification flow.
+            isActivityOverExperiencePresented = true
         } else {
-            isActivityPresented = true
-        }
-    }
-
-    func presentQueuedActivityIfNeeded() {
-        guard isActivityPresentationQueued else { return }
-        isActivityPresentationQueued = false
-
-        DispatchQueue.main.async {
-            guard publishDestination == nil else { return }
             isActivityPresented = true
         }
     }
@@ -1461,14 +1355,6 @@ private extension MapTalkView {
             }
             activeExperience = .sequence(nonce: UUID())
             experiencePresentation.presentNewContent()
-            return
-        }
-
-        if shouldReturnToActivityAfterPreview {
-            journeyEntry = nil
-            focusedJourneyHeader = nil
-            activeExperience = nil
-            experiencePresentation.dismiss()
             return
         }
 

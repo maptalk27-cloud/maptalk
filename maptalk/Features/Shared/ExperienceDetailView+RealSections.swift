@@ -1,6 +1,31 @@
 import Combine
 import SwiftUI
 
+struct ExperienceCommentAnchorPreferenceKey: PreferenceKey {
+    static var defaultValue: Set<UUID> = []
+
+    static func reduce(value: inout Set<UUID>, nextValue: () -> Set<UUID>) {
+        value.formUnion(nextValue())
+    }
+}
+
+private struct ExperienceCommentFocusModifier: ViewModifier {
+    let commentID: UUID
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                Color.clear.preference(
+                    key: ExperienceCommentAnchorPreferenceKey.self,
+                    value: [commentID]
+                )
+            }
+            .id(commentID)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("experience.comment.\(commentID.uuidString)")
+    }
+}
+
 // MARK: - Real detail sections
 
 extension ExperienceDetailView {
@@ -1087,6 +1112,7 @@ struct CommentThreadRow: View {
         }
         .padding(16)
         .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .modifier(ExperienceCommentFocusModifier(commentID: entry.id))
     }
 
     @ViewBuilder
@@ -1137,6 +1163,7 @@ struct CommentReplyRow: View {
                     .foregroundStyle(.white.opacity(0.85))
             }
         }
+        .modifier(ExperienceCommentFocusModifier(commentID: entry.id))
     }
 
     @ViewBuilder

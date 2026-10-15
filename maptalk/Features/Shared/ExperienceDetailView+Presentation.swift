@@ -4,7 +4,9 @@ import SwiftUI
 
 extension ExperienceDetailView {
     var currentMode: Mode {
-        if let context = sequenceContext {
+        if let standaloneMode {
+            return standaloneMode
+        } else if let context = sequenceContext {
             let identifier = context.selection.wrappedValue
             if let item = context.pager.items.first(where: { $0.id == identifier }) {
                 return item.mode

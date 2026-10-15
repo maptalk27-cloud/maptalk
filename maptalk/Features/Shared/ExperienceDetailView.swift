@@ -126,6 +126,7 @@ struct ExperienceDetailView: View {
     }
 
     let poi: RatedPOI?
+    let standaloneMode: Mode?
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
     let onCollapsedTap: (() -> Void)?
@@ -139,6 +140,30 @@ struct ExperienceDetailView: View {
     @State private var selectedProfileContext: UserMapViewModel.Context?
 
     init(
+        mode: Mode,
+        onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
+        journeyProvider: @escaping (UUID) -> JourneyPost? = { _ in nil },
+        userProvider: @escaping (UUID) -> User? = { _ in nil },
+        onPOIContributorViewed: @escaping ([String]) -> Void = { _ in },
+        isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
+    ) {
+        if case let .poi(ratedPOI) = mode {
+            self.poi = ratedPOI
+        } else {
+            self.poi = nil
+        }
+        self.standaloneMode = mode
+        self.sequenceContext = nil
+        self.isExpanded = true
+        self.onCollapsedTap = nil
+        self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
+        self.journeyProvider = journeyProvider
+        self.userProvider = userProvider
+        self.onPOIContributorViewed = onPOIContributorViewed
+        self.isPOIContributorUnseen = isPOIContributorUnseen
+    }
+
+    init(
         ratedPOI: RatedPOI,
         isExpanded: Bool,
         onCollapsedTap: (() -> Void)? = nil,
@@ -149,6 +174,7 @@ struct ExperienceDetailView: View {
         isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
     ) {
         self.poi = ratedPOI
+        self.standaloneMode = nil
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.onCollapsedTap = onCollapsedTap
@@ -171,6 +197,7 @@ struct ExperienceDetailView: View {
         isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
     ) {
         self.poi = nil
+        self.standaloneMode = nil
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
         self.onCollapsedTap = onCollapsedTap

@@ -33,6 +33,7 @@ struct MapTalkActivityEvent: Identifiable {
     let detail: String?
     let timestamp: Date?
     let target: Target
+    var commentID: UUID? = nil
 }
 
 enum MapTalkActivityFeed {
@@ -58,7 +59,8 @@ enum MapTalkActivityFeed {
                     action: "Comment on Reel",
                     detail: comment.text,
                     timestamp: comment.createdAt,
-                    target: target(for: reel)
+                    target: target(for: reel),
+                    commentID: comment.id
                 )
             }
         }
@@ -80,7 +82,8 @@ enum MapTalkActivityFeed {
                     action: "Comment on Bubble",
                     detail: comment.text,
                     timestamp: comment.createdAt,
-                    target: target(for: bubble)
+                    target: target(for: bubble),
+                    commentID: comment.id
                 )
             }
         }
@@ -102,7 +105,8 @@ enum MapTalkActivityFeed {
                         action: "Comment at Place",
                         detail: detail(for: comment.content),
                         timestamp: comment.createdAt,
-                        target: target(for: rated)
+                        target: target(for: rated),
+                        commentID: comment.id
                     )
                 }
             }
@@ -266,9 +270,10 @@ enum MapTalkActivityFeed {
 struct MapTalkActivityView: View {
     let events: [MapTalkActivityEvent]
     let onVisible: () -> Void
-    let onSelect: (MapTalkActivityEvent.Target.Destination) -> Void
+    let onSelect: (MapTalkActivityEvent) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var visibleEventID: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -280,25 +285,32 @@ struct MapTalkActivityView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(events) { event in
-                            Button {
-                                onSelect(event.target.destination)
-                            } label: {
-                                MapTalkActivityRow(event: event)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("maptalk.activity.row.\(event.id)")
+                            VStack(spacing: 0) {
+                                Button {
+                                    onSelect(event)
+                                } label: {
+                                    MapTalkActivityRow(event: event)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("maptalk.activity.row.\(event.id)")
 
-                            if event.id != events.last?.id {
-                                Divider()
-                                    .padding(.leading, 80)
+                                if event.id != events.last?.id {
+                                    Divider()
+                                        .padding(.leading, 80)
+                                }
                             }
+                            .id(event.id)
                         }
                     }
+                    .scrollTargetLayout()
                 }
+                .scrollPosition(id: $visibleEventID, anchor: .top)
+                .accessibilityIdentifier("maptalk.activity.list")
             }
         }
         .background(Color(.systemBackground))
         .onAppear(perform: onVisible)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("maptalk.activity.view")
     }
 
