@@ -8,6 +8,7 @@ final class MapTalkActivityRevisitUITests: XCTestCase {
     @MainActor
     func testCommentsOpenTheOriginalLargeCardAndClosePreservesActivityPosition() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         let activityButton = app.buttons["maptalk.activity"]
@@ -83,6 +84,7 @@ final class MapTalkActivityRevisitUITests: XCTestCase {
     @MainActor
     func testLikeOpensTheOriginalLargeCardAndNativePullDownReturnsToActivity() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         let activityButton = app.buttons["maptalk.activity"]
@@ -125,6 +127,7 @@ final class MapTalkActivityRevisitUITests: XCTestCase {
     @MainActor
     func testAttachedCapsuleUsesItsOwnMemoriesAndReturnsToTheOriginalPost() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         let activityButton = app.buttons["maptalk.activity"]

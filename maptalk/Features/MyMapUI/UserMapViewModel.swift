@@ -93,6 +93,12 @@ final class UserMapViewModel: ObservableObject {
     /// in a public feed or as a pin on the root map.
     @Published private(set) var journeyFolders: [JourneyFolder] = []
     @Published private(set) var mapRegion: MKCoordinateRegion = UserMapViewModel.defaultRegion
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var hasLoadFailure = false
+    @Published private(set) var pendingPublications: [UUID: PendingPublicationStatus] = [:]
+    @Published var issue: String?
+
+    var deletesPublishedPosts: Bool { environment.backend != nil }
 
     var canEditJourneyFolders: Bool {
         context.isCurrentUser && dataScope == .privateArchive
@@ -113,6 +119,9 @@ final class UserMapViewModel: ObservableObject {
     private let context: Context
     private let dataScope: DataScope
     private var archiveCancellables = Set<AnyCancellable>()
+    private var emptyMapLocationCancellable: AnyCancellable?
+    private var isWaitingForInitialEmptyMapLocation = true
+    private var pendingRemovals = Set<JourneyFolder.MemberReference>()
 
     init(
         environment: AppEnvironment,
@@ -120,17 +129,49 @@ final class UserMapViewModel: ObservableObject {
         dataScope: DataScope = .publishedProfile
     ) {
         self.environment = environment
-        self.context = context
+        let resolvedContext: Context = if environment.backend != nil,
+            context.isCurrentUser || context.user.id == environment.currentUser.id {
+            .me
+        } else {
+            context
+        }
+        self.context = resolvedContext
         self.dataScope = dataScope
-        self.identity = Identity(user: context.user, isCurrentUser: context.isCurrentUser)
+        self.identity = Identity(
+            user: resolvedContext.isCurrentUser ? environment.currentUser : resolvedContext.user,
+            isCurrentUser: resolvedContext.isCurrentUser
+        )
+        if usesCurrentLocationForEmptyMap {
+            mapRegion = MapStartupLocation.worldRegion
+        }
         if usesSharedPrivateArchive {
             bindPrivateArchive()
+        } else if let backend = environment.backend {
+            if resolvedContext.isCurrentUser {
+                bindPublishedProfile(backend)
+            } else {
+                applyPublishedProfile(pois: [], reels: [])
+            }
         } else {
             loadSnapshot()
+        }
+        if resolvedContext.isCurrentUser, let backend = environment.backend {
+            backend.$pendingPublications
+                .sink { [weak self] in self?.pendingPublications = $0 }
+                .store(in: &archiveCancellables)
+            backend.$user
+                .sink { [weak self] user in
+                    self?.identity = Identity(user: user, isCurrentUser: true)
+                }
+                .store(in: &archiveCancellables)
         }
     }
 
     func refresh() {
+        if environment.backend != nil {
+            Task { await refreshFromBackend() }
+            return
+        }
         if usesSharedPrivateArchive {
             applyPrivateArchive(
                 pois: environment.myMapArchive.privatePOIs,
@@ -143,8 +184,108 @@ final class UserMapViewModel: ObservableObject {
         }
     }
 
+    func refreshFromBackend(force: Bool = true) async {
+        guard let backend = environment.backend, isRefreshing == false else { return }
+        isRefreshing = true
+        issue = nil
+        defer { isRefreshing = false }
+        do {
+            if context.isCurrentUser {
+                if force { try await backend.refresh() }
+                else { try await backend.refreshIfNeeded() }
+            } else {
+                let revision = backend.publicContentRevision
+                var receivedFirstSnapshot = false
+                let apply: (BackendStore.Snapshot) -> Void = { [weak self] profile in
+                    guard let self, !Task.isCancelled, backend.isActive,
+                          revision == backend.publicContentRevision else { return }
+                    if let refreshedUser = backend.user(for: identity.user.id) {
+                        identity = Identity(user: refreshedUser, isCurrentUser: false)
+                    }
+                    applyPublishedProfile(pois: profile.pois, reels: profile.reels, updateRegion: !receivedFirstSnapshot)
+                    receivedFirstSnapshot = true
+                }
+                let profile = try await backend.loadProfile(userID: identity.user.id, onUpdate: apply)
+                apply(profile)
+            }
+            hasLoadFailure = false
+        } catch {
+            guard backend.isActive, !(error is CancellationError) else { return }
+            hasLoadFailure = true
+            issue = error.localizedDescription
+        }
+    }
+
+    func userProvider(for id: UUID) -> User? {
+        if id == identity.user.id { return identity.user }
+        return environment.user(for: id)
+    }
+
     private var usesSharedPrivateArchive: Bool {
         context.isCurrentUser && dataScope == .privateArchive
+    }
+
+    private var usesCurrentLocationForEmptyMap: Bool {
+        usesSharedPrivateArchive && !environment.build.featureFlags.contains(.mock)
+    }
+
+    /// A delayed first fix must not undo a person's own map navigation.
+    func cancelInitialEmptyMapLocation() {
+        isWaitingForInitialEmptyMapLocation = false
+        emptyMapLocationCancellable?.cancel()
+        emptyMapLocationCancellable = nil
+    }
+
+    private func centerEmptyMapOnInitialLocationIfAvailable() {
+        guard isWaitingForInitialEmptyMapLocation else { return }
+        if let location = MapStartupLocation.usable(environment.location.location.value) {
+            mapRegion = MapStartupLocation.region(around: location.coordinate)
+            cancelInitialEmptyMapLocation()
+            return
+        }
+        guard emptyMapLocationCancellable == nil else { return }
+        emptyMapLocationCancellable = environment.location.location
+            .sink { [weak self] location in
+                guard let self,
+                      isWaitingForInitialEmptyMapLocation,
+                      footprints.isEmpty, reels.isEmpty,
+                      let location = MapStartupLocation.usable(location) else { return }
+                mapRegion = MapStartupLocation.region(around: location.coordinate)
+                cancelInitialEmptyMapLocation()
+            }
+    }
+
+    private func bindPublishedProfile(_ backend: BackendStore) {
+        Publishers.CombineLatest(backend.$ownPublicPOIs, backend.$ownPublicReels)
+            .sink { [weak self] pois, reels in
+                self?.applyPublishedProfile(pois: pois, reels: reels)
+            }
+            .store(in: &archiveCancellables)
+    }
+
+    private func applyPublishedProfile(pois: [RatedPOI], reels: [RealPost], updateRegion: Bool = true) {
+        let ownerID = identity.user.id
+        footprints = pois.compactMap { rated -> Footprint? in
+            let visits = rated.checkIns.filter { $0.userId == ownerID }
+            guard visits.isEmpty == false else { return nil }
+            var personalPlace = rated
+            personalPlace.checkIns = visits
+            personalPlace.media = []
+            return Footprint(ratedPOI: personalPlace, visits: visits)
+        }
+        .sorted { ($0.latestVisit ?? .distantPast) > ($1.latestVisit ?? .distantPast) }
+        self.reels = reels.filter { $0.userId == ownerID }.sorted { $0.createdAt > $1.createdAt }
+        journeyCatalog = []
+        journeyFolders = []
+        summary = Summary(
+            footprintCount: footprints.count,
+            reelCount: self.reels.count,
+            categoryCount: Set(footprints.map(\.category)).count
+        )
+        persona = Persona(baseCity: "", bio: "", mood: "", interests: topTags(from: footprints))
+        if updateRegion {
+            mapRegion = Self.region(forCoordinates: footprints.map(\.coordinate) + reels.map(\.center)) ?? Self.defaultRegion
+        }
     }
 
     /// MyMap is the private archive's projection, not a second local copy.
@@ -153,6 +294,10 @@ final class UserMapViewModel: ObservableObject {
     /// their existing static-preview behavior.
     private func bindPrivateArchive() {
         let archive = environment.myMapArchive
+        archive.$persistenceIssue
+            .compactMap { $0 }
+            .sink { [weak self] in self?.issue = $0 }
+            .store(in: &archiveCancellables)
         Publishers.CombineLatest4(
             archive.$privatePOIs,
             archive.$privateReels,
@@ -263,13 +408,27 @@ final class UserMapViewModel: ObservableObject {
         )
 
         persona = Persona(
-            baseCity: "Seattle, WA",
-            bio: personaBio(for: identity.user),
-            mood: personaMood(for: identity.user),
+            baseCity: environment.backend == nil ? "Seattle, WA" : "",
+            bio: environment.backend == nil ? personaBio(for: identity.user) : "",
+            mood: environment.backend == nil ? personaMood(for: identity.user) : "",
             interests: topTags(from: matchedFootprints)
         )
 
-        if let region = Self.region(for: matchedFootprints) {
+        if usesCurrentLocationForEmptyMap {
+            if let region = Self.region(forCoordinates: matchedFootprints.map(\.coordinate) + reels.map(\.center)) {
+                cancelInitialEmptyMapLocation()
+                mapRegion = region
+            } else {
+                // With no memories or usable fix, retain the existing view.
+                // A fresh empty archive starts at the neutral world region.
+                centerEmptyMapOnInitialLocationIfAvailable()
+            }
+            return
+        }
+
+        if let region = environment.backend != nil
+            ? Self.region(forCoordinates: matchedFootprints.map(\.coordinate) + reels.map(\.center))
+            : Self.region(for: matchedFootprints) {
             mapRegion = region
         } else {
             mapRegion = Self.defaultRegion
@@ -336,10 +495,31 @@ final class UserMapViewModel: ObservableObject {
         environment.myMapArchive.deleteJourneyFolder(id: id)
     }
 
-    /// Removes a memory from the private MyMap archive only. It deliberately
-    /// does not mutate a published Reel or public POI elsewhere in the app.
+    func retryPendingPublications() {
+        environment.backend?.retryPendingPublications()
+    }
+
+    /// A MyMap delete removes the person's post, including its public version.
+    /// POI rows group only this person's visits; never delete the shared place.
     func removeFromMyMap(_ reference: JourneyFolder.MemberReference) {
         guard canEditJourneyFolders else { return }
+        if let backend = environment.backend {
+            guard pendingRemovals.insert(reference).inserted else { return }
+            Task { [weak self] in
+                guard let self else { return }
+                defer { pendingRemovals.remove(reference) }
+                do {
+                    let ids = backend.manageableMemories(for: reference).map(\.id)
+                    guard !ids.isEmpty else {
+                        throw BackendClientError.message("This memory is no longer available. Pull to refresh.")
+                    }
+                    for id in ids { try await backend.deletePost(memoryID: id) }
+                } catch {
+                    issue = error.localizedDescription
+                }
+            }
+            return
+        }
         environment.myMapArchive.removeFromPrivateArchive(reference)
     }
 
@@ -386,9 +566,13 @@ final class UserMapViewModel: ObservableObject {
     }
 
     private static func region(for footprints: [Footprint]) -> MKCoordinateRegion? {
-        guard footprints.isEmpty == false else { return nil }
-        let lats = footprints.map { $0.coordinate.latitude }
-        let lons = footprints.map { $0.coordinate.longitude }
+        region(forCoordinates: footprints.map(\.coordinate))
+    }
+
+    static func region(forCoordinates coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion? {
+        guard coordinates.isEmpty == false else { return nil }
+        let lats = coordinates.map(\.latitude)
+        let lons = coordinates.map(\.longitude)
         guard let minLat = lats.min(),
               let maxLat = lats.max(),
               let minLon = lons.min(),
@@ -400,7 +584,7 @@ final class UserMapViewModel: ObservableObject {
         )
         let latSpan = max(maxLat - minLat, 0.02)
         let lonSpan = max(maxLon - minLon, 0.02)
-        let span = MKCoordinateSpan(latitudeDelta: latSpan * 1.6, longitudeDelta: lonSpan * 1.6)
+        let span = MKCoordinateSpan(latitudeDelta: min(180, latSpan * 1.6), longitudeDelta: min(360, lonSpan * 1.6))
         return MKCoordinateRegion(center: center, span: span)
     }
 

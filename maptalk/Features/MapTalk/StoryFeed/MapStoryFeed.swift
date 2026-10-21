@@ -48,40 +48,28 @@ enum MapStoryFeed {
         userProvider: (UUID) -> User?,
         now: Date = .init()
     ) -> RealStoriesRow.POIStoryGroup? {
-        let sharers = rated.checkIns.compactMap { checkIn -> RealStoriesRow.POISharer? in
-            let storyMedia = checkIn.media.filter { media in
-                switch media.kind {
-                case .photo, .video:
-                    return true
-                }
-            }
-            let hasStory = storyMedia.isEmpty == false
-
-            if onlyRecentStories {
-                // A fresh public check-in is still meaningful without media:
-                // it opens the place card and contributes to the social map.
-                // `hasStory` only controls story-ring/media behavior.
-                guard checkIn.createdAt >= now.addingTimeInterval(-StoryReadKeys.freshWindow) else {
-                    return nil
-                }
-            }
-
-            return RealStoriesRow.POISharer(
-                id: checkIn.id,
-                user: userProvider(checkIn.userId),
-                timestamp: checkIn.createdAt,
-                hasStory: hasStory,
-                readKeys: storyMedia.map { media in
+        let cutoff = onlyRecentStories ? now.addingTimeInterval(-StoryReadKeys.freshWindow) : nil
+        let sharers = rated.checkInPeople(since: cutoff).map { person in
+            // One avatar per person, but every eligible visit contributes read
+            // keys. A new photo must still create an unread ring for that person.
+            let readKeys = person.checkIns.flatMap { checkIn in
+                checkIn.media.map { media in
                     StoryReadKeys.poiStoryPage(
                         poiId: rated.id,
                         checkInId: checkIn.id,
                         mediaId: media.id,
-                        timestamp: checkIn.createdAt
+                        timestamp: checkIn.activityDate
                     )
                 }
+            }
+            return RealStoriesRow.POISharer(
+                id: person.userID,
+                user: userProvider(person.userID),
+                timestamp: person.latest.activityDate,
+                hasStory: !readKeys.isEmpty,
+                readKeys: readKeys
             )
         }
-        .sorted { $0.timestamp > $1.timestamp }
 
         guard sharers.isEmpty == false else { return nil }
         return RealStoriesRow.POIStoryGroup(

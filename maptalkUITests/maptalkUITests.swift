@@ -46,6 +46,7 @@ final class maptalkUITests: XCTestCase {
     func testExample() throws {
         // UI tests must launch the application that they test.
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         // Use XCTAssert and related functions to verify your tests produce the correct results.
@@ -54,6 +55,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testChatsSearchAppearsOnlyAfterPullingDown() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         let chatsTab = app.tabBars.buttons["Chats"]
@@ -79,6 +81,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMapTalkHasTwoFocusedPublishEntrypoints() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         let addPlace = app.buttons["Add a place"]
@@ -173,6 +176,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMapTalkHistoryLayerKeepsMapGesturesPrimary() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         let map = app.descendants(matching: .any)["maptalk.map-canvas"]
@@ -267,6 +271,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapPinStaysOnMapAndOpensCapsule() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         let myMapTab = app.tabBars.buttons["MyMap"]
@@ -297,6 +302,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapRootMapHasNoCollectionBrowseShelf() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapRootMap(app)
@@ -310,6 +316,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapCollectionsOpenAsListAndAddThroughMyMap() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapList(app)
@@ -352,6 +359,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapCollectionsCreateNamedFolder() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapList(app)
@@ -385,6 +393,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapListLeadingSwipeOpensCollectionPicker() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapList(app)
@@ -407,6 +416,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapListRecordOpensAFocusedMapPreview() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapList(app)
@@ -438,6 +448,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapListTrailingSwipeConfirmsBeforeRemovingMemory() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapList(app)
@@ -466,6 +477,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapRootLongPressDoesNotEnterOrganizer() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapRootMap(app)
@@ -481,6 +493,7 @@ final class maptalkUITests: XCTestCase {
     @MainActor
     func testMyMapOverlappingMarkersCycleThroughTheirMemories() throws {
         let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapRootMap(app)
@@ -504,7 +517,9 @@ final class maptalkUITests: XCTestCase {
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+            let app = XCUIApplication()
+            app.launchArguments = ["--mock-data"]
+            app.launch()
         }
     }
 }

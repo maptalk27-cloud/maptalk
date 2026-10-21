@@ -547,7 +547,7 @@ private struct POISharerAvatarCircle: View {
     var body: some View {
         let avatar = Group {
             if let url = contributor.user?.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

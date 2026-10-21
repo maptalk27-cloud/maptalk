@@ -1,0 +1,16 @@
+// Public app identifiers only. Secrets belong on the backend, never in this file.
+MAPTALK_GOOGLE_IOS_CLIENT_ID =
+MAPTALK_GOOGLE_SERVER_CLIENT_ID =
+MAPTALK_GOOGLE_REVERSED_CLIENT_ID = maptalk-google-not-configured
+MAPTALK_WECHAT_APP_ID =
+MAPTALK_WECHAT_CALLBACK_SCHEME = maptalk-wechat-not-configured
+MAPTALK_WECHAT_UNIVERSAL_LINK =
+MAPTALK_WECHAT_ASSOCIATED_DOMAIN =
+MAPTALK_AUTH_ENTITLEMENTS = maptalk/Resources/maptalk.entitlements
+MAPTALK_API_BASE_URL =
+MAPTALK_PRIVACY_URL =
+MAPTALK_SUPPORT_URL =
+
+// Optional, untracked configuration supplied by the developer.
+#include? "AuthProviders.local.xcconfig"
+#include? "Backend.local.xcconfig"

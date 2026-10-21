@@ -4,7 +4,7 @@ enum StoryReadKeys {
     static let freshWindow: TimeInterval = 60 * 60 * 24
 
     static func real(_ real: RealPost) -> String {
-        "real:\(real.id.uuidString):\(timestampToken(real.createdAt))"
+        "real:\(real.id.uuidString):\(timestampToken(real.activityDate))"
     }
 
     static func journey(_ journey: JourneyPost) -> String {

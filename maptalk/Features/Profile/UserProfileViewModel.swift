@@ -46,18 +46,28 @@ final class UserProfileViewModel: ObservableObject {
     @Published private(set) var persona: UserMapViewModel.Persona
     @Published private(set) var footprints: [UserMapViewModel.Footprint]
     @Published private(set) var reels: [RealPost]
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var hasLoadFailure = false
+    @Published var issue: String?
 
     private let snapshot: UserMapViewModel
+    private var snapshotCancellables = Set<AnyCancellable>()
 
     init(environment: AppEnvironment, context: UserMapViewModel.Context) {
         self.environment = environment
-        self.context = context
+        self.context = if environment.backend != nil,
+            context.isCurrentUser || context.user.id == environment.currentUser.id {
+            .me
+        } else {
+            context
+        }
         self.snapshot = UserMapViewModel(environment: environment, context: context)
         self.user = snapshot.identity.user
         self.summary = snapshot.summary
         self.persona = snapshot.persona
         self.footprints = snapshot.footprints
         self.reels = snapshot.reels
+        bindSnapshot()
     }
 
     var isCurrentUser: Bool {
@@ -74,7 +84,7 @@ final class UserProfileViewModel: ObservableObject {
 
     var stats: ProfileStats {
         ProfileStats(
-            following: isCurrentUser ? min(PreviewData.sampleFriends.count, 88) : mockCount(seed: 41, base: 12, range: 72),
+            following: environment.backend != nil ? 0 : (isCurrentUser ? min(PreviewData.sampleFriends.count, 88) : mockCount(seed: 41, base: 12, range: 72)),
             poi: footprints.count,
             reels: reels.count
         )
@@ -135,6 +145,10 @@ final class UserProfileViewModel: ObservableObject {
     }
 
     func saveProfile(_ draft: ProfileDraft) {
+        guard environment.backend == nil else {
+            issue = "Profile editing isn't connected yet. Your account hasn't been changed."
+            return
+        }
         let cleanHandle = draft.handle
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "@", with: "")
@@ -148,11 +162,47 @@ final class UserProfileViewModel: ObservableObject {
         )
     }
 
+    func saveConnectedProfile(handle: String, avatarData: Data?) async throws {
+        guard isCurrentUser, let backend = environment.backend else { return }
+        try await backend.updateProfile(handle: handle, avatarData: avatarData)
+        if let warning = backend.issue, warning.hasPrefix("Your profile was saved.") {
+            issue = warning
+        }
+        // The shared store publishes the accepted identity to the profile, MyMap and tab.
+        // Do not optimistically update it before the server accepts the change.
+    }
+
     func userProvider(for id: UUID) -> User? {
         if id == user.id {
             return user
         }
-        return PreviewData.user(for: id)
+        return environment.user(for: id)
+    }
+
+    var canEditProfile: Bool { isCurrentUser }
+    var hasConnectedAccount: Bool { environment.backend != nil }
+
+    func explainUnavailableSocialActions() {
+        issue = "Chat and following aren't connected yet. You can view this person's public posts and map."
+    }
+
+    func refreshFromBackend(force: Bool = true) async {
+        await snapshot.refreshFromBackend(force: force)
+    }
+
+    private func bindSnapshot() {
+        snapshot.$identity
+            .map(\.user)
+            .assign(to: &$user)
+        snapshot.$summary.assign(to: &$summary)
+        snapshot.$persona.assign(to: &$persona)
+        snapshot.$footprints.assign(to: &$footprints)
+        snapshot.$reels.assign(to: &$reels)
+        snapshot.$isRefreshing.assign(to: &$isRefreshing)
+        snapshot.$hasLoadFailure.assign(to: &$hasLoadFailure)
+        snapshot.$issue
+            .sink { [weak self] issue in self?.issue = issue }
+            .store(in: &snapshotCancellables)
     }
 
     private func preview(for real: RealPost) -> HistoryActivity.Preview {
@@ -245,13 +295,16 @@ final class UserProfileViewModel: ObservableObject {
         if let preferred, preferred.isEmpty == false {
             return preferred
         }
-        if let registered = PreviewData.locationLabel(for: id) {
+        if environment.backend == nil, let registered = PreviewData.locationLabel(for: id) {
             return registered
         }
         return fallbackLabel(for: coordinate)
     }
 
     private func fallbackLabel(for coordinate: CLLocationCoordinate2D) -> String {
+        guard environment.backend == nil else {
+            return String(format: "%.3f, %.3f", coordinate.latitude, coordinate.longitude)
+        }
         let candidates: [(String, CLLocationCoordinate2D)] = [
             ("Xi'an, Shaanxi, China", .init(latitude: 34.341, longitude: 108.939)),
             ("Hangzhou, Zhejiang, China", .init(latitude: 30.274, longitude: 120.155)),

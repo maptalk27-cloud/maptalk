@@ -40,8 +40,8 @@ struct MapTalkView: View {
     @Namespace private var heroNamespace
     private let initialStoryId: UUID?
 
-    init(viewModel: MapTalkViewModel, initialStoryId: UUID? = nil) {
-        _viewModel = StateObject(wrappedValue: viewModel)
+    init(viewModel: @autoclosure @escaping () -> MapTalkViewModel, initialStoryId: UUID? = nil) {
+        _viewModel = StateObject(wrappedValue: viewModel())
         self.initialStoryId = initialStoryId
     }
 
@@ -231,6 +231,7 @@ struct MapTalkView: View {
             }
 
             let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
+                viewModel.cancelPendingLocationFocus()
                 flushPendingViewedStory(item.readKey)
                 viewModel.retainActiveFeedItem(id: item.id)
                 selectedFriendFootprintID = nil
@@ -287,6 +288,7 @@ struct MapTalkView: View {
             }
 
             let handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void = { journey, presentSheet, parent in
+                viewModel.cancelPendingLocationFocus()
                 selectedFriendFootprintID = nil
                 let isTappingCurrentFocusedJourney = (focusedJourneyHeader?.id == journey.id)
                 if experiencePresentation.isPresented,
@@ -398,6 +400,7 @@ struct MapTalkView: View {
             ZStack(alignment: .top) {
                 MapReader { mapProxy in
                     let selectFriendFootprint: (MapTalkFriendFootprint) -> Void = { tapped in
+                        viewModel.cancelPendingLocationFocus()
                         let nextID = FriendFootprintTapSelectionPolicy.nextID(
                             tappedID: tapped.id,
                             selectedID: selectedFriendFootprintID,
@@ -463,6 +466,7 @@ struct MapTalkView: View {
                             isRealUnseen: isRealUnseen,
                             isPOIUnseen: isPOIUnseen,
                             onTapReal: { real in
+                                viewModel.cancelPendingLocationFocus()
                                 if let item = storyItemForReal(real) {
                                     selectStoryItem(item, true, false, nil)
                                     reelAlignTrigger &+= 1
@@ -478,6 +482,7 @@ struct MapTalkView: View {
                                 experiencePresentation.presentNewContent()
                             },
                             onTapPOI: { rated in
+                                viewModel.cancelPendingLocationFocus()
                                 if let item = storyItemForPOI(rated) {
                                     selectStoryItem(item, true, false, nil)
                                     reelAlignTrigger &+= 1
@@ -503,6 +508,9 @@ struct MapTalkView: View {
                     .accessibilityIdentifier("maptalk.map-canvas")
                     .onMapCameraChange(frequency: .continuous) { _ in
                         friendFootprintInteractionGate.noteCameraMotion()
+                        if cameraPosition.positionedByUser {
+                            viewModel.cancelPendingLocationFocus()
+                        }
                     }
                     .onMapCameraChange(frequency: .onEnd) { context in
                         friendFootprintInteractionGate.noteCameraMotion()
@@ -517,6 +525,7 @@ struct MapTalkView: View {
                         // and always uses the device's live location instead.
                         currentRegion = context.region
                         currentCamera = context.camera
+                        viewModel.rememberVisibleRegion(context.region)
                         settledFriendFootprintRegion = context.region
                         if focusedJourneyHeader == nil {
                             viewModel.searchMap(in: context.region)
@@ -857,33 +866,30 @@ struct MapTalkView: View {
                     }
             }
             .sheet(item: $publishDestination) { destination in
-                GeometryReader { composerGeometry in
-                    MapTalkPublishComposer(
-                        destination: destination,
-                        nearbyPlaces: viewModel.publishableLiveLocation.map {
-                            viewModel.nearbyPlaceOptions(near: $0)
-                        } ?? [],
-                        isLoadingNearbyPlaces: viewModel.isLoadingNearbyPlaces,
-                        folders: environment.myMapArchive.journeyFolders,
-                        myMapRecords: myMapBubbleRecords,
-                        currentUserID: environment.myMapArchive.currentUserID,
-                        userProvider: viewModel.user(for:),
-                        hasLiveLocation: viewModel.publishableLiveLocation != nil,
-                        locationAuthorization: viewModel.locationAuthorization,
-                        topInset: composerGeometry.safeAreaInsets.top,
-                        bottomInset: composerGeometry.safeAreaInsets.bottom,
-                        onCancel: {
-                            publishDestination = nil
-                        },
-                        onPublish: { draft, audience in
-                            completePublishing(
-                                draft,
-                                audience: audience,
-                                destination: destination
-                            )
-                        }
-                    )
-                }
+                MapTalkPublishComposer(
+                    destination: destination,
+                    nearbyPlaces: viewModel.publishableLiveLocation.map {
+                        viewModel.nearbyPlaceOptions(near: $0)
+                    } ?? [],
+                    isLoadingNearbyPlaces: viewModel.isLoadingNearbyPlaces,
+                    folders: environment.myMapArchive.journeyFolders,
+                    myMapRecords: myMapBubbleRecords,
+                    currentUserID: environment.myMapArchive.currentUserID,
+                    userProvider: viewModel.user(for:),
+                    hasLiveLocation: viewModel.publishableLiveLocation != nil,
+                    locationAuthorization: viewModel.locationAuthorization,
+                    onCancel: {
+                        publishDestination = nil
+                    },
+                    onPublish: { draft, audience, requestID in
+                        try await completePublishing(
+                            draft,
+                            audience: audience,
+                            destination: destination,
+                            requestID: requestID
+                        )
+                    }
+                )
                 .presentationDetents([.fraction(0.84)])
                 .presentationDragIndicator(.hidden)
                 .presentationCornerRadius(30)
@@ -901,11 +907,13 @@ struct MapTalkView: View {
             }
             .onAppear {
                 WorldBasemapPrefetcher.shared.prefetchGlobalBasemapIfNeeded()
-                let initialRegion = viewModel.region
-                cameraPosition = .region(initialRegion)
-                currentRegion = initialRegion
-                settledFriendFootprintRegion = initialRegion
-                pendingRegionCause = .initial
+                if currentRegion == nil {
+                    let initialRegion = viewModel.region
+                    cameraPosition = .region(initialRegion)
+                    currentRegion = initialRegion
+                    settledFriendFootprintRegion = initialRegion
+                    pendingRegionCause = .initial
+                }
                 viewModel.onAppear()
                 controlsBottomPadding = baseControlsPadding
                 ensureSelectionIfNeeded()
@@ -914,6 +922,15 @@ struct MapTalkView: View {
             .onReceive(viewModel.$region.dropFirst()) { newRegion in
                 let cause = pendingRegionCause
                 pendingRegionCause = .other
+                if (cause == .initial || cause == .user),
+                   (currentRegion?.span.latitudeDelta ?? 0) >= 90 {
+                    // Startup should settle at the person's city, not preserve
+                    // the temporary world zoom or fly from a demo city.
+                    flightController.cancelActiveTransition()
+                    cameraPosition = .region(newRegion)
+                    currentRegion = newRegion
+                    return
+                }
                 flightController.handleRegionChange(
                     currentRegion: currentRegion,
                     targetRegion: newRegion,
@@ -1183,40 +1200,60 @@ private extension MapTalkView {
     func completePublishing(
         _ draft: MapTalkPublishDraft,
         audience: MapPublishAudience,
-        destination: MapTalkPublishDestination
-    ) -> Bool {
+        destination: MapTalkPublishDestination,
+        requestID: UUID
+    ) async throws {
         // Re-read the location at confirmation. The map may have been browsed
         // elsewhere, but neither a Place nor a Reel inherits its coordinate.
         guard let location = viewModel.publishLocation(for: destination) else {
             environment.location.requestWhenInUse()
-            return false
+            throw BackendClientError.message("Finding your current location. Try again in a moment.")
         }
 
-        switch draft {
-        case let .place(placeDraft):
-            guard let place = viewModel.publishPlace(
-                placeDraft,
-                at: location,
-                audience: audience
-            ) else {
-                // The person may have walked outside the nearby-place radius
-                // while composing. Keep the capture open in that case.
-                return false
+        let result: BackendPublishResult
+        if let backend = environment.backend {
+            result = try await backend.enqueuePublish(
+                draft,
+                audience: audience,
+                location: location,
+                requestID: requestID
+            )
+        } else {
+            switch draft {
+            case let .place(placeDraft):
+                guard let place = viewModel.publishPlace(
+                    placeDraft,
+                    at: location,
+                    audience: audience
+                ) else {
+                    throw BackendClientError.message("This place is no longer nearby. Choose a place at your current location.")
+                }
+                result = .poi(place)
+            case let .reel(reelDraft):
+                guard let reel = viewModel.publishReel(
+                    reelDraft,
+                    at: location,
+                    audience: audience
+                ) else {
+                    throw BackendClientError.message("The reel couldn't be saved. Your draft is still here; try again.")
+                }
+                result = .reel(reel)
             }
-            if audience == .livePublic {
+        }
+
+        // Public posts are available immediately. Still honor a server-side
+        // takedown when reconciling a retry of an older publish request.
+        let status = environment.backend?.ownedMemories[requestID]?.moderationStatus
+        let visiblePublicly = audience == .livePublic && (status == nil || status == "approved")
+            && environment.backend?.pendingPublications[requestID] == nil
+        switch result {
+        case let .poi(place):
+            if visiblePublicly {
                 selectedRealId = nil
                 selectedStoryId = place.id
             }
-
-        case let .reel(reelDraft):
-            guard let reel = viewModel.publishReel(
-                reelDraft,
-                at: location,
-                audience: audience
-            ) else {
-                return false
-            }
-            if audience == .livePublic {
+        case let .reel(reel):
+            if visiblePublicly {
                 selectedRealId = reel.id
                 selectedStoryId = reel.id
             }
@@ -1226,7 +1263,9 @@ private extension MapTalkView {
         pendingRegionCause = .other
         reelAlignTrigger += 1
         publishDestination = nil
-        return true
+        if environment.backend != nil, visiblePublicly {
+            viewModel.searchMap(in: currentRegion ?? viewModel.region)
+        }
     }
 
     func requestPublish(_ destination: MapTalkPublishDestination) {
@@ -1472,7 +1511,7 @@ private struct ProfileMapIdentityBadge: View {
     private var avatar: some View {
         ZStack {
             if let url = user.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image

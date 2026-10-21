@@ -1,0 +1,21 @@
+{
+  "name": "maptalk-local-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.10.0 <25"
+  },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test test/*.test.mjs",
+    "demo": "node scripts/demo.mjs",
+    "backup": "node scripts/backup.mjs",
+    "backup:encrypted": "node scripts/encrypted-backup.mjs",
+    "beta": "node scripts/beta.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1152.0",
+    "sharp": "0.35.5"
+  }
+}

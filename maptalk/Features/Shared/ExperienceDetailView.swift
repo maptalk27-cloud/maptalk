@@ -2,6 +2,17 @@ import AVKit
 import MapKit
 import SwiftUI
 
+private struct BackendSafetyMenuTrailingInsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 16
+}
+
+extension EnvironmentValues {
+    var backendSafetyMenuTrailingInset: CGFloat {
+        get { self[BackendSafetyMenuTrailingInsetKey.self] }
+        set { self[BackendSafetyMenuTrailingInsetKey.self] = newValue }
+    }
+}
+
 struct ExperienceDetailView: View {
     enum Mode {
         case real(RealPost, User?)
@@ -136,6 +147,7 @@ struct ExperienceDetailView: View {
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
     @Environment(\.appEnv) private var environment
+    @Environment(\.backendSafetyMenuTrailingInset) private var safetyMenuTrailingInset
     @State private var storyViewerState: POIStoryViewerState?
     @State private var selectedProfileContext: UserMapViewModel.Context?
 
@@ -222,6 +234,13 @@ struct ExperienceDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.black.ignoresSafeArea())
+        .overlay(alignment: .topTrailing) {
+            if isExpanded, let backend = environment.backend, !reportablePosts.isEmpty {
+                BackendContentSafetyMenu(store: backend, posts: reportablePosts)
+                    .padding([.top, .leading, .bottom], 16)
+                    .padding(.trailing, safetyMenuTrailingInset)
+            }
+        }
         .onAppear {
             logPOIDebug(event: "onAppear", data: currentData)
         }
@@ -256,6 +275,20 @@ struct ExperienceDetailView: View {
 
     func openProfile(for user: User) {
         selectedProfileContext = .profileContext(for: user)
+    }
+
+    private var reportablePosts: [BackendContentSafetyMenu.Post] {
+        guard let backend = environment.backend else { return [] }
+        switch currentMode {
+        case let .real(post, _):
+            return post.userId == backend.user.id ? [] : [.init(id: post.id, ownerID: post.userId, title: "Post")]
+        case let .poi(place):
+            return place.checkIns.filter { $0.userId != backend.user.id }.map {
+                .init(id: $0.id, ownerID: $0.userId,
+                      title: "@\(backend.user(for: $0.userId)?.handle ?? "member") · \($0.createdAt.formatted(date: .abbreviated, time: .shortened))")
+            }
+        case .journey: return []
+        }
     }
 }
 

@@ -13,7 +13,7 @@ struct UserAvatarView: View {
                         .stroke(Color.white.opacity(0.2), lineWidth: 1)
                 }
             if let url = user.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case .success(let image):
                         image.resizable().scaledToFill()

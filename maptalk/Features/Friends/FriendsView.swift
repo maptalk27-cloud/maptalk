@@ -10,6 +10,10 @@ struct FriendsView: View {
     @State private var didPositionChatList = false
     @FocusState private var isSearchFocused: Bool
 
+    init(viewModel: @autoclosure @escaping () -> FriendsViewModel) {
+        _viewModel = StateObject(wrappedValue: viewModel())
+    }
+
     var body: some View {
         NavigationStack {
             GeometryReader { container in
@@ -305,7 +309,7 @@ private struct ChatAvatar: View {
     var body: some View {
         ZStack {
             if let avatarURL = user.avatarURL {
-                AsyncImage(url: avatarURL) { phase in
+                MapImage(url: avatarURL) { phase in
                     switch phase {
                     case let .success(image):
                         image

@@ -93,6 +93,8 @@ struct RatedPOI: Identifiable, Hashable {
         var endorsement: Endorsement?
         var media: [Media]
         var tag: VisitTag?
+        var publishedAt: Date?
+        var activityDate: Date { publishedAt ?? createdAt }
 
         init(
             id: UUID = UUID(),
@@ -100,7 +102,8 @@ struct RatedPOI: Identifiable, Hashable {
             createdAt: Date = .init(),
             endorsement: Endorsement? = nil,
             media: [Media] = [],
-            tag: VisitTag? = nil
+            tag: VisitTag? = nil,
+            publishedAt: Date? = nil
         ) {
             self.id = id
             self.userId = userId
@@ -108,6 +111,7 @@ struct RatedPOI: Identifiable, Hashable {
             self.endorsement = endorsement
             self.media = media
             self.tag = tag
+            self.publishedAt = publishedAt
         }
     }
 

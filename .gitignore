@@ -1,1 +1,8 @@
 .clang-module-cache/
+*.p8
+*.mtbak
+
+# Local Xcode/SwiftPM state; shared dependency pins remain versioned.
+**/xcuserdata/
+**/.build/
+.DS_Store

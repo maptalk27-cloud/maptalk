@@ -20,6 +20,35 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>MapTalkBackendURL</key>
+	<string>$(MAPTALK_API_BASE_URL)</string>
+	<key>MapTalkPrivacyURL</key>
+	<string>$(MAPTALK_PRIVACY_URL)</string>
+	<key>MapTalkSupportURL</key>
+	<string>$(MAPTALK_SUPPORT_URL)</string>
+	<key>GIDClientID</key>
+	<string>$(MAPTALK_GOOGLE_IOS_CLIENT_ID)</string>
+	<key>GIDServerClientID</key>
+	<string>$(MAPTALK_GOOGLE_SERVER_CLIENT_ID)</string>
+	<key>MapTalkWeChatAppID</key>
+	<string>$(MAPTALK_WECHAT_APP_ID)</string>
+	<key>MapTalkWeChatUniversalLink</key>
+	<string>$(MAPTALK_WECHAT_UNIVERSAL_LINK)</string>
+	<key>MapTalkWeChatAssociatedDomain</key>
+	<string>$(MAPTALK_WECHAT_ASSOCIATED_DOMAIN)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>Google Sign-In</string>
+			<key>CFBundleURLSchemes</key><array><string>$(MAPTALK_GOOGLE_REVERSED_CLIENT_ID)</string></array>
+		</dict>
+		<dict>
+			<key>CFBundleURLName</key><string>WeChat Sign-In</string>
+			<key>CFBundleURLSchemes</key><array><string>$(MAPTALK_WECHAT_CALLBACK_SCHEME)</string></array>
+		</dict>
+	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array><string>weixin</string><string>weixinULAPI</string><string>weixinURLParamsAPI</string></array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>MapTalk shows nearby vibes and ratings based on your location.</string>
 	<key>NSCameraUsageDescription</key>

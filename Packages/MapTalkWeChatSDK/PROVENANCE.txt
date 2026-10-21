@@ -1,0 +1,17 @@
+Tencent WeChat Open SDK for iOS 2.0.9 — no-payment XCFramework
+
+Official download index:
+https://developers.weixin.qq.com/doc/oplatform/Downloads/iOS_Resource.html
+Official integration instructions:
+https://developers.weixin.qq.com/doc/oplatform/Mobile_App/Access_Guide/iOS.html
+Official binary archive:
+https://dldir1.qq.com/WechatWebDev/opensdk/XCFramework/OpenSDK2.0.9_NoPay.zip
+Archive SHA-256:
+ae8c7e847d83997f38891e27ad6bed98dd50d638a00ef2ec0890d4e9ac748f83
+Verified download: 2026-10-18
+
+The package fetches Tencent's original archive using a checksum-pinned binary
+target. It does not rebuild or redistribute a third-party WeChat SDK wrapper.
+The privacy manifest under Sources is copied verbatim from the archive's root
+because that root file sits outside the platform-specific framework bundles.
+The upstream SDK is copyright Tencent; its official SDK terms apply.

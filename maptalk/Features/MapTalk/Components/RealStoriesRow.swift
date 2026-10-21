@@ -56,7 +56,7 @@ struct RealStoriesRow: View {
 
         init(real: RealPost) {
             source = .real(real)
-            timestamp = real.createdAt
+            timestamp = real.activityDate
         }
 
         init(poiGroup: POIStoryGroup) {
@@ -107,7 +107,7 @@ struct RealStoriesRow: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: spacing) {
+                LazyHStack(spacing: spacing) {
                     ForEach(items) { item in
                         storyButton(for: item, isSelected: selectedId == item.id)
                             .id(item.id)
@@ -326,7 +326,7 @@ private struct RealStoryBadge: View {
     @ViewBuilder
     private var avatar: some View {
         if let url = user?.avatarURL {
-            AsyncImage(url: url) { phase in
+            MapImage(url: url) { phase in
                 switch phase {
                 case let .success(image):
                     image
@@ -365,7 +365,7 @@ private struct RealStoryBadge: View {
 
     @ViewBuilder
     private func remoteImage(url: URL) -> some View {
-        AsyncImage(url: url) { phase in
+        MapImage(url: url) { phase in
             switch phase {
             case let .success(image):
                 image
@@ -500,7 +500,7 @@ private struct JourneyStoryBadge: View {
     @ViewBuilder
     private var avatar: some View {
         if let url = user?.avatarURL {
-            AsyncImage(url: url) { image in
+            MapImage(url: url) { image in
                 image
                     .resizable()
                     .scaledToFill()
@@ -718,7 +718,7 @@ private struct AvatarThumbnail: View {
     var body: some View {
         Group {
             if let url = user?.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

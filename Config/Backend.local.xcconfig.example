@@ -1,0 +1,8 @@
+// Public endpoints only; never put server secrets in an iOS configuration.
+// Copy to Backend.local.xcconfig only AFTER DNS, HTTPS and beta health pass.
+// Until then, leave the active app configuration unchanged.
+// The empty expansion prevents xcconfig treating // as a comment.
+MAPTALK_API_BASE_URL = https:/$()/api.maptalkapp.com
+// These pages are not deployed yet. Set only real, verified public URLs.
+MAPTALK_PRIVACY_URL =
+MAPTALK_SUPPORT_URL =

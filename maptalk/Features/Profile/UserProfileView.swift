@@ -1,4 +1,8 @@
 import SwiftUI
+import PhotosUI
+import CoreTransferable
+import ImageIO
+import UniformTypeIdentifiers
 
 struct UserProfileView: View {
     @Environment(\.dismiss) private var dismiss
@@ -8,22 +12,39 @@ struct UserProfileView: View {
     private let showsSettingsButton: Bool
 
     init(
-        viewModel: UserProfileViewModel,
+        viewModel: @autoclosure @escaping () -> UserProfileViewModel,
         showsCloseButton: Bool = false,
         showsSettingsButton: Bool = false
     ) {
-        _viewModel = StateObject(wrappedValue: viewModel)
+        _viewModel = StateObject(wrappedValue: viewModel())
         self.showsCloseButton = showsCloseButton
         self.showsSettingsButton = showsSettingsButton
     }
 
     var body: some View {
         profileChrome
+            .task { await viewModel.refreshFromBackend(force: false) }
+            .alert("Profile", isPresented: Binding(
+                get: { viewModel.issue != nil },
+                set: { if $0 == false { viewModel.issue = nil } }
+            )) {
+                Button("OK", role: .cancel) { viewModel.issue = nil }
+            } message: {
+                Text(viewModel.issue ?? "")
+            }
             .sheet(isPresented: $isEditingProfile) {
-                EditProfileSheet(draft: viewModel.makeDraft()) { draft in
-                    viewModel.saveProfile(draft)
+                if viewModel.hasConnectedAccount {
+                    ConnectedEditProfileSheet(user: viewModel.user) { handle, avatar in
+                        try await viewModel.saveConnectedProfile(handle: handle, avatarData: avatar)
+                    }
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+                } else {
+                    EditProfileSheet(draft: viewModel.makeDraft()) { draft in
+                        viewModel.saveProfile(draft)
+                    }
+                    .presentationDetents([.medium])
                 }
-                .presentationDetents([.medium])
             }
     }
 
@@ -46,7 +67,7 @@ struct UserProfileView: View {
                             }
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Settings")
+                    .accessibilityLabel("Back")
                     .padding(.top, 12)
                     .padding(.leading, 24)
                 }
@@ -68,6 +89,8 @@ struct UserProfileView: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Settings")
+                    .accessibilityIdentifier("profile.settings")
                     .padding(.top, 12)
                     .padding(.trailing, 24)
                 }
@@ -91,6 +114,7 @@ struct UserProfileView: View {
             .padding(.top, showsCloseButton || showsSettingsButton ? 64 : 24)
             .padding(.bottom, 40)
         }
+        .refreshable { await viewModel.refreshFromBackend() }
         .background(Color(.systemBackground))
     }
 
@@ -105,20 +129,24 @@ struct UserProfileView: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
-                    Text(viewModel.persona.baseCity)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if !viewModel.persona.baseCity.isEmpty {
+                        Text(viewModel.persona.baseCity)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer(minLength: 0)
             }
 
-            Text(viewModel.persona.bio)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
+            if !viewModel.persona.bio.isEmpty {
+                Text(viewModel.persona.bio)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -136,14 +164,15 @@ struct UserProfileView: View {
 
     private var actionRow: some View {
         VStack(spacing: 10) {
-            if viewModel.isCurrentUser {
+            if viewModel.canEditProfile {
                 Button {
                     isEditingProfile = true
                 } label: {
                     ProfileActionLabel(title: "Edit", systemImage: "square.and.pencil", style: .quiet)
                 }
                 .buttonStyle(.plain)
-            } else {
+                .accessibilityIdentifier("profile.edit")
+            } else if !viewModel.hasConnectedAccount {
                 HStack(spacing: 12) {
                     NavigationLink {
                         ChatThreadView(user: viewModel.user)
@@ -175,11 +204,23 @@ struct UserProfileView: View {
     private var historySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             if viewModel.historyActivities.isEmpty {
-                Text("No map history yet.")
+                if viewModel.isRefreshing {
+                    ProgressView()
+                        .padding(.vertical, 12)
+                } else if viewModel.hasLoadFailure {
+                    Button("Couldn't load map history. Try again") {
+                        Task { await viewModel.refreshFromBackend() }
+                    }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 12)
+                } else {
+                    Text("No map history yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 12)
+                }
             } else {
                 VStack(spacing: 0) {
                     ForEach(viewModel.historyActivities) { item in
@@ -193,6 +234,7 @@ struct UserProfileView: View {
                             HistoryActivityRow(item: item)
                         }
                         .buttonStyle(.plain)
+                        .backendPostActions(for: postReference(for: item), ownerID: viewModel.user.id)
 
                         if item.id != viewModel.historyActivities.last?.id {
                             Rectangle()
@@ -205,6 +247,13 @@ struct UserProfileView: View {
             }
         }
     }
+
+    private func postReference(for item: UserProfileViewModel.HistoryActivity) -> JourneyFolder.MemberReference {
+        switch item.kind {
+        case let .reel(reel): return .reel(reel.id)
+        case let .poi(footprint): return .poi(footprint.id)
+        }
+    }
 }
 
 private struct PlainProfileAvatar: View {
@@ -214,7 +263,7 @@ private struct PlainProfileAvatar: View {
     var body: some View {
         ZStack {
             if let url = user.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()
@@ -345,7 +394,7 @@ private struct RecentPreview: View {
         ZStack {
             switch preview {
             case let .image(url):
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()
@@ -357,7 +406,7 @@ private struct RecentPreview: View {
                 }
             case let .video(poster):
                 if let poster {
-                    AsyncImage(url: poster) { phase in
+                    MapImage(url: poster) { phase in
                         switch phase {
                         case let .success(image):
                             image.resizable().scaledToFill()
@@ -403,6 +452,213 @@ private struct RecentPreview: View {
             Image(systemName: systemName)
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Connected accounts only edit the two fields supported by the server.
+struct ConnectedEditProfileSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var handle: String
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var avatarDraft = ProfileAvatarDraft()
+    @State private var isImporting = false
+    @State private var isSaving = false
+    @State private var issue: String?
+    @State private var importGeneration = UUID()
+    @State private var saveTask: Task<Void, Never>?
+    private let originalUser: User
+    private let onSave: @MainActor (String, Data?) async throws -> Void
+
+    init(user: User, onSave: @escaping @MainActor (String, Data?) async throws -> Void) {
+        originalUser = user
+        _handle = State(initialValue: user.handle)
+        self.onSave = onSave
+    }
+
+    private var cleanHandle: String {
+        handle.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var canSave: Bool {
+        !isSaving && !isImporting && avatarDraft.source == nil
+            && cleanHandle.range(of: "^[a-z0-9_]{3,32}$", options: .regularExpression) != nil
+            && (cleanHandle != originalUser.handle || avatarDraft.photo != nil)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .frame(width: 64, alignment: .leading)
+                    .disabled(isSaving)
+                    .accessibilityIdentifier("profile.edit.cancel")
+                Spacer()
+                Text("Edit Profile").font(.headline)
+                Spacer()
+                Button {
+                    saveTask = Task { await save() }
+                } label: {
+                    Group {
+                        if isSaving { ProgressView().tint(.black) }
+                        else { Text("Save").fontWeight(.semibold) }
+                    }
+                    .frame(width: 64, alignment: .trailing)
+                }
+                .disabled(!canSave)
+                .accessibilityIdentifier("profile.edit.save")
+            }
+            .font(.subheadline)
+            .frame(height: 52)
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    PhotosPicker(selection: $selectedPhoto, matching: .images,
+                        preferredItemEncoding: .compatible) {
+                        VStack(spacing: 10) {
+                            ZStack {
+                                if let photo = avatarDraft.photo {
+                                    Image(uiImage: UIImage(cgImage: photo.preview.image))
+                                        .resizable().scaledToFill()
+                                        .frame(width: 88, height: 88)
+                                        .clipShape(Circle())
+                                } else {
+                                    PlainProfileAvatar(user: originalUser, size: 88)
+                                }
+                                if isImporting {
+                                    Circle().fill(.black.opacity(0.25))
+                                    ProgressView().tint(.white)
+                                }
+                            }
+                            .frame(width: 88, height: 88)
+                            Text(isImporting ? "Preparing photo…" : "Change photo")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isSaving || isImporting)
+                    .accessibilityIdentifier("profile.edit.photo")
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Username").font(.subheadline.weight(.semibold))
+                        HStack(spacing: 6) {
+                            Text("@").foregroundStyle(.secondary)
+                            TextField("Username", text: $handle)
+                                .textContentType(.username)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .submitLabel(.done)
+                                .disabled(isSaving)
+                                .accessibilityIdentifier("profile.edit.username")
+                        }
+                        .padding(14)
+                        .background(Color(.secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 12))
+                        Text("3–32 letters, numbers or underscores.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let issue {
+                        Text(issue)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("profile.edit.error")
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 14)
+                .padding(.bottom, 28)
+            }
+            .scrollDismissesKeyboard(.interactively)
+        }
+        .background(Color(.systemBackground))
+        .tint(.primary)
+        .interactiveDismissDisabled(isSaving)
+        .task(id: selectedPhoto) { await importPhoto() }
+        .fullScreenCover(item: $avatarDraft.source) { source in
+            ProfileAvatarCropView(source: source, onCancel: {
+                avatarDraft.cancelCrop()
+            }, onConfirm: { photo in
+                avatarDraft.confirm(photo)
+            })
+        }
+        .onDisappear { saveTask?.cancel() }
+    }
+
+    private func importPhoto() async {
+        guard let selectedPhoto else { return }
+        let generation = UUID()
+        importGeneration = generation
+        isImporting = true
+        issue = nil
+        defer {
+            if importGeneration == generation {
+                isImporting = false
+                self.selectedPhoto = nil
+            }
+        }
+        do {
+            guard let imported = try await selectedPhoto.loadTransferable(type: ImportedProfilePhoto.self) else {
+                throw ProfilePhotoImportError.unreadable
+            }
+            try Task.checkCancellation()
+            guard importGeneration == generation else { return }
+            avatarDraft.begin(imported.source)
+        } catch is CancellationError { }
+        catch {
+            guard !Task.isCancelled, importGeneration == generation else { return }
+            issue = error.localizedDescription
+        }
+    }
+
+    private func save() async {
+        guard canSave else { return }
+        isSaving = true
+        issue = nil
+        defer { isSaving = false }
+        do {
+            try await submitProfile(handle: cleanHandle, avatarData: avatarDraft.photo?.jpegData)
+            try Task.checkCancellation()
+            dismiss()
+        } catch is CancellationError { }
+        catch { issue = error.localizedDescription }
+    }
+
+    // Keep the callback's actor isolation explicit across its stored-function
+    // boundary. Tests exercise this same path as the Save button.
+    @MainActor
+    func submitProfile(handle: String, avatarData: Data?) async throws {
+        try await onSave(handle, avatarData)
+    }
+}
+
+nonisolated private enum ProfilePhotoImportError: LocalizedError {
+    case unreadable
+    case tooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .unreadable: return "This photo couldn't be opened. Please choose another photo."
+        case .tooLarge: return "This photo is too large. Please choose a smaller photo."
+        }
+    }
+}
+
+nonisolated private struct ImportedProfilePhoto: Transferable, Sendable {
+    let source: ProfileAvatarCropSource
+
+    static var transferRepresentation: some TransferRepresentation {
+        // Import a file rather than loading an unbounded original into main-thread memory.
+        // The picker-owned URL stays valid until this awaited import has finished.
+        FileRepresentation(importedContentType: .image) { received in
+            let source = try await ProfileAvatarProcessor.shared.prepareSource(at: received.file)
+            return ImportedProfilePhoto(source: source)
         }
     }
 }
@@ -468,7 +724,10 @@ private struct ProfileMapDestination: View {
     ) {
         self.initialStoryId = initialStoryId
         _viewModel = StateObject(
-            wrappedValue: MapTalkViewModel(environment: environment, scope: .user(context.user))
+            wrappedValue: MapTalkViewModel(
+                environment: environment,
+                scope: .user(context.isCurrentUser ? environment.currentUser : context.user)
+            )
         )
     }
 

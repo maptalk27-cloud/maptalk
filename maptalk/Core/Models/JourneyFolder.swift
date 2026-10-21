@@ -2,8 +2,8 @@ import Foundation
 
 /// A local-only way to organize a person's own memories in MyMap.
 /// It is intentionally not a publishable post.
-struct JourneyFolder: Identifiable, Hashable {
-    enum MemberReference: Hashable, Identifiable {
+struct JourneyFolder: Identifiable, Hashable, Codable {
+    enum MemberReference: Hashable, Identifiable, Codable {
         case reel(UUID)
         case poi(UUID)
 

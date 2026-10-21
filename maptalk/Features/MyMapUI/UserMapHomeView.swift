@@ -41,6 +41,20 @@ struct UserMapRecord: Identifiable {
         }
     }
 
+    func publicationStatus(in pending: [UUID: PendingPublicationStatus]) -> PendingPublicationStatus? {
+        let statuses: [PendingPublicationStatus]
+        switch kind {
+        case let .reel(reel): statuses = [pending[reel.id]].compactMap { $0 }
+        case let .poi(rated): statuses = rated.checkIns.compactMap { pending[$0.id] }
+        case .journey: statuses = []
+        }
+        // A grouped place must still expose a failed visit even when another
+        // visit is uploading successfully.
+        return statuses.first { if case .failed = $0 { return true }; return false }
+            ?? statuses.first { $0 == .uploading }
+            ?? statuses.first
+    }
+
     var cityName: String {
         if let locationLabel,
            let city = UserMapCity.city(from: locationLabel) {
@@ -342,6 +356,7 @@ private extension UserMapRecord {
 @MainActor
 private struct MyMapRemovalConfirmation: ViewModifier {
     @Binding var record: UserMapRecord?
+    let deletesPublishedPosts: Bool
     let onRemove: (JourneyFolder.MemberReference) -> Void
 
     func body(content: Content) -> some View {
@@ -355,18 +370,26 @@ private struct MyMapRemovalConfirmation: ViewModifier {
         )
 
         content.confirmationDialog(
-            "Remove from MyMap?",
+            deletesPublishedPosts ? "Delete this memory?" : "Remove from MyMap?",
             isPresented: isPresented,
             titleVisibility: .visible,
             presenting: record
         ) { selectedRecord in
-            Button("Remove", role: .destructive) {
+            Button(deletesPublishedPosts ? "Delete" : "Remove", role: .destructive) {
                 guard let reference = selectedRecord.journeyMemberReference else { return }
                 onRemove(reference)
                 record = nil
             }
-        } message: { _ in
-            Text("This only removes the memory from your private MyMap.")
+        } message: { selectedRecord in
+            if deletesPublishedPosts {
+                if case .poi = selectedRecord.kind {
+                    Text("Delete your visits to this place from MyMap and the feed. Other people's visits won't change.")
+                } else {
+                    Text("Delete this post from MyMap and the feed. This can't be undone.")
+                }
+            } else {
+                Text("This only removes the memory from your private MyMap.")
+            }
         }
     }
 }
@@ -455,10 +478,14 @@ struct UserMapHomeView: View {
     let reels: [RealPost]
     let footprints: [UserMapViewModel.Footprint]
     let canEditJourneyFolders: Bool
+    let deletesPublishedPosts: Bool
+    let pendingPublications: [UUID: PendingPublicationStatus]
+    let onRetryPublication: () -> Void
     let onCreateJourneyFolder: (String, [JourneyFolder.MemberReference]) -> JourneyFolder?
     let onSaveJourneyFolder: (JourneyFolder) -> Void
     let onDeleteJourneyFolder: (UUID) -> Void
     let onRemoveFromMyMap: (JourneyFolder.MemberReference) -> Void
+    let onMapUserNavigation: () -> Void
     let userProvider: (UUID) -> User?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -468,6 +495,7 @@ struct UserMapHomeView: View {
     /// should still frame the available memories. Later List ↔ Map switches
     /// preserve the person's manually chosen viewport.
     @State private var hasPresentedMap = false
+    @State private var hasUserNavigatedMap = false
     @State private var searchText = ""
     @State private var filters = FilterState()
     @State private var filterDraft = FilterState()
@@ -532,10 +560,14 @@ struct UserMapHomeView: View {
         reels: [RealPost] = [],
         footprints: [UserMapViewModel.Footprint] = [],
         canEditJourneyFolders: Bool = false,
+        deletesPublishedPosts: Bool = false,
+        pendingPublications: [UUID: PendingPublicationStatus] = [:],
+        onRetryPublication: @escaping () -> Void = {},
         onCreateJourneyFolder: @escaping (String, [JourneyFolder.MemberReference]) -> JourneyFolder? = { _, _ in nil },
         onSaveJourneyFolder: @escaping (JourneyFolder) -> Void = { _ in },
         onDeleteJourneyFolder: @escaping (UUID) -> Void = { _ in },
         onRemoveFromMyMap: @escaping (JourneyFolder.MemberReference) -> Void = { _ in },
+        onMapUserNavigation: @escaping () -> Void = {},
         userProvider: @escaping (UUID) -> User?
     ) {
         self.user = user
@@ -546,10 +578,14 @@ struct UserMapHomeView: View {
         self.reels = reels
         self.footprints = footprints
         self.canEditJourneyFolders = canEditJourneyFolders
+        self.deletesPublishedPosts = deletesPublishedPosts
+        self.pendingPublications = pendingPublications
+        self.onRetryPublication = onRetryPublication
         self.onCreateJourneyFolder = onCreateJourneyFolder
         self.onSaveJourneyFolder = onSaveJourneyFolder
         self.onDeleteJourneyFolder = onDeleteJourneyFolder
         self.onRemoveFromMyMap = onRemoveFromMyMap
+        self.onMapUserNavigation = onMapUserNavigation
         self.userProvider = userProvider
         _cameraPosition = State(initialValue: .region(region))
         _currentMapRegion = State(initialValue: region)
@@ -724,6 +760,7 @@ struct UserMapHomeView: View {
         .modifier(
             MyMapRemovalConfirmation(
                 record: $recordPendingRemoval,
+                deletesPublishedPosts: deletesPublishedPosts,
                 onRemove: onRemoveFromMyMap
             )
         )
@@ -823,6 +860,23 @@ struct UserMapHomeView: View {
         }
         .onPreferenceChange(JourneyOrganizerDockFramePreferenceKey.self) { frame in
             journeyOrganizerDockFrame = frame
+        }
+        .onChangeCompat(of: [
+            region.center.latitude, region.center.longitude,
+            region.span.latitudeDelta, region.span.longitudeDelta
+        ]) { _ in
+            // The canvas stays mounted while List covers it. Forward a late
+            // startup fix to an empty map without resetting journal browsing.
+            guard records.isEmpty,
+                  hasUserNavigatedMap == false,
+                  cameraPosition.positionedByUser == false else { return }
+            cameraPosition = .region(region)
+            currentMapRegion = region
+        }
+        .onChangeCompat(of: cameraPosition.positionedByUser) { positionedByUser in
+            guard positionedByUser else { return }
+            hasUserNavigatedMap = true
+            onMapUserNavigation()
         }
         // Both the map markers and the folder dock participate in one drag.
         // Their hit frames must therefore use exactly the same coordinate
@@ -2173,13 +2227,16 @@ struct UserMapHomeView: View {
     }
 
     private func archiveBrowsingRow(_ record: UserMapRecord) -> some View {
-        Button {
-            openRecordFromList(record)
+        let status = record.publicationStatus(in: pendingPublications)
+        return Button {
+            if case .failed = status { onRetryPublication() }
+            else { openRecordFromList(record) }
         } label: {
-            UserMapRecordCard(record: record)
+            UserMapRecordCard(record: record, publicationStatus: status)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("mymap.list-record.\(record.id.uuidString)")
+        .backendPostActions(for: record.journeyMemberReference, ownerID: user.id)
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
             Button {
                 addRecordToCollection(record)
@@ -2193,10 +2250,10 @@ struct UserMapHomeView: View {
             Button {
                 recordPendingRemoval = record
             } label: {
-                Label("Remove", systemImage: "trash")
+                Label(deletesPublishedPosts ? "Delete" : "Remove", systemImage: "trash")
             }
             .tint(.red)
-            .accessibilityLabel("Remove from MyMap")
+            .accessibilityLabel(deletesPublishedPosts ? "Delete from MyMap and feed" : "Remove from MyMap")
         }
     }
 
@@ -2261,6 +2318,11 @@ struct UserMapHomeView: View {
                         }
                     }
                 }
+                // Keep canvas semantics on MapKit, not its interactive pin overlay.
+                // Applying these after overlay overwrites each memory button's label/ID.
+                .accessibilityIdentifier("mymap.map-canvas")
+                .accessibilityLabel("MyMap map")
+                .accessibilityValue(mapScopeAccessibilityValue)
                 .overlay {
                     mapOrganizerHitLayer(
                         clusters: hitClusters,
@@ -2268,9 +2330,6 @@ struct UserMapHomeView: View {
                         safeAreaBottom: geometry.safeAreaInsets.bottom
                     )
                 }
-                .accessibilityIdentifier("mymap.map-canvas")
-                .accessibilityLabel("MyMap map")
-                .accessibilityValue(mapScopeAccessibilityValue)
                 .ignoresSafeArea(edges: .bottom)
                 .onMapCameraChange(frequency: .continuous) { context in
                     currentMapRegion = context.region
@@ -3834,7 +3893,8 @@ private enum UserMapCity {
             current.distance(from: CLLocation(latitude: $0.1.latitude, longitude: $0.1.longitude))
                 < current.distance(from: CLLocation(latitude: $1.1.latitude, longitude: $1.1.longitude))
         }) else { return "Unknown location" }
-        return nearest.0
+        let distance = current.distance(from: CLLocation(latitude: nearest.1.latitude, longitude: nearest.1.longitude))
+        return distance <= 50_000 ? nearest.0 : "Unknown location"
     }
 }
 
@@ -4283,6 +4343,7 @@ private struct UserMapFilterSheet: View {
 
 struct UserMapRecordCard: View {
     let record: UserMapRecord
+    var publicationStatus: PendingPublicationStatus? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -4296,14 +4357,23 @@ struct UserMapRecordCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(record.timestamp.formatted(.relative(presentation: .named)))
+                Text(publicationLabel ?? record.timestamp.formatted(.relative(presentation: .named)))
                     .font(.caption2.weight(.medium))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(publicationStatus == nil ? Color.secondary.opacity(0.65) : Color.secondary)
             }
             Spacer(minLength: 6)
         }
         .padding(.vertical, 11)
         .contentShape(Rectangle())
+    }
+
+    private var publicationLabel: String? {
+        switch publicationStatus {
+        case .waiting: "Waiting to upload"
+        case .uploading: "Uploading…"
+        case .failed: "Not uploaded · Tap to retry"
+        case nil: nil
+        }
     }
 
     private var metadata: String {
@@ -4421,7 +4491,7 @@ private struct MemoryRemoteImage: View {
     let url: URL
 
     var body: some View {
-        AsyncImage(url: url) { phase in
+        MapImage(url: url) { phase in
             switch phase {
             case let .success(image):
                 image.resizable().scaledToFill()

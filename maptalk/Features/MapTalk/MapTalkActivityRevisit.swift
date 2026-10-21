@@ -139,6 +139,7 @@ private struct MapTalkActivityCapsule: View {
                 postCapsule
             }
         }
+        .environment(\.backendSafetyMenuTrailingInset, 60)
         .overlay(alignment: .topLeading) {
             if journeyStack.isEmpty == false {
                 presentationButton(

@@ -283,7 +283,7 @@ struct CompactRealCard: View {
             if let category = avatarCategory {
                 POICategoryAvatar(category: category, size: avatarSize)
             } else if let url = user?.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()
@@ -399,7 +399,7 @@ struct CompactRealCard: View {
         Group {
             if let attachment = real.attachments.first {
                 if case let .photo(url) = attachment.kind {
-                    AsyncImage(url: url) { phase in
+                    MapImage(url: url) { phase in
                         switch phase {
                         case let .success(image):
                             image
@@ -707,7 +707,7 @@ struct CompactRealCard: View {
     private func attachmentThumbnail(for attachment: RealPost.Attachment) -> some View {
         switch attachment.kind {
         case let .photo(url):
-            AsyncImage(url: url) { phase in
+            MapImage(url: url) { phase in
                 switch phase {
                 case let .success(image):
                     image
@@ -733,7 +733,7 @@ struct CompactRealCard: View {
         case let .video(_, poster):
             ZStack {
                 if let poster {
-                    AsyncImage(url: poster) { phase in
+                    MapImage(url: poster) { phase in
                         switch phase {
                         case let .success(image):
                             image
@@ -851,7 +851,7 @@ struct CompactRealCard: View {
     private var avatarBadge: some View {
         Group {
             if let url = user?.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()
@@ -945,7 +945,7 @@ struct FriendEngagementRow: View {
     private var avatar: some View {
         ZStack {
             if let url = entry.user?.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

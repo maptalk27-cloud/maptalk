@@ -1,0 +1,205 @@
+{
+  "ExplanationForAction": {
+    "kms:Decrypt": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "UploadPart",
+            "Source": {
+              "Expr": "new UploadPartCommand({\n            Bucket: target.bucket, Key: key, UploadId: uploadID, PartNumber: partNumber,\n            Body: body, ContentLength: body.length,\n          })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:109.43-112.13"
+            }
+          },
+          {
+            "Service": "kms",
+            "Name": "Decrypt",
+            "Source": "FAS"
+          }
+        ]
+      }
+    ],
+    "kms:GenerateDataKey": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CreateMultipartUpload",
+            "Source": {
+              "Expr": "new CreateMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, ContentType: 'application/octet-stream',\n          ServerSideEncryption: 'AES256', StorageClass: 'STANDARD',\n          Metadata: { format: 'MTBAK001' },\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:91.44-95.11"
+            }
+          },
+          {
+            "Service": "kms",
+            "Name": "GenerateDataKey",
+            "Source": "FAS"
+          }
+        ]
+      }
+    ],
+    "s3-object-lambda:AbortMultipartUpload": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "AbortMultipartUpload",
+            "Source": {
+              "Expr": "new AbortMultipartUploadCommand({\n                Bucket: target.bucket, Key: key, UploadId: uploadID,\n              })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:141.34-143.17"
+            }
+          }
+        ]
+      }
+    ],
+    "s3-object-lambda:PutObject": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CompleteMultipartUpload",
+            "Source": {
+              "Expr": "new CompleteMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, UploadId: uploadID, MultipartUpload: { Parts: parts },\n          // One immutable object per UTC date, even after crashes or restarts.\n          IfNoneMatch: '*',\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:120.28-124.11"
+            }
+          }
+        ]
+      },
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CreateMultipartUpload",
+            "Source": {
+              "Expr": "new CreateMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, ContentType: 'application/octet-stream',\n          ServerSideEncryption: 'AES256', StorageClass: 'STANDARD',\n          Metadata: { format: 'MTBAK001' },\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:91.44-95.11"
+            }
+          }
+        ]
+      },
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "UploadPart",
+            "Source": {
+              "Expr": "new UploadPartCommand({\n            Bucket: target.bucket, Key: key, UploadId: uploadID, PartNumber: partNumber,\n            Body: body, ContentLength: body.length,\n          })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:109.43-112.13"
+            }
+          }
+        ]
+      }
+    ],
+    "s3:AbortMultipartUpload": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "AbortMultipartUpload",
+            "Source": {
+              "Expr": "new AbortMultipartUploadCommand({\n                Bucket: target.bucket, Key: key, UploadId: uploadID,\n              })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:141.34-143.17"
+            }
+          }
+        ]
+      }
+    ],
+    "s3:PutObject": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CompleteMultipartUpload",
+            "Source": {
+              "Expr": "new CompleteMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, UploadId: uploadID, MultipartUpload: { Parts: parts },\n          // One immutable object per UTC date, even after crashes or restarts.\n          IfNoneMatch: '*',\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:120.28-124.11"
+            }
+          }
+        ]
+      },
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CreateMultipartUpload",
+            "Source": {
+              "Expr": "new CreateMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, ContentType: 'application/octet-stream',\n          ServerSideEncryption: 'AES256', StorageClass: 'STANDARD',\n          Metadata: { format: 'MTBAK001' },\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:91.44-95.11"
+            }
+          }
+        ]
+      },
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "UploadPart",
+            "Source": {
+              "Expr": "new UploadPartCommand({\n            Bucket: target.bucket, Key: key, UploadId: uploadID, PartNumber: partNumber,\n            Body: body, ContentLength: body.length,\n          })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:109.43-112.13"
+            }
+          }
+        ]
+      }
+    ],
+    "s3:PutObjectAcl": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CreateMultipartUpload",
+            "Source": {
+              "Expr": "new CreateMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, ContentType: 'application/octet-stream',\n          ServerSideEncryption: 'AES256', StorageClass: 'STANDARD',\n          Metadata: { format: 'MTBAK001' },\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:91.44-95.11"
+            }
+          }
+        ]
+      }
+    ],
+    "s3:PutObjectLegalHold": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CreateMultipartUpload",
+            "Source": {
+              "Expr": "new CreateMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, ContentType: 'application/octet-stream',\n          ServerSideEncryption: 'AES256', StorageClass: 'STANDARD',\n          Metadata: { format: 'MTBAK001' },\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:91.44-95.11"
+            }
+          }
+        ]
+      }
+    ],
+    "s3:PutObjectRetention": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CreateMultipartUpload",
+            "Source": {
+              "Expr": "new CreateMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, ContentType: 'application/octet-stream',\n          ServerSideEncryption: 'AES256', StorageClass: 'STANDARD',\n          Metadata: { format: 'MTBAK001' },\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:91.44-95.11"
+            }
+          }
+        ]
+      }
+    ],
+    "s3:PutObjectTagging": [
+      {
+        "Operations": [
+          {
+            "Service": "s3",
+            "Name": "CreateMultipartUpload",
+            "Source": {
+              "Expr": "new CreateMultipartUploadCommand({\n          Bucket: target.bucket, Key: key, ContentType: 'application/octet-stream',\n          ServerSideEncryption: 'AES256', StorageClass: 'STANDARD',\n          Metadata: { format: 'MTBAK001' },\n        })",
+              "Location": "/Users/chengsya/Work/maptalk/backend/src/s3-backup.mjs:91.44-95.11"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "Documentation": [
+    "The explanation contains an operation added due to Forward Access Sessions (FAS). See https://docs.aws.amazon.com/IAM/latest/UserGuide/access_forward_access_sessions.html."
+  ]
+}

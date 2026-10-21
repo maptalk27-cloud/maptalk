@@ -1,0 +1,13 @@
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+*.env
+node_modules/
+backups/
+*.mtbak
+*.p8
+*.pem
+review-media/

@@ -18,6 +18,13 @@ final class AppEnvironment {
     let realRepo: any RealRepository
     /// Shared local ownership for the current person's MyMap memories.
     let myMapArchive: MyMapArchiveStore
+    let backend: BackendStore?
+
+    var currentUser: User { backend?.user ?? PreviewData.currentUser }
+    func user(for id: UUID) -> User? {
+        if let backend { return backend.user(for: id) }
+        return PreviewData.user(for: id)
+    }
 
     init(
         build: Build,
@@ -27,7 +34,8 @@ final class AppEnvironment {
         poiRepo: any POIRepository,
         nearbyPOIRepo: (any POIRepository)? = nil,
         realRepo: any RealRepository,
-        myMapArchive: MyMapArchiveStore
+        myMapArchive: MyMapArchiveStore,
+        backend: BackendStore? = nil
     ) {
         self.build = build
         self.location = location
@@ -37,6 +45,7 @@ final class AppEnvironment {
         self.nearbyPOIRepo = nearbyPOIRepo ?? poiRepo
         self.realRepo = realRepo
         self.myMapArchive = myMapArchive
+        self.backend = backend
     }
 
     static func bootstrap() -> AppEnvironment {
@@ -62,6 +71,14 @@ final class AppEnvironment {
             realRepo: realRepo,
             myMapArchive: myMapArchive
         )
+    }
+
+    static func connected(to backend: BackendStore) -> AppEnvironment {
+        let poi = BackendPOIRepository(store: backend)
+        return AppEnvironment(build: Build(configuration: .debug, featureFlags: []),
+            location: LocationServiceImpl(), notifications: NotificationServiceImpl(),
+            activePOIRepo: poi, poiRepo: poi, nearbyPOIRepo: ApplePOIRepository(),
+            realRepo: BackendRealRepository(store: backend), myMapArchive: backend.archive, backend: backend)
     }
 }
 

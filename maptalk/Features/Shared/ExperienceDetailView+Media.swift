@@ -275,7 +275,7 @@ struct MediaCardView: View {
     }
 
     private func imageView(_ url: URL) -> some View {
-        AsyncImage(url: url) { phase in
+        MapImage(url: url) { phase in
             switch phase {
             case let .success(image):
                 image
@@ -402,7 +402,7 @@ struct AutoPlayVideoView: View {
     @ViewBuilder
     private var posterLayer: some View {
         if let poster {
-            AsyncImage(url: poster) { phase in
+            MapImage(url: poster) { phase in
                 switch phase {
                 case let .success(image):
                     image

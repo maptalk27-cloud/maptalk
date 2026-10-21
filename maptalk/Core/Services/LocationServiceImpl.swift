@@ -15,12 +15,26 @@ final class LocationServiceImpl: NSObject, LocationService, CLLocationManagerDel
     }
 
     func requestWhenInUse() {
-        manager.requestWhenInUseAuthorization()
-        manager.startUpdatingLocation()
+        switch manager.authorizationStatus {
+        case .notDetermined:
+            manager.requestWhenInUseAuthorization()
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.startUpdatingLocation()
+        case .restricted, .denied:
+            break
+        @unknown default:
+            break
+        }
     }
 
     func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
         authorization.send(status)
+        if status == .authorizedWhenInUse || status == .authorizedAlways {
+            manager.startUpdatingLocation()
+        } else if status == .denied || status == .restricted {
+            manager.stopUpdatingLocation()
+            location.send(nil)
+        }
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {

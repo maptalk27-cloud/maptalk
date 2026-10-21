@@ -1,0 +1,27 @@
+{
+	# High internal ports let Caddy run without root or Linux capabilities.
+	http_port 8080
+	https_port 8443
+	admin off
+	persist_config off
+	servers {
+		# Only TCP 80/443 are published; do not advertise an unavailable HTTP/3.
+		protocols h1 h2
+	}
+}
+
+# No fallback domain or "tls internal": a real, confirmed, DNS-routed hostname
+# and inbound 80/443 are required for automatic public HTTPS.
+https://{$MAPTALK_DOMAIN} {
+	reverse_proxy api:8787 {
+		# Preserve the client's actual Host so the API's host allowlist remains
+		# meaningful. Never replace an untrusted Host with the configured name.
+		header_up Host {http.request.hostport}
+		transport http {
+			dial_timeout 5s
+			# Bounded video validation can take up to 80s after upload. Keep
+			# the proxy from returning 502 while that work is still running.
+			response_header_timeout 120s
+		}
+	}
+}

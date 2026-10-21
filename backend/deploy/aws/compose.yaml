@@ -1,0 +1,132 @@
+# Local Compose packaging for ONE host and ONE SQLite writer.
+# This file does not provision AWS resources or confirm budget/domain readiness.
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: runtime
+    image: maptalk-backend:local
+    # A fixed name intentionally prevents "compose --scale api=2".
+    container_name: maptalk-beta-api
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 2m
+    cpus: 1.0
+    mem_limit: 768m
+    memswap_limit: 768m
+    pids_limit: 128
+    env_file:
+      - ${MAPTALK_ENV_FILE:?Set an absolute path to the private runtime env file}
+    environment:
+      NODE_ENV: production
+      MAPTALK_MODE: beta
+      MAPTALK_DEPLOYMENT_TARGET: aws
+      AWS_REGION: us-east-2
+      AWS_EC2_METADATA_V1_DISABLED: "true"
+      MAPTALK_BIND: 0.0.0.0
+      PORT: "8787"
+      MAPTALK_DOMAIN: ${MAPTALK_DOMAIN:?Set the real public DNS domain without scheme or port}
+      MAPTALK_PUBLIC_ORIGIN: https://${MAPTALK_DOMAIN:?Set the real public DNS domain}
+      MAPTALK_DATABASE: /var/lib/maptalk/maptalk.sqlite
+      MAPTALK_BACKUP_DIRECTORY: /var/backups/maptalk
+      MAPTALK_APPLE_PRIVATE_KEY_PATH: /run/secrets/apple_sign_in
+      TMPDIR: /tmp
+      NODE_OPTIONS: --max-old-space-size=384
+    # No published API ports: only Caddy can reach it over this bridge.
+    networks: [backend]
+    volumes:
+      - type: bind
+        source: ${MAPTALK_DATA_DIRECTORY:?Set an absolute persistent data directory}
+        target: /var/lib/maptalk
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MAPTALK_BACKUP_DIRECTORY_HOST:?Set an absolute persistent backup directory}
+        target: /var/backups/maptalk
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    secrets:
+      - apple_sign_in
+    healthcheck:
+      test: [CMD, node, scripts/container-healthcheck.mjs]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  caddy:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: proxy
+    image: maptalk-caddy:local
+    container_name: maptalk-beta-caddy
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    environment:
+      MAPTALK_DOMAIN: ${MAPTALK_DOMAIN:?Set the real public DNS domain}
+      XDG_DATA_HOME: /data
+      XDG_CONFIG_HOME: /config
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:8080"
+      - "443:8443"
+    networks: [backend]
+    volumes:
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MAPTALK_CADDY_DATA_DIRECTORY:?Set an absolute persistent TLS data directory}
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MAPTALK_CADDY_CONFIG_DIRECTORY:?Set an absolute persistent Caddy config directory}
+        target: /config
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  # No "internal: true": Apple token verification/revocation and ACME need
+  # outbound HTTPS. No other service or host port is attached to this network.
+  backend:
+    driver: bridge
+
+secrets:
+  # Compose file-backed secrets are read-only bind mounts, not encrypted vaults.
+  # On the Linux host this file must be readable by UID 1000 (e.g. owner 1000,
+  # mode 0400). Compose ignores uid/gid/mode remapping for file-backed secrets.
+  apple_sign_in:
+    file: ${MAPTALK_APPLE_PRIVATE_KEY_HOST_PATH:?Set the absolute path to the private Apple p8 file}

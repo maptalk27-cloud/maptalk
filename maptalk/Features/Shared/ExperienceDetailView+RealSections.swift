@@ -166,6 +166,7 @@ struct POIStoryViewer: View {
     let onPageViewed: (String) -> Void
     let onClose: () -> Void
 
+    @Environment(\.appEnv) private var environment
     @State private var contributorIndex: Int
     @State private var itemIndex: Int = 0
     @State private var contributorTransitionDirection: ContributorTransitionDirection = .none
@@ -410,8 +411,10 @@ struct POIStoryViewer: View {
                     .padding(.horizontal, 20)
             }
             .overlay(alignment: .bottom) {
-                actionBar
-                    .padding(.horizontal, 24)
+                if environment.backend == nil {
+                    actionBar
+                        .padding(.horizontal, 24)
+                }
             }
     }
 
@@ -904,7 +907,7 @@ struct POIStoryAvatarView: View {
     @ViewBuilder
     private var avatarContent: some View {
         if let url = contributor.user?.avatarURL {
-            AsyncImage(url: url) { phase in
+            MapImage(url: url) { phase in
                 switch phase {
                 case let .success(image):
                     image.resizable().scaledToFill()
@@ -981,7 +984,7 @@ struct AvatarSquare: View {
     private var avatarContent: some View {
         Group {
             if let url = user?.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

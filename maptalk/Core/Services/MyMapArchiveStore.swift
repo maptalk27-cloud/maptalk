@@ -40,27 +40,96 @@ final class MyMapArchiveStore: ObservableObject {
     let legacyJourneyCatalog: [JourneyPost]
 
     let currentUserID: UUID
+    private var folderStorageURL: URL?
 
     init(
         currentUserID: UUID? = nil,
-        seed: PreviewData.ChengsiMock? = nil
+        seed: PreviewData.ChengsiMock? = nil,
+        startsEmpty: Bool = false
     ) {
-        let baseline = seed ?? PreviewData.chengsiPrivateArchive
-        let ownerID = currentUserID ?? baseline.user.id
-
-        self.currentUserID = ownerID
         publicPOIOverlays = []
         publicReelOverlays = []
         publicBubbleCatalog = []
-        privatePOIs = PreviewData.profileRatedPOIs(
-            for: baseline.user,
-            customPOIs: baseline.pois
-        )
-        privateReels = baseline.reels
+        privatePOIs = []
+        privateReels = []
         privateBubbleCatalog = []
-        journeyFolders = baseline.journeyFolders.filter { $0.userId == ownerID }
-        legacyJourneyCatalog = baseline.journeys
+        journeyFolders = []
+        if startsEmpty {
+            // Connected accounts must not construct the entire preview archive just to discard
+            // it. Their explicit identity bypasses every mock-data initializer below.
+            let ownerID = currentUserID ?? seed?.user.id ?? PreviewData.currentUser.id
+            self.currentUserID = ownerID
+            legacyJourneyCatalog = []
+            let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("BackendAccounts/\(ownerID.uuidString)", isDirectory: true)
+            folderStorageURL = directory.appendingPathComponent("collections.json")
+            if let url = folderStorageURL, let data = try? Data(contentsOf: url),
+               let saved = try? JSONDecoder().decode([JourneyFolder].self, from: data) {
+                journeyFolders = saved.filter { $0.userId == ownerID }
+            }
+        } else {
+            let baseline = seed ?? PreviewData.chengsiPrivateArchive
+            let ownerID = currentUserID ?? baseline.user.id
+            self.currentUserID = ownerID
+            legacyJourneyCatalog = baseline.journeys
+            privatePOIs = PreviewData.profileRatedPOIs(for: baseline.user, customPOIs: baseline.pois)
+            privateReels = baseline.reels
+            journeyFolders = baseline.journeyFolders.filter { $0.userId == ownerID }
+        }
     }
+
+    func replaceServerRecords(pois: [RatedPOI], reels: [RealPost]) {
+        privatePOIs = pois
+        privateReels = reels
+        publicPOIOverlays = []
+        publicReelOverlays = []
+    }
+
+    private func persistFolders() {
+        do {
+            try writeFolders(journeyFolders)
+        } catch {
+            // Keep the in-memory edit; callers observe an actionable save issue.
+            persistenceIssue = "Could not save Collections on this device. Please try again."
+        }
+    }
+
+    private func writeFolders(_ folders: [JourneyFolder]) throws {
+        guard let url = folderStorageURL else { return }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(folders).write(to: url,
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// A queued new place temporarily uses its local post ID. On confirmation,
+    /// retain all Collection memberships under the server's canonical place ID.
+    /// Persist before acknowledging the remap so the upload queue can safely
+    /// replay it after a crash or a failed disk write.
+    func remapPOIReference(from sourceID: UUID, to destinationID: UUID) throws {
+        guard sourceID != destinationID else { return }
+        let source = JourneyFolder.MemberReference.poi(sourceID)
+        let destination = JourneyFolder.MemberReference.poi(destinationID)
+        var changed = false
+        let updated = journeyFolders.map { folder in
+            guard folder.userId == currentUserID, folder.memberReferences.contains(source) else { return folder }
+            var result = folder
+            result.memberReferences = unique(folder.memberReferences.map { $0 == source ? destination : $0 })
+            result.updatedAt = .now
+            changed = true
+            return result
+        }
+        guard changed else { return }
+        do {
+            try writeFolders(updated)
+        } catch {
+            persistenceIssue = "Could not save Collections on this device. Please try again."
+            throw error
+        }
+        journeyFolders = updated
+        persistenceIssue = nil
+    }
+
+    @Published var persistenceIssue: String?
 
     /// Saves the person's complete POI history to MyMap. A public publish must
     /// also provide a separately constructed projection containing only
@@ -158,6 +227,7 @@ final class MyMapArchiveStore: ObservableObject {
         folder.memberReferences.append(reference)
         folder.updatedAt = .now
         journeyFolders[index] = folder
+        persistFolders()
         return folder
     }
 
@@ -175,6 +245,7 @@ final class MyMapArchiveStore: ObservableObject {
             updatedAt: now
         )
         journeyFolders.insert(folder, at: 0)
+        persistFolders()
         return folder
     }
 
@@ -190,6 +261,7 @@ final class MyMapArchiveStore: ObservableObject {
         updated.memberReferences = unique(updated.memberReferences)
         updated.updatedAt = .now
         journeyFolders[index] = updated
+        persistFolders()
         return updated
     }
 
@@ -197,6 +269,7 @@ final class MyMapArchiveStore: ObservableObject {
         journeyFolders.removeAll { folder in
             folder.id == id && folder.userId == currentUserID
         }
+        persistFolders()
     }
 
     /// Removes only the MyMap copy. A live-post overlay remains live on the
@@ -217,6 +290,7 @@ final class MyMapArchiveStore: ObservableObject {
             }
             return updated
         }
+        persistFolders()
     }
 
     private func normalizedFolderTitle(_ title: String) -> String {

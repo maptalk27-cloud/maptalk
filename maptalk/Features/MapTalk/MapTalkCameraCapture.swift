@@ -9,8 +9,9 @@ internal enum MapTalkCameraCaptureResult {
 
 @MainActor
 internal struct MapTalkCameraCaptureView: UIViewControllerRepresentable {
-    let onCapture: (MapTalkCameraCaptureResult) -> Void
-    let onCancel: () -> Void
+    var allowsVideo = true
+    let onCapture: @MainActor (MapTalkCameraCaptureResult) -> Void
+    let onCancel: @MainActor () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onCapture: onCapture, onCancel: onCancel)
@@ -19,9 +20,9 @@ internal struct MapTalkCameraCaptureView: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let picker = UIImagePickerController()
         picker.sourceType = .camera
-        picker.mediaTypes = [UTType.image.identifier, UTType.movie.identifier]
+        picker.mediaTypes = allowsVideo ? [UTType.image.identifier, UTType.movie.identifier] : [UTType.image.identifier]
         picker.videoQuality = .typeHigh
-        picker.videoMaximumDuration = 15
+        picker.videoMaximumDuration = 60
         picker.allowsEditing = false
         picker.delegate = context.coordinator
         return picker
@@ -31,12 +32,12 @@ internal struct MapTalkCameraCaptureView: UIViewControllerRepresentable {
 
     @MainActor
     final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
-        private let onCapture: (MapTalkCameraCaptureResult) -> Void
-        private let onCancel: () -> Void
+        private let onCapture: @MainActor (MapTalkCameraCaptureResult) -> Void
+        private let onCancel: @MainActor () -> Void
 
         init(
-            onCapture: @escaping (MapTalkCameraCaptureResult) -> Void,
-            onCancel: @escaping () -> Void
+            onCapture: @escaping @MainActor (MapTalkCameraCaptureResult) -> Void,
+            onCancel: @escaping @MainActor () -> Void
         ) {
             self.onCapture = onCapture
             self.onCancel = onCancel

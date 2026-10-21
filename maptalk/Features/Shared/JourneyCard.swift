@@ -83,7 +83,7 @@ struct JourneyCard: View {
     private var avatarView: some View {
         Group {
             if let url = user?.avatarURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

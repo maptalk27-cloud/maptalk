@@ -1262,7 +1262,7 @@ private struct UserMapPOICard: View {
             }
 
             HStack(spacing: 12) {
-                statLabel(icon: "shoeprints.fill", value: rated.checkIns.count)
+                statLabel(icon: "shoeprints.fill", value: rated.checkInPersonCount)
                 statLabel(icon: "text.bubble.fill", value: rated.comments.count)
                 statLabel(icon: "heart.fill", value: rated.favoritesCount)
             }
@@ -1304,7 +1304,7 @@ private struct UserMapPOICard: View {
         } label: {
             Group {
                 if let url = currentUser.avatarURL {
-                    AsyncImage(url: url) { phase in
+                    MapImage(url: url) { phase in
                         switch phase {
                         case let .success(image):
                             image.resizable().scaledToFill()
@@ -1608,7 +1608,7 @@ struct UserMapCollapsedReelMarker: View {
 
         VStack(spacing: 0) {
             if let url = thumbnailURL {
-                AsyncImage(url: url) { phase in
+                MapImage(url: url) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

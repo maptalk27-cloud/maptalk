@@ -1,0 +1,29 @@
+{
+  "status": "baseline-only-do-not-attach",
+  "generatedWith": "iam-policy-autopilot 0.3.0",
+  "generatedOn": "2026-10-20",
+  "input": "backend/src/s3-backup.mjs",
+  "language": "javascript",
+  "extensionAutoDetection": false,
+  "explicitLanguageOverrideWorked": true,
+  "reviewedSourceSHA256": "748722bf9507494c2c0b96e798f927efb4b95f8d1345f9b5c3e8661fb209c2bc",
+  "refinement": "refine-backup-policy.mjs filters generated actions and replaces wildcard resources after deployment-specific review; source or action drift fails closed",
+  "refinedPolicy": "backup-runtime-policy.json",
+  "explanationMapping": "backup-autopilot-explanations.json",
+  "selectedRegion": "us-east-2",
+  "projectID": "579072312038",
+  "intendedResource": "arn:aws:s3:::maptalk-beta-579072312038-us-east-2/maptalk/backups/*",
+  "identifiedOperations": [
+    "CreateMultipartUpload",
+    "UploadPart",
+    "CompleteMultipartUpload",
+    "AbortMultipartUpload"
+  ],
+  "reviewRequired": [
+    "Generated wildcard resources are not scoped to the approved bucket and backup prefix.",
+    "Autopilot includes conditional optional permissions for KMS, ACL, tagging, legal hold, retention, and Object Lambda despite those features not being configured in this deployment.",
+    "The raw baseline is evidence of deterministic source analysis, not a policy approved for deployment.",
+    "SSM instance permissions and a temporary exact deploy-bundle read grant are separate from backup runtime permissions."
+  ],
+  "cloudMutationsPerformed": false
+}

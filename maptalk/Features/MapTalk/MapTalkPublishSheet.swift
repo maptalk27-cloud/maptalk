@@ -129,6 +129,10 @@ struct MapTalkPublishComposer: View {
         var id: Self { self }
     }
 
+    @Environment(\.appEnv) private var appEnvironment
+    private var isConnected: Bool { appEnvironment.backend != nil }
+    private var isHosted: Bool { appEnvironment.backend?.api.baseURL.scheme == "https" }
+    private var publicAudienceTitle: String { isHosted ? "Test members" : "Public" }
     let destination: MapTalkPublishDestination
     let nearbyPlaces: [MapTalkNearbyPlaceOption]
     let isLoadingNearbyPlaces: Bool
@@ -138,13 +142,10 @@ struct MapTalkPublishComposer: View {
     let userProvider: (UUID) -> User?
     let hasLiveLocation: Bool
     let locationAuthorization: CLAuthorizationStatus
-    let topInset: CGFloat
-    let bottomInset: CGFloat
     let onCancel: () -> Void
-    /// Returning `false` leaves the draft in place and gives the person a
-    /// useful retry state (for example if their strict live location changed
-    /// while the composer was open).
-    let onPublish: (MapTalkPublishDraft, MapPublishAudience) -> Bool
+    /// Keep the draft alive until it is saved to the durable local outbox.
+    /// A stable request ID lets a retry resolve the same submission.
+    let onPublish: (MapTalkPublishDraft, MapPublishAudience, UUID) async throws -> Void
 
     @State private var mediaPickerItem: PhotosPickerItem?
     @State private var selectedMedia: ComposerMediaAsset?
@@ -154,8 +155,6 @@ struct MapTalkPublishComposer: View {
     @State private var placeVideoPlayer: AVPlayer?
     @State private var isShowingPlaceCamera = false
     @State private var isShowingPlaceLibrary = false
-    @State private var didPresentInitialPlaceCapture = false
-    @State private var initialPlaceCaptureWorkItem: DispatchWorkItem?
     @State private var placeAudience: MapPublishAudience = .privateMyMap
     @State private var isShowingPlaceAudienceChoices = false
     @State private var isShowingNearbyPlaceChoices = false
@@ -177,6 +176,7 @@ struct MapTalkPublishComposer: View {
     @State private var reelText = ""
     @State private var reelPickerItems: [PhotosPickerItem] = []
     @State private var reelAssets: [ComposerMediaAsset] = []
+    @State private var previewedReelVideo: ComposerVideoPreview?
     @State private var reelIsImporting = false
     @State private var reelImportToken = UUID()
     @State private var reelAudience: MapPublishAudience = .livePublic
@@ -187,6 +187,9 @@ struct MapTalkPublishComposer: View {
     @State private var bubblePickerTab: BubblePickerTab = .memories
     @State private var bubbleSearchText = ""
     @State private var submissionIssue: String?
+    @State private var isSubmitting = false
+    @State private var hasUnconfirmedSubmission = false
+    @State private var submissionRequestID = UUID()
     @State private var bubblePreviewID = UUID()
     @State private var reelPreviewCreatedAt = Date.now
     @State private var draggedReelAssetID: UUID?
@@ -223,6 +226,12 @@ struct MapTalkPublishComposer: View {
     }
 
     private var canSubmit: Bool {
+        guard isSubmitting == false,
+              isLoadingMedia == false,
+              reelIsImporting == false,
+              mediaPickerItem == nil,
+              reelPickerItems.isEmpty,
+              draggedReelAssetID == nil else { return false }
         switch destination {
         case .place:
             return selectedNearbyPOI != nil || (isCreatingLandmark && trimmedLandmarkName.isEmpty == false)
@@ -260,16 +269,17 @@ struct MapTalkPublishComposer: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .ignoresSafeArea(.container)
         .toolbarVisibility(.hidden, for: .tabBar)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("maptalk.publish-composer")
+        .disabled(isSubmitting)
+        .allowsHitTesting(isSubmitting == false)
+        .interactiveDismissDisabled(isSubmitting)
         .onAppear {
             configureInitialSelection()
-            presentInitialPlaceCaptureIfNeeded()
         }
         .onDisappear {
-            initialPlaceCaptureWorkItem?.cancel()
-            initialPlaceCaptureWorkItem = nil
+            placeVideoPlayer?.pause()
         }
         .onChange(of: nearbyPlaces.map(\.id)) { _, _ in
             if isShowingNearbyPlaceChoices,
@@ -280,20 +290,23 @@ struct MapTalkPublishComposer: View {
             synchronizeNearbySelection()
         }
         .onChange(of: hasLiveLocation) { _, isReady in
-            guard isReady else { return }
+            guard isReady, submissionIssue == "Finding your location. Try again in a moment." else { return }
             submissionIssue = nil
         }
         .onChange(of: mediaPickerItem) { _, item in
+            guard let item, isSubmitting == false else { return }
             let token = UUID()
             mediaImportToken = token
+            isLoadingMedia = true
             Task {
                 await importPlaceMedia(from: item, token: token)
             }
         }
         .onChange(of: reelPickerItems) { _, items in
-            guard items.isEmpty == false else { return }
+            guard items.isEmpty == false, isSubmitting == false else { return }
             let token = UUID()
             reelImportToken = token
+            reelIsImporting = true
             Task {
                 await importReelMedia(items, token: token)
             }
@@ -305,6 +318,7 @@ struct MapTalkPublishComposer: View {
         )
         .fullScreenCover(isPresented: $isShowingPlaceCamera) {
             MapTalkCameraCaptureView(
+                allowsVideo: true,
                 onCapture: { result in
                     isShowingPlaceCamera = false
                     importPlaceCameraCapture(result)
@@ -315,25 +329,24 @@ struct MapTalkPublishComposer: View {
             )
             .ignoresSafeArea()
         }
+        .sheet(item: $previewedReelVideo) { video in
+            ComposerVideoPlayer(url: video.url)
+        }
     }
 
     private var placeComposer: some View {
-        GeometryReader { proxy in
-            ZStack {
-                Color.white
-                    .ignoresSafeArea()
-
-                placeCaptureStep
-                    .offset(x: isShowingNearbyPlaceChoices ? -proxy.size.width : 0)
-                    .allowsHitTesting(isShowingNearbyPlaceChoices == false)
-                    .accessibilityHidden(isShowingNearbyPlaceChoices)
-
+        ZStack {
+            if isShowingNearbyPlaceChoices {
                 placePickerStep
-                    .offset(x: isShowingNearbyPlaceChoices ? 0 : proxy.size.width)
-                    .allowsHitTesting(isShowingNearbyPlaceChoices)
-                    .accessibilityHidden(isShowingNearbyPlaceChoices == false)
+                    .transition(.move(edge: .trailing))
+            } else {
+                placeCaptureStep
+                    .transition(.move(edge: .leading))
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.white.ignoresSafeArea())
+        .clipped()
         .animation(.easeOut(duration: 0.20), value: isShowingNearbyPlaceChoices)
     }
 
@@ -360,6 +373,7 @@ struct MapTalkPublishComposer: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
+                .disabled(hasUnconfirmedSubmission)
                 .padding(.bottom, 14)
             }
             .scrollDismissesKeyboard(.interactively)
@@ -367,9 +381,9 @@ struct MapTalkPublishComposer: View {
             placeSubmitButton
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
-                .padding(.bottom, bottomInset + 10)
+                .padding(.bottom, 10)
         }
-        .padding(.top, topInset + 6)
+        .padding(.top, 6)
     }
 
     private var placePickerStep: some View {
@@ -399,11 +413,11 @@ struct MapTalkPublishComposer: View {
                 nearbyPlaceChoices
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
-                    .padding(.bottom, bottomInset + 24)
+                    .padding(.bottom, 24)
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .padding(.top, topInset + 6)
+        .padding(.top, 6)
         .background(Color.white)
     }
 
@@ -425,6 +439,8 @@ struct MapTalkPublishComposer: View {
                         .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(.black)
                         .focused($isTextFocused)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
                         .submitLabel(.done)
                         .onSubmit {
                             if trimmedNewLandmarkNameDraft.isEmpty == false {
@@ -467,10 +483,10 @@ struct MapTalkPublishComposer: View {
             .opacity(trimmedNewLandmarkNameDraft.isEmpty ? 0.22 : 1)
             .padding(.horizontal, 20)
             .padding(.top, 8)
-            .padding(.bottom, bottomInset + 10)
+            .padding(.bottom, 10)
             .accessibilityIdentifier("maptalk.place.use-new")
         }
-        .padding(.top, topInset + 6)
+        .padding(.top, 6)
         .background(Color.white)
     }
 
@@ -489,7 +505,8 @@ struct MapTalkPublishComposer: View {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.black)
-                        .frame(width: 40, height: 40)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(ComposerPressStyle())
                 .accessibilityLabel(backLabel)
@@ -533,14 +550,15 @@ struct MapTalkPublishComposer: View {
                                 .padding(.top, 14)
                         }
                     }
+                    .disabled(hasUnconfirmedSubmission)
                     .padding(.horizontal, 20)
                     .padding(.top, 12)
-                    .padding(.bottom, bottomInset + 22)
+                    .padding(.bottom, 22)
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .scrollDisabled(draggedReelAssetID != nil)
             }
-            .padding(.top, topInset + 6)
+            .padding(.top, 6)
         }
     }
 
@@ -554,7 +572,8 @@ struct MapTalkPublishComposer: View {
                 Button(action: cancelComposer) {
                     Image(systemName: "xmark")
                         .font(.system(size: 16, weight: .semibold))
-                        .frame(width: 40, height: 40)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .foregroundStyle(.black)
                 .buttonStyle(ComposerPressStyle())
@@ -566,10 +585,17 @@ struct MapTalkPublishComposer: View {
                 Button {
                     submit(reelAudience)
                 } label: {
-                    Text(reelAudience == .livePublic ? "Share" : "Save")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(canSubmit ? Color.black : Color.black.opacity(0.28))
-                        .frame(minWidth: 56, minHeight: 40)
+                    Group {
+                        if isSubmitting {
+                            ProgressView()
+                                .tint(.black)
+                        } else {
+                            Text(reelAudience == .livePublic ? "Share" : "Save")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(canSubmit ? Color.black : Color.black.opacity(0.28))
+                        }
+                    }
+                    .frame(minWidth: 56, minHeight: 40)
                 }
                 .buttonStyle(ComposerPressStyle())
                 .disabled(canSubmit == false)
@@ -678,6 +704,11 @@ struct MapTalkPublishComposer: View {
                 y: isDragged ? 8 : 0
             )
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .onTapGesture {
+                guard case let .video(_, url, _) = asset, draggedReelAssetID == nil else { return }
+                isTextFocused = false
+                previewedReelVideo = .init(url: url)
+            }
             .gesture(
                 ReelMediaPressDragGesture(
                     onBegan: { location in
@@ -699,7 +730,9 @@ struct MapTalkPublishComposer: View {
                 )
             )
             .accessibilityLabel(asset.isVideo ? "Video" : "Photo")
-            .accessibilityHint("Hold and drag to the remove area")
+            .accessibilityHint(asset.isVideo
+                ? "Tap to preview. Hold and drag to the remove area"
+                : "Hold and drag to the remove area")
             .accessibilityAction(named: "Remove") {
                 removeReelAsset(asset.id)
             }
@@ -782,7 +815,7 @@ struct MapTalkPublishComposer: View {
         .buttonStyle(ComposerPressStyle())
         .disabled(reelIsImporting)
         .accessibilityLabel(reelAssets.isEmpty ? "Add photos or videos" : "Add more photos or videos")
-        .accessibilityHint("Up to \(Self.maximumReelAssets) items")
+        .accessibilityHint("Up to \(Self.maximumReelAssets) items. Videos up to 60 seconds")
         .accessibilityIdentifier("maptalk.reel.add-media")
     }
 
@@ -834,6 +867,7 @@ struct MapTalkPublishComposer: View {
     }
 
     private func beginReelMediaDrag(_ id: UUID, at location: CGPoint) {
+        guard isSubmitting == false, hasUnconfirmedSubmission == false else { return }
         guard draggedReelAssetID == nil || draggedReelAssetID == id else { return }
         if draggedReelAssetID == nil {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -898,9 +932,10 @@ struct MapTalkPublishComposer: View {
 
     private var reelFooterRows: some View {
         VStack(spacing: 0) {
-            bubbleSelector
-
-            reelRowDivider
+            if !isConnected {
+                bubbleSelector
+                reelRowDivider
+            }
 
             reelSettingRow(
                 title: "Location",
@@ -919,7 +954,7 @@ struct MapTalkPublishComposer: View {
             } label: {
                 reelSettingRow(
                     title: "Who can see",
-                    value: reelAudience == .livePublic ? "Public" : "Only me",
+                    value: reelAudience == .livePublic ? publicAudienceTitle : "Only me",
                     showsChevron: true
                 )
             }
@@ -929,11 +964,15 @@ struct MapTalkPublishComposer: View {
             if isShowingAudienceChoices {
                 VStack(spacing: 0) {
                     reelRowDivider
-                    reelAudienceChoice(.livePublic, title: "Public")
+                    reelAudienceChoice(.livePublic, title: publicAudienceTitle)
                     reelRowDivider
                     reelAudienceChoice(.privateMyMap, title: "Only me")
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            if isHosted && reelAudience == .livePublic {
+                Text("Visible to invited test members as soon as you publish.")
+                    .font(.footnote).foregroundStyle(.secondary).padding(.top, 12)
             }
         }
     }
@@ -1023,7 +1062,8 @@ struct MapTalkPublishComposer: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.black)
-                        .frame(width: 40, height: 40)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(ComposerPressStyle())
                 .accessibilityLabel("Cancel publishing")
@@ -1050,16 +1090,12 @@ struct MapTalkPublishComposer: View {
             if selectedMedia == nil, isLoadingMedia == false {
                 Button(action: presentPlaceCapture) {
                     VStack(spacing: 12) {
-                        ZStack {
-                            Circle()
-                                .stroke(Color.white.opacity(0.92), lineWidth: 2)
-                                .frame(width: 58, height: 58)
-                            Circle()
-                                .fill(Color.white)
-                                .frame(width: 46, height: 46)
-                        }
+                        Image(systemName: "camera")
+                            .font(.system(size: 30, weight: .regular))
+                            .frame(width: 64, height: 64)
+                            .background(.white.opacity(0.10), in: Circle())
 
-                        Text(didFailMediaLoad ? "Try again" : "Tap to capture")
+                        Text(didFailMediaLoad ? "Try again" : "Take a photo or video")
                             .font(.system(size: 15, weight: .semibold))
                     }
                     .foregroundStyle(.white)
@@ -1083,7 +1119,7 @@ struct MapTalkPublishComposer: View {
                             Circle()
                                 .fill(hasLiveLocation ? Theme.neonPrimary : Color.white.opacity(0.72))
                                 .frame(width: 6, height: 6)
-                            Text(hasLiveLocation ? "Live" : (locationAccessIsDenied ? "Location off" : "Locating"))
+                            Text(hasLiveLocation ? "Current location" : (locationAccessIsDenied ? "Location off" : "Locating"))
                                 .font(.system(size: 13, weight: .semibold))
                         }
                         .foregroundStyle(.white)
@@ -1376,7 +1412,7 @@ struct MapTalkPublishComposer: View {
             } label: {
                 placeSettingRow(
                     title: "Who can see",
-                    value: placeAudience == .livePublic ? "Public" : "Only me",
+                    value: placeAudience == .livePublic ? publicAudienceTitle : "Only me",
                     showsChevron: true,
                     chevronName: isShowingPlaceAudienceChoices ? "chevron.up" : "chevron.down"
                 )
@@ -1386,9 +1422,13 @@ struct MapTalkPublishComposer: View {
 
             if isShowingPlaceAudienceChoices {
                 placeRowDivider
-                placeAudienceChoice(.livePublic, title: "Public")
+                placeAudienceChoice(.livePublic, title: publicAudienceTitle)
                 placeRowDivider
                 placeAudienceChoice(.privateMyMap, title: "Only me")
+            }
+            if isHosted && placeAudience == .livePublic {
+                Text("Visible to invited test members as soon as you publish.")
+                    .font(.footnote).foregroundStyle(.secondary).padding(.top, 12)
             }
         }
     }
@@ -1464,16 +1504,23 @@ struct MapTalkPublishComposer: View {
         Button {
             submit(placeAudience)
         } label: {
-            Text(placeAudience == .livePublic ? "Post" : "Add to MyMap")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 52)
-                .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            Group {
+                if isSubmitting {
+                    ProgressView()
+                        .tint(.white)
+                } else {
+                    Text(placeAudience == .livePublic ? "Post" : "Add to MyMap")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(ComposerPressStyle())
         .disabled(canSubmit == false)
-        .opacity(canSubmit ? 1 : 0.22)
+        .opacity(canSubmit || isSubmitting ? 1 : 0.22)
         .accessibilityIdentifier("maptalk.place.publish")
     }
 
@@ -1601,8 +1648,7 @@ struct MapTalkPublishComposer: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
             }
-            .padding(.top, topInset + 6)
-            .padding(.bottom, bottomInset)
+            .padding(.top, 6)
         }
         .accessibilityIdentifier("maptalk.reel.bubble-picker")
     }
@@ -2137,8 +2183,6 @@ struct MapTalkPublishComposer: View {
     }
 
     private func toggleNearbyPlaceChoices() {
-        initialPlaceCaptureWorkItem?.cancel()
-        initialPlaceCaptureWorkItem = nil
         placeVideoPlayer?.pause()
         isTextFocused = false
         nearbyPlaceChoiceSnapshot = Array(nearbyPlaces.prefix(8))
@@ -2213,7 +2257,8 @@ struct MapTalkPublishComposer: View {
     }
 
     private func synchronizeNearbySelection() {
-        guard destination == .place, isCreatingLandmark == false else { return }
+        guard destination == .place, isCreatingLandmark == false,
+              isSubmitting == false, hasUnconfirmedSubmission == false else { return }
 
         if let selectedNearbyPlaceOption,
            let refreshedOption = nearbyPlaces.first(where: { $0.id == selectedNearbyPlaceOption.id }) {
@@ -2231,27 +2276,9 @@ struct MapTalkPublishComposer: View {
         selectedNearbyPlaceOption = nil
     }
 
-    private func presentInitialPlaceCaptureIfNeeded() {
-        guard destination == .place, didPresentInitialPlaceCapture == false else { return }
-        didPresentInitialPlaceCapture = true
-#if !targetEnvironment(simulator)
-        // Wait for the composer presentation to settle before placing the
-        // camera on top; otherwise UIKit can silently drop the request.
-        let workItem = DispatchWorkItem {
-            initialPlaceCaptureWorkItem = nil
-            guard isShowingPlaceLibrary == false,
-                  isShowingPlaceCamera == false,
-                  isShowingNearbyPlaceChoices == false else { return }
-            presentPlaceCapture()
-        }
-        initialPlaceCaptureWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
-#endif
-    }
-
     private func presentPlaceCapture() {
-        initialPlaceCaptureWorkItem?.cancel()
-        initialPlaceCaptureWorkItem = nil
+        guard isSubmitting == false, hasUnconfirmedSubmission == false, isLoadingMedia == false else { return }
+        placeVideoPlayer?.pause()
         isTextFocused = false
         submissionIssue = nil
 #if targetEnvironment(simulator)
@@ -2269,8 +2296,8 @@ struct MapTalkPublishComposer: View {
     }
 
     private func presentPlaceLibrary() {
-        initialPlaceCaptureWorkItem?.cancel()
-        initialPlaceCaptureWorkItem = nil
+        guard isSubmitting == false, hasUnconfirmedSubmission == false, isLoadingMedia == false else { return }
+        placeVideoPlayer?.pause()
         isTextFocused = false
         submissionIssue = nil
         isShowingPlaceLibrary = true
@@ -2286,37 +2313,49 @@ struct MapTalkPublishComposer: View {
         case let .photo(image):
             let payload = SendableComposerImage(image)
             Task { @MainActor in
-                let url = await Task.detached(priority: .userInitiated) {
-                    guard let data = payload.image.jpegData(compressionQuality: 0.92) else {
-                        return nil as URL?
+                let imported = await Task.detached(priority: .userInitiated) {
+                    guard let photo = try? PublishPhotoNormalizer.prepare(cameraImage: payload.image),
+                          let url = try? MapTalkMediaStorage.persist(photo.jpegData, fileExtension: "jpg") else {
+                        return nil as ImportedComposerPhoto?
                     }
-                    return try? MapTalkMediaStorage.persist(data, fileExtension: "jpg")
+                    return ImportedComposerPhoto(url: url, preview: photo.preview)
                 }.value
 
                 guard mediaImportToken == token else {
-                    if let url { try? FileManager.default.removeItem(at: url) }
+                    if let imported { try? FileManager.default.removeItem(at: imported.url) }
                     return
                 }
-                guard let url else {
+                guard let imported else {
                     isLoadingMedia = false
                     didFailMediaLoad = true
+                    submissionIssue = "Couldn't prepare this photo. Please try again."
                     return
                 }
-                replacePlaceMedia(with: .photo(id: UUID(), url: url, preview: image))
+                replacePlaceMedia(with: .photo(id: UUID(), url: imported.url,
+                    preview: UIImage(cgImage: imported.preview.image)))
                 isLoadingMedia = false
             }
 
         case let .video(url):
             Task {
-                let preview = try? await makeVideoPreview(for: url)
-                await MainActor.run {
-                    let asset = ComposerMediaAsset.video(id: UUID(), url: url, preview: preview)
+                // Camera returns an app-owned copy. The normalized file is a
+                // separate copy, and replaces the original only on success.
+                defer { try? FileManager.default.removeItem(at: url) }
+                do {
+                    let prepared = try await PublishVideoNormalizer.prepare(sourceURL: url)
+                    let preview = try? await makeVideoPreview(for: prepared)
+                    let asset = ComposerMediaAsset.video(id: UUID(), url: prepared, preview: preview)
                     guard mediaImportToken == token else {
                         discard(asset)
                         return
                     }
                     replacePlaceMedia(with: asset)
                     isLoadingMedia = false
+                } catch {
+                    guard mediaImportToken == token else { return }
+                    isLoadingMedia = false
+                    didFailMediaLoad = true
+                    submissionIssue = error.localizedDescription
                 }
             }
         }
@@ -2358,15 +2397,39 @@ struct MapTalkPublishComposer: View {
             )
         }
 
-        guard onPublish(draft, audience) else {
-            withAnimation(.easeOut(duration: 0.15)) {
-                submissionIssue = "Location isn't ready yet. Try again in a moment."
+        isSubmitting = true
+        isTextFocused = false
+        submissionIssue = nil
+        Task { @MainActor in
+            defer { isSubmitting = false }
+            do {
+                try await onPublish(draft, audience, submissionRequestID)
+                // The connected backend has durably copied these files into
+                // its outbox. Demo records still refer to the originals.
+                if isConnected {
+                    placeVideoPlayer?.pause()
+                    selectedMedia.map(discard)
+                    reelAssets.forEach(discard)
+                }
+            } catch {
+                // The captured photos and text remain in this composer. A
+                // transport or validation failure is not a location failure.
+                withAnimation(.easeOut(duration: 0.15)) {
+                    if let error = error as? BackendClientError {
+                        if case .publishPending = error {
+                            hasUnconfirmedSubmission = true
+                        } else if error.confirmsPublishRejection {
+                            hasUnconfirmedSubmission = false
+                        }
+                    }
+                    submissionIssue = error.localizedDescription
+                }
             }
-            return
         }
     }
 
     private func removeReelAsset(_ id: UUID) {
+        guard isSubmitting == false, hasUnconfirmedSubmission == false else { return }
         guard let removedIndex = reelAssets.firstIndex(where: { $0.id == id }) else {
             return
         }
@@ -2378,8 +2441,7 @@ struct MapTalkPublishComposer: View {
     }
 
     private func cancelComposer() {
-        initialPlaceCaptureWorkItem?.cancel()
-        initialPlaceCaptureWorkItem = nil
+        guard isSubmitting == false else { return }
         mediaImportToken = UUID()
         reelImportToken = UUID()
         placeVideoPlayer?.pause()
@@ -2417,17 +2479,8 @@ struct MapTalkPublishComposer: View {
             didFailMediaLoad = false
         }
 
-        guard let asset = await loadComposerAsset(from: item) else {
-            await MainActor.run {
-                guard mediaImportToken == token else { return }
-                isLoadingMedia = false
-                didFailMediaLoad = true
-                mediaPickerItem = nil
-            }
-            return
-        }
-
-        await MainActor.run {
+        do {
+            let asset = try await loadComposerAsset(from: item)
             guard mediaImportToken == token else {
                 discard(asset)
                 return
@@ -2435,6 +2488,12 @@ struct MapTalkPublishComposer: View {
             replacePlaceMedia(with: asset)
             isLoadingMedia = false
             mediaPickerItem = nil
+        } catch {
+            guard mediaImportToken == token else { return }
+            isLoadingMedia = false
+            didFailMediaLoad = true
+            mediaPickerItem = nil
+            submissionIssue = error.localizedDescription
         }
     }
 
@@ -2444,6 +2503,7 @@ struct MapTalkPublishComposer: View {
             await MainActor.run {
                 guard reelImportToken == token else { return }
                 reelPickerItems = []
+                reelIsImporting = false
             }
             return
         }
@@ -2454,13 +2514,17 @@ struct MapTalkPublishComposer: View {
         }
 
         var imported: [ComposerMediaAsset] = []
+        var firstImportIssue: String?
         for item in items.prefix(importLimit) {
             guard reelImportToken == token else {
                 imported.forEach(discard)
                 return
             }
-            if let asset = await loadComposerAsset(from: item) {
+            do {
+                let asset = try await loadComposerAsset(from: item)
                 imported.append(asset)
+            } catch {
+                if firstImportIssue == nil { firstImportIssue = error.localizedDescription }
             }
         }
 
@@ -2475,36 +2539,76 @@ struct MapTalkPublishComposer: View {
             reelAssets.append(contentsOf: accepted)
             reelPickerItems = []
             reelIsImporting = false
-            submissionIssue = nil
+            submissionIssue = imported.count < importLimit
+                ? (firstImportIssue ?? "Some photos or videos couldn't be opened. Please try again.")
+                : nil
         }
     }
 
-    private func loadComposerAsset(from item: PhotosPickerItem) async -> ComposerMediaAsset? {
+    private func loadComposerAsset(from item: PhotosPickerItem) async throws -> ComposerMediaAsset {
         let supportedTypes = item.supportedContentTypes
         let isVideo = supportedTypes.contains { type in
             type.conforms(to: .movie) || type.conforms(to: .video)
         }
 
-        if isVideo,
-           let movie = try? await item.loadTransferable(type: ImportedMovie.self) {
-            let preview = try? await makeVideoPreview(for: movie.url)
-            return .video(id: UUID(), url: movie.url, preview: preview)
+        if isVideo {
+            guard let movie = try await item.loadTransferable(type: ImportedMovie.self) else {
+                throw ComposerMediaImportError.unreadable
+            }
+            defer { try? FileManager.default.removeItem(at: movie.url) }
+            // Keep validation outside Photos' transfer wrapper so a long clip
+            // gives the person an actionable error, not "import failed".
+            let prepared = try await PublishVideoNormalizer.prepare(sourceURL: movie.url)
+            let preview = try? await makeVideoPreview(for: prepared)
+            return .video(id: UUID(), url: prepared, preview: preview)
         }
 
-        if let data = try? await item.loadTransferable(type: Data.self),
-           let image = UIImage(data: data) {
-            let payload = SendableComposerImage(image)
-            let url = await Task.detached(priority: .userInitiated) {
-                guard let jpeg = payload.image.jpegData(compressionQuality: 0.92) else {
-                    return nil as URL?
+        if let photo = try await item.loadTransferable(type: ImportedComposerPhoto.self) {
+            return .photo(id: UUID(), url: photo.url, preview: UIImage(cgImage: photo.preview.image))
+        }
+
+        throw ComposerMediaImportError.unreadable
+    }
+}
+
+private enum ComposerMediaImportError: LocalizedError {
+    case unreadable
+
+    var errorDescription: String? {
+        "Couldn't open this photo or video. Please choose it again."
+    }
+}
+
+private struct ComposerVideoPreview: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+private struct ComposerVideoPlayer: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer
+
+    init(url: URL) {
+        _player = State(initialValue: AVPlayer(url: url))
+    }
+
+    var body: some View {
+        NavigationStack {
+            VideoPlayer(player: player)
+                .background(.black)
+                .accessibilityIdentifier("maptalk.reel.video-preview")
+                .navigationTitle("Preview")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                            .tint(.primary)
+                            .accessibilityIdentifier("maptalk.reel.video-preview.done")
+                    }
                 }
-                return try? MapTalkMediaStorage.persist(jpeg, fileExtension: "jpg")
-            }.value
-            guard let url else { return nil }
-            return .photo(id: UUID(), url: url, preview: image)
+                .onAppear { player.play() }
+                .onDisappear { player.pause() }
         }
-
-        return nil
     }
 }
 
@@ -2607,18 +2711,41 @@ private struct SendableComposerImage: @unchecked Sendable {
     }
 }
 
-private struct ImportedMovie: Transferable {
+nonisolated private struct ImportedComposerPhoto: Transferable, Sendable {
+    let url: URL
+    let preview: LocalMapDecodedImage
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { received in
+            try await ComposerPhotoProcessor.shared.prepare(at: received.file)
+        }
+    }
+}
+
+private actor ComposerPhotoProcessor {
+    static let shared = ComposerPhotoProcessor()
+
+    func prepare(at source: URL) throws -> ImportedComposerPhoto {
+        let photo = try PublishPhotoNormalizer.prepare(at: source)
+        let url = try MapTalkMediaStorage.persist(photo.jpegData, fileExtension: "jpg")
+        return ImportedComposerPhoto(url: url, preview: photo.preview)
+    }
+}
+
+nonisolated private struct ImportedMovie: Transferable, Sendable {
     let url: URL
 
     static var transferRepresentation: some TransferRepresentation {
         FileRepresentation(importedContentType: .movie) { received in
-            let directory = try MapTalkMediaStorage.directory()
-            let sourceExtension = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
-            let destination = directory
+            let bytes = try received.file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            guard bytes > 0, bytes <= 512 * 1_024 * 1_024 else {
+                throw PublishVideoNormalizer.ImportError.tooLarge
+            }
+            let url = try MapTalkMediaStorage.directory()
                 .appendingPathComponent(UUID().uuidString)
-                .appendingPathExtension(sourceExtension)
-            try FileManager.default.copyItem(at: received.file, to: destination)
-            return Self(url: destination)
+                .appendingPathExtension(received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension)
+            try FileManager.default.copyItem(at: received.file, to: url)
+            return Self(url: url)
         }
     }
 }
@@ -2646,6 +2773,7 @@ private enum MapTalkMediaStorage {
 private func makeVideoPreview(for movieURL: URL) async throws -> VideoPreview {
     let generator = AVAssetImageGenerator(asset: AVURLAsset(url: movieURL))
     generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: 960, height: 960)
     let generated = try await generator.image(at: .zero)
     let image = UIImage(cgImage: generated.image)
     guard let data = image.jpegData(compressionQuality: 0.86) else {

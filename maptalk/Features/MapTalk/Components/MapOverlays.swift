@@ -98,7 +98,7 @@ struct MapOverlays: MapContent {
                         return AnyView(
                             POICategoryMarker(
                                 category: rated.poi.category,
-                                count: rated.checkIns.count,
+                                count: rated.checkInPersonCount,
                                 isRecentHighlight: isUnseen,
                                 isSelected: isSelected,
                                 showsCount: displayMode == .people
@@ -222,7 +222,7 @@ private struct RealAvatarMarker: View {
                 backgroundFill
 
                 if let url = user?.avatarURL {
-                    AsyncImage(url: url) { phase in
+                    MapImage(url: url) { phase in
                         switch phase {
                         case let .success(image):
                             image
@@ -319,7 +319,7 @@ private struct JourneyMapMarker: View {
                     )
 
                 if let url = user?.avatarURL {
-                    AsyncImage(url: url) { phase in
+                    MapImage(url: url) { phase in
                         switch phase {
                         case let .success(image):
                             image.resizable().scaledToFill()

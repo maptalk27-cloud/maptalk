@@ -1,0 +1,14 @@
+# An allowlist prevents .env files, Apple keys, databases, backups, local
+# node_modules, documentation and test fixtures from entering the build context.
+**
+!package.json
+!package-lock.json
+!src/
+!src/*.mjs
+!src/schema.sql
+!scripts/
+!scripts/container-healthcheck.mjs
+!scripts/deployment-preflight.mjs
+!scripts/beta.mjs
+!scripts/backup.mjs
+!scripts/encrypted-backup.mjs

@@ -70,6 +70,9 @@ final class MapTalkViewModel: ObservableObject {
     let friendFootprints: [MapTalkFriendFootprint]
     private let environment: AppEnvironment
     private let mapSearchRegion = PassthroughSubject<MKCoordinateRegion, Never>()
+    private var backendMapSearch: Task<Void, Never>?
+    private var lastBackendMapRegion: MKCoordinateRegion?
+    private var withdrawnPublicMemoryIDs: Set<UUID> = []
     private var repositoryPOIs: [RatedPOI] = []
     private var nearbySocialPOIs: [RatedPOI] = []
     private var repositoryActivePOIs: [RatedPOI] = []
@@ -79,6 +82,8 @@ final class MapTalkViewModel: ObservableObject {
     private var publishedPOIOverlays: [RatedPOI] = []
     private var publishedReelOverlays: [RealPost] = []
     private var shouldCenterWhenLocationArrives = false
+    private var shouldApplyInitialLocation = false
+    private var lastVisibleRegion: MKCoordinateRegion?
     private var retainedActiveFeedItemID: UUID?
     private var activeFeedExpiryWorkItem: DispatchWorkItem?
     private var cancellables = Set<AnyCancellable>()
@@ -86,21 +91,68 @@ final class MapTalkViewModel: ObservableObject {
         self.environment = environment
         self.scope = scope
         locationAuthorization = environment.location.authorization.value
+        if !environment.build.featureFlags.contains(.mock) {
+            region = MapStartupLocation.worldRegion
+            if case .global = scope {
+                if let location = MapStartupLocation.usable(environment.location.location.value) {
+                    region = MapStartupLocation.region(around: location.coordinate)
+                } else {
+                    shouldApplyInitialLocation = true
+                }
+            }
+        }
         switch scope {
         case .global:
-            friendFootprints = MapTalkFriendFootprint.previewData
+            friendFootprints = environment.backend == nil ? MapTalkFriendFootprint.previewData : []
             bind()
         case let .user(user):
             friendFootprints = []
             loadUserScope(for: user)
+        }
+        environment.backend?.publicContentChanges
+            .sink { [weak self] ids in self?.withdrawPublicMemories(ids) }
+            .store(in: &cancellables)
+    }
+
+    private func withdrawPublicMemories(_ ids: Set<UUID>) {
+        // Search-render records are separate from the feed. Remove the exact
+        // withdrawn visits immediately, before fetching the current viewport.
+        withdrawnPublicMemoryIDs.formUnion(ids)
+        backendMapSearch?.cancel()
+        repositoryPOIs = BackendStore.removingMemories(ids, from: repositoryPOIs)
+        nearbySocialPOIs = BackendStore.removingMemories(ids, from: nearbySocialPOIs)
+        repositoryActivePOIs = BackendStore.removingMemories(ids, from: repositoryActivePOIs)
+        publishedPOIOverlays = BackendStore.removingMemories(ids, from: publishedPOIOverlays)
+        repositoryMapReels.removeAll { ids.contains($0.id) }
+        repositoryActiveReels.removeAll { ids.contains($0.id) }
+        publishedReelOverlays.removeAll { ids.contains($0.id) }
+        retainedActiveFeedItemID = nil
+        rebuildMapRenderContent()
+        switch scope {
+        case .global:
+            rebuildActiveFeed(asOf: .now)
+            searchMap(in: lastBackendMapRegion ?? region)
+        case let .user(user):
+            activeFeedPOIs = BackendStore.removingMemories(ids, from: activeFeedPOIs)
+            activeFeedReels.removeAll { ids.contains($0.id) }
+            activityPOIs = activeFeedPOIs
+            activityReels = activeFeedReels
+            activeFeedItems = MapStoryFeed.items(reals: activeFeedReels, ratedPOIs: activeFeedPOIs,
+                onlyRecentPOIStories: false, userProvider: self.user(for:), now: .now)
+            loadUserScope(for: user, updateRegion: false)
         }
     }
 
     func onAppear() {
         if case .global = scope {
             environment.location.requestWhenInUse()
-            searchMap(in: region)
+            searchMap(in: lastVisibleRegion ?? region)
             rebuildActiveFeed(asOf: .now)
+            if let backend = environment.backend {
+                Task { do { try await backend.refreshIfNeeded() } catch {
+                    if backend.isActive && !(error is CancellationError) { backend.issue = error.localizedDescription }
+                } }
+            }
         }
     }
 
@@ -108,6 +160,28 @@ final class MapTalkViewModel: ObservableObject {
     /// independent from the device coordinate and the top active feed.
     func searchMap(in region: MKCoordinateRegion) {
         guard case .global = scope else { return }
+        if let backend = environment.backend {
+            lastBackendMapRegion = region
+            backendMapSearch?.cancel()
+            let revision = backend.publicContentRevision
+            backendMapSearch = Task { [weak self] in
+                do {
+                    let apply: (BackendStore.Snapshot) -> Void = { [weak self] content in
+                        guard let self, !Task.isCancelled, backend.isActive,
+                              revision == backend.publicContentRevision else { return }
+                        repositoryPOIs = content.pois
+                        repositoryMapReels = content.reels
+                        rebuildMapRenderContent()
+                    }
+                    let content = try await backend.loadMap(region, onUpdate: apply)
+                    try Task.checkCancellation()
+                    apply(content)
+                } catch {
+                    if Task.isCancelled == false, backend.isActive { backend.issue = error.localizedDescription }
+                }
+            }
+            return
+        }
         mapSearchRegion.send(region)
     }
 
@@ -163,7 +237,8 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func centerOnUser() {
-        guard let location = environment.location.location.value else {
+        shouldApplyInitialLocation = false
+        guard let location = MapStartupLocation.usable(environment.location.location.value) else {
             shouldCenterWhenLocationArrives = true
             environment.location.requestWhenInUse()
             return
@@ -173,21 +248,40 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     private func centerRegion(on coordinate: CLLocationCoordinate2D) {
-        let span = region.span
+        let visibleSpan = (lastVisibleRegion ?? region).span
+        // Before the first fix the neutral world camera is only a placeholder,
+        // not a zoom level the locate button should preserve.
+        let span = visibleSpan.latitudeDelta >= 90
+            ? MapStartupLocation.region(around: coordinate).span : visibleSpan
         region = MKCoordinateRegion(center: coordinate, span: span)
     }
 
+    /// A late GPS update must never pull the camera away after the person has
+    /// started browsing or selected a story. The locate button can opt in again.
+    func cancelPendingLocationFocus() {
+        shouldApplyInitialLocation = false
+        shouldCenterWhenLocationArrives = false
+    }
+
+    func rememberVisibleRegion(_ region: MKCoordinateRegion) {
+        lastVisibleRegion = region
+    }
+
     func user(for id: UUID) -> User? {
+        // A profile-scoped map may have been opened with an older identity.
+        // Keep its cards in sync with the server-backed username and avatar.
+        if let current = environment.backend?.user(for: id) { return current }
         if case let .user(user) = scope, user.id == id {
             return user
         }
-        return PreviewData.user(for: id)
+        return environment.user(for: id)
     }
 
     /// MapTalk exposes only snapshots attached to public Reels. Private Bubble
     /// snapshots remain reachable from MyMap through its own provider.
     func journey(for id: UUID) -> JourneyPost? {
-        environment.myMapArchive.publicBubbleCatalog.first { $0.id == id }
+        if environment.backend != nil { return nil }
+        return environment.myMapArchive.publicBubbleCatalog.first { $0.id == id }
             ?? environment.myMapArchive.legacyJourneyCatalog.first { $0.id == id }
             ?? PreviewData.journey(for: id)
     }
@@ -232,6 +326,7 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func focus(on real: RealPost) {
+        cancelPendingLocationFocus()
         region = region(for: real)
     }
 
@@ -244,6 +339,7 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func focus(on rated: RatedPOI) {
+        cancelPendingLocationFocus()
         region = region(for: rated)
     }
 
@@ -256,6 +352,7 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func focus(on journey: JourneyPost) {
+        cancelPendingLocationFocus()
         region = region(for: journey)
     }
 
@@ -521,8 +618,11 @@ final class MapTalkViewModel: ObservableObject {
             .sink { [weak self] location in
                 guard let self else { return }
                 liveLocation = location
-                userCoordinate = location?.coordinate
-                if shouldCenterWhenLocationArrives, let location {
+                userCoordinate = MapStartupLocation.usable(location)?.coordinate
+                if shouldApplyInitialLocation, let location = MapStartupLocation.usable(location) {
+                    shouldApplyInitialLocation = false
+                    region = MapStartupLocation.region(around: location.coordinate)
+                } else if shouldCenterWhenLocationArrives, let location = MapStartupLocation.usable(location) {
                     shouldCenterWhenLocationArrives = false
                     centerRegion(on: location.coordinate)
                 }
@@ -634,7 +734,41 @@ final class MapTalkViewModel: ObservableObject {
         searchMap(in: region)
     }
 
-    private func loadUserScope(for user: User) {
+    private func loadUserScope(for user: User, updateRegion: Bool = true) {
+        if let backend = environment.backend {
+            let revision = backend.publicContentRevision
+            Task { [weak self] in
+                do {
+                    var receivedFirstSnapshot = false
+                    let apply: (BackendStore.Snapshot) -> Void = { [weak self] content in
+                        guard let self, !Task.isCancelled, backend.isActive,
+                              revision == backend.publicContentRevision else { return }
+                        repositoryPOIs = content.pois
+                        repositoryMapReels = content.reels
+                        repositoryActiveReels = content.reels
+                        rebuildMapRenderContent()
+                        activeFeedPOIs = content.pois
+                        activeFeedReels = content.reels
+                        activityPOIs = content.pois
+                        activityReels = content.reels
+                        activeFeedItems = MapStoryFeed.items(reals: content.reels, ratedPOIs: content.pois,
+                            onlyRecentPOIStories: false, userProvider: self.user(for:), now: .now)
+                        if updateRegion, !receivedFirstSnapshot, let contentRegion = UserMapViewModel.region(forCoordinates:
+                            content.pois.map { $0.poi.coordinate } + content.reels.map(\.center)) {
+                            region = contentRegion
+                        }
+                        // Media arriving later must not pull the camera away
+                        // after the person has already started exploring.
+                        receivedFirstSnapshot = true
+                    }
+                    let content = try await backend.loadProfile(userID: user.id, onUpdate: apply)
+                    apply(content)
+                } catch {
+                    if backend.isActive, !(error is CancellationError) { backend.issue = error.localizedDescription }
+                }
+            }
+            return
+        }
         let snapshot = UserMapViewModel(
             environment: environment,
             context: .profileContext(for: user)
@@ -660,11 +794,15 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     private func rebuildMapRenderContent() {
-        ratedPOIs = mergePOIs(
+        let places = mergePOIs(
             preferred: publishedPOIOverlays,
             fallback: repositoryPOIs
         )
+        // receive(on:) may still deliver a pre-withdrawal publisher snapshot.
+        // Never let that queued snapshot put a withdrawn record back on screen.
+        ratedPOIs = withdrawnPublicMemoryIDs.isEmpty ? places : BackendStore.removingMemories(withdrawnPublicMemoryIDs, from: places)
         reals = merge(publishedReelOverlays, with: repositoryMapReels)
+            .filter { !withdrawnPublicMemoryIDs.contains($0.id) }
     }
 
     /// Builds one feed snapshot for a deliberate source/lifecycle event.
@@ -675,11 +813,13 @@ final class MapTalkViewModel: ObservableObject {
 
         activeFeedExpiryWorkItem?.cancel()
 
-        let feedPOIs = mergePOIs(
+        let mergedPlaces = mergePOIs(
             preferred: publishedPOIOverlays,
             fallback: repositoryActivePOIs
         )
+        let feedPOIs = withdrawnPublicMemoryIDs.isEmpty ? mergedPlaces : BackendStore.removingMemories(withdrawnPublicMemoryIDs, from: mergedPlaces)
         let allFeedReels = merge(publishedReelOverlays, with: repositoryActiveReels)
+            .filter { !withdrawnPublicMemoryIDs.contains($0.id) }
         activityPOIs = feedPOIs
         activityReels = allFeedReels
         let feedReels = allFeedReels
@@ -752,9 +892,21 @@ final class MapTalkViewModel: ObservableObject {
     ) -> [MapTalkNearbyPlaceOption] {
         let primaryRadius = radius ?? Self.primaryPlaceSelectionRadius(for: location)
         let fallbackRadius = radius ?? Self.fallbackPlaceSelectionRadius
-        let directoryIDs = Set(nearbyDirectoryPOIs.map(\.id))
+        let directoryPlaces = nearbyDirectoryPOIs.map { place -> RatedPOI in
+            guard let canonicalID = environment.backend?.canonicalPlaceID(for: place.id) else { return place }
+            return RatedPOI(
+                poi: POI(id: canonicalID, name: place.poi.name,
+                         coordinate: place.poi.coordinate, category: place.poi.category),
+                highlight: place.highlight, secondary: place.secondary, media: place.media,
+                checkIns: place.checkIns, comments: place.comments, endorsements: place.endorsements,
+                tags: place.tags, isFavoritedByCurrentUser: place.isFavoritedByCurrentUser,
+                favoritesCount: place.favoritesCount
+            )
+        }
+        let directoryIDs = Set(directoryPlaces.map(\.id))
         let archivedIDs = Set(environment.myMapArchive.privatePOIs.map(\.id))
-        let friendDirectory = PreviewData.sampleFriends.reduce(into: [UUID: User]()) {
+        let friends = environment.backend == nil ? PreviewData.sampleFriends : []
+        let friendDirectory = friends.reduce(into: [UUID: User]()) {
             $0[$1.id] = $1
         }
 
@@ -786,7 +938,7 @@ final class MapTalkViewModel: ObservableObject {
         // A reducer is intentional here: Dictionary(uniqueKeysWithValues:)
         // would crash if any provider ever returned a duplicate canonical ID.
         var publicCandidates: [UUID: RatedPOI] = [:]
-        for place in nearbyDirectoryPOIs {
+        for place in directoryPlaces {
             if let existing = publicCandidates[place.id] {
                 publicCandidates[place.id] = mergedPOI(
                     publicVersion: existing,

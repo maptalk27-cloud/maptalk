@@ -126,7 +126,7 @@ extension ExperienceDetailView {
                     endorsementBadges: endorsementBadges
                 ),
                 poiStats: POIStatsModel(
-                    checkIns: rated.checkIns.count,
+                    checkIns: rated.checkInPersonCount,
                     comments: rated.comments.count,
                     favorites: rated.favoritesCount,
                     endorsements: rated.endorsements
@@ -265,25 +265,25 @@ extension ExperienceDetailView {
 
         let grouped = Dictionary(grouping: mediaCheckIns, by: { $0.userId })
         let contributors: [POIStoryContributor] = grouped.compactMap { userId, entries -> POIStoryContributor? in
-            let sortedEntries = entries.sorted { $0.createdAt < $1.createdAt }
+            let sortedEntries = entries.sorted { $0.activityDate < $1.activityDate }
             let items: [POIStoryContributor.Item] = sortedEntries.flatMap { checkIn in
                 checkIn.media.compactMap { media -> POIStoryContributor.Item? in
                     guard isStoryEligibleMedia(media) else { return nil }
                     return POIStoryContributor.Item(
                         id: media.id,
                         media: mediaDisplayItem(media),
-                        timestamp: checkIn.createdAt,
+                        timestamp: checkIn.activityDate,
                         readKey: StoryReadKeys.poiStoryPage(
                             poiId: ratedPOI.id,
                             checkInId: checkIn.id,
                             mediaId: media.id,
-                            timestamp: checkIn.createdAt
+                            timestamp: checkIn.activityDate
                         )
                     )
                 }
             }
             guard items.isEmpty == false else { return nil }
-            let mostRecent = sortedEntries.map(\.createdAt).max() ?? Date()
+            let mostRecent = sortedEntries.map(\.activityDate).max() ?? Date()
             return POIStoryContributor(
                 id: userId,
                 userId: userId,
@@ -297,17 +297,18 @@ extension ExperienceDetailView {
     }
 
     func checkInEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {
-        ratedPOI.checkIns.map { checkIn in
+        ratedPOI.checkInPeople().map { person in
+            let checkIn = person.latest
             let endorsement = checkIn.endorsement
             let kind: FriendEngagement.Kind = endorsement == nil ? .like : .rating
             return FriendEngagement(
-                id: checkIn.id,
+                id: person.userID,
                 userId: checkIn.userId,
                 kind: kind,
                 user: userProvider(checkIn.userId),
                 message: endorsementMessage(for: endorsement),
                 badge: nil,
-                timestamp: checkIn.createdAt,
+                timestamp: checkIn.activityDate,
                 replies: [],
                 endorsement: checkIn.endorsement
             )

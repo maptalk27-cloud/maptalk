@@ -96,6 +96,9 @@ struct RealPost: Identifiable, Hashable {
     var visibility: Visibility
     var createdAt: Date
     var expiresAt: Date
+    var publishedAt: Date? = nil
+
+    var activityDate: Date { publishedAt ?? createdAt }
 
     var metrics: Metrics {
         Metrics(

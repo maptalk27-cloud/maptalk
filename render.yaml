@@ -1,0 +1,44 @@
+# Deployment template only. Creating this service incurs charges.
+# Follow backend/DEPLOYMENT.md and configure Apple credentials before inviting users.
+services:
+  - type: web
+    name: maptalk-private-beta
+    runtime: node
+    region: oregon
+    plan: 0.5c-512mb
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: 'off'
+    disk:
+      name: maptalk-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: NODE_VERSION
+        value: '24'
+      - key: NODE_ENV
+        value: production
+      - key: MAPTALK_MODE
+        value: beta
+      - key: MAPTALK_BIND
+        value: 0.0.0.0
+      - key: MAPTALK_DATABASE
+        value: /var/data/maptalk.sqlite
+      - key: MAPTALK_BACKUP_DIRECTORY
+        value: /var/data/backups
+      - key: MAPTALK_PUBLIC_ORIGIN
+        sync: false
+      - key: MAPTALK_APPLE_CLIENT_ID
+        sync: false
+      - key: MAPTALK_APPLE_TEAM_ID
+        sync: false
+      - key: MAPTALK_APPLE_KEY_ID
+        sync: false
+      - key: MAPTALK_APPLE_PRIVATE_KEY_PATH
+        value: /etc/secrets/apple-sign-in.p8
+      - key: MAPTALK_APPLE_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: MAPTALK_BACKUP_ENCRYPTION_KEY
+        sync: false

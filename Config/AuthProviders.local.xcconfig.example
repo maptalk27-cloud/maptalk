@@ -1,0 +1,15 @@
+// Copy to AuthProviders.local.xcconfig and enter your registered PUBLIC IDs.
+// Do not put Google client secrets or WeChat AppSecret in an iOS build.
+// IDs must match the backend configuration and com.chengsi.maptalk registration.
+MAPTALK_GOOGLE_IOS_CLIENT_ID = YOUR_IOS_CLIENT_ID.apps.googleusercontent.com
+MAPTALK_GOOGLE_SERVER_CLIENT_ID = YOUR_WEB_CLIENT_ID.apps.googleusercontent.com
+MAPTALK_GOOGLE_REVERSED_CLIENT_ID = com.googleusercontent.apps.YOUR_IOS_CLIENT_ID
+
+MAPTALK_WECHAT_APP_ID = YOUR_REGISTERED_WX_APP_ID
+MAPTALK_WECHAT_CALLBACK_SCHEME = $(MAPTALK_WECHAT_APP_ID)
+// xcconfig treats // as a comment. The empty expansion below preserves https://.
+MAPTALK_WECHAT_UNIVERSAL_LINK = https:/$()/YOUR_OWN_DOMAIN/wechat/
+MAPTALK_WECHAT_ASSOCIATED_DOMAIN = applinks:YOUR_OWN_DOMAIN
+// Enable this entitlement only after Associated Domains is configured in your
+// signing profile and your HTTPS domain serves apple-app-site-association.
+MAPTALK_AUTH_ENTITLEMENTS = maptalk/Resources/maptalk-social.entitlements
