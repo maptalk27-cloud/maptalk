@@ -23,7 +23,9 @@ extension ExperienceDetailView {
 
     func expandedContent(using data: ContentData) -> some View {
         Group {
-            if let context = sequenceContext {
+            // A single post has nothing to page through. Keeping its vertical
+            // scroll view directly in the sheet preserves native drag handoff.
+            if let context = sequenceContext, context.pager.items.count > 1 {
                 TabView(selection: context.selection) {
                     ForEach(context.pager.items) { item in
                         ExperiencePanel(
@@ -36,8 +38,11 @@ extension ExperienceDetailView {
                             onJourneyAvatarStackTap: onJourneyAvatarStackTap,
                             onUserSelected: openProfile,
                             onPOIContributorViewed: onPOIContributorViewed,
-                            isPOIContributorUnseen: isPOIContributorUnseen
+                            isPOIContributorUnseen: isPOIContributorUnseen,
+                            isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id,
+                            commentTarget: item.mode.commentTarget
                         )
+                        .background(ExperiencePagerVerticalBounceGuard())
                         .tag(item.id)
                     }
                 }
@@ -53,7 +58,9 @@ extension ExperienceDetailView {
                     onJourneyAvatarStackTap: onJourneyAvatarStackTap,
                     onUserSelected: openProfile,
                     onPOIContributorViewed: onPOIContributorViewed,
-                    isPOIContributorUnseen: isPOIContributorUnseen
+                    isPOIContributorUnseen: isPOIContributorUnseen,
+                    isPlaybackActive: isMediaPlaybackActive,
+                    commentTarget: currentMode.commentTarget
                 )
             }
         }
@@ -175,7 +182,9 @@ extension ExperienceDetailView {
                 accentColor: data.accentColor,
                 mode: .card,
                 showsPlaceholderBadge: false,
-                usesAspectFit: video.metadata?.isStandardLandscape == false
+                usesAspectFit: false,
+                isMuted: true,
+                isPlaybackActive: isMediaPlaybackActive
             )
             .allowsHitTesting(false)
             .ignoresSafeArea()

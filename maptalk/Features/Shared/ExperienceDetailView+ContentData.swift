@@ -1,11 +1,19 @@
 import SwiftUI
 
+extension RealPost {
+    /// Public cards describe when a post was shared, not when its photo was
+    /// captured. Private memories keep the original time in their archive.
+    var cardDisplayDate: Date { visibility == .privateOnly ? createdAt : activityDate }
+}
+
 // MARK: - Content data
 
 extension ExperienceDetailView {
     func contentData(for mode: Mode) -> ContentData {
         switch mode {
-        case let .real(real, user):
+        case let .real(source, user):
+            var real = source
+            if let caption = editedCaptions[real.id] { real.message = PostCaption.visibleText(caption) }
             let accent = accentColor(for: real.visibility)
             let gradient = gradient(for: real.visibility)
             let badges = makeRealBadges(for: real)
@@ -68,7 +76,7 @@ extension ExperienceDetailView {
                 story: nil,
                 highlights: HighlightsSectionModel(
                     title: user?.handle ?? "Shared Real",
-                    subtitle: "Posted \(real.createdAt.formatted(.relative(presentation: .named)))",
+                    subtitle: "Posted \(real.cardDisplayDate.formatted(.relative(presentation: .named)))",
                     highlight: highlight,
                     secondary: secondary
                 ),
@@ -97,7 +105,7 @@ extension ExperienceDetailView {
             let stories = poiStoryContributors(for: rated)
             let gallery = galleryItems(for: rated)
             let recentSharers = stories.filter { contributor in
-                Date().timeIntervalSince(contributor.mostRecent) <= 60 * 60 * 24
+                Date().timeIntervalSince(contributor.mostRecent) < StoryReadKeys.freshWindow
             }
             return ContentData(
                 hero: nil,
@@ -129,7 +137,8 @@ extension ExperienceDetailView {
                     checkIns: rated.checkInPersonCount,
                     comments: rated.comments.count,
                     favorites: rated.favoritesCount,
-                    endorsements: rated.endorsements
+                    endorsements: rated.endorsements,
+                    commentTarget: .place(rated.id)
                 ),
                 accentColor: accent,
                 backgroundGradient: [Color.black, accent.opacity(0.25)],
@@ -198,13 +207,7 @@ extension ExperienceDetailView {
     }
 
     func highlightText(for real: RealPost, message: String?) -> String? {
-        if let message, message.isEmpty == false {
-            return message
-        }
-        if let emoji = Self.firstEmoji(in: real.attachments) {
-            return "\(emoji) Live moment happening here."
-        }
-        return nil
+        PostCaption.visibleText(message)
     }
 
     func secondaryText(for real: RealPost) -> String {
@@ -265,7 +268,10 @@ extension ExperienceDetailView {
 
         let grouped = Dictionary(grouping: mediaCheckIns, by: { $0.userId })
         let contributors: [POIStoryContributor] = grouped.compactMap { userId, entries -> POIStoryContributor? in
-            let sortedEntries = entries.sorted { $0.activityDate < $1.activityDate }
+            let sortedEntries = entries.sorted {
+                if $0.activityDate != $1.activityDate { return $0.activityDate > $1.activityDate }
+                return $0.id.uuidString < $1.id.uuidString
+            }
             let items: [POIStoryContributor.Item] = sortedEntries.flatMap { checkIn in
                 checkIn.media.compactMap { media -> POIStoryContributor.Item? in
                     guard isStoryEligibleMedia(media) else { return nil }
@@ -293,7 +299,10 @@ extension ExperienceDetailView {
             )
         }
 
-        return contributors.sorted { $0.mostRecent > $1.mostRecent }
+        return contributors.sorted {
+            if $0.mostRecent != $1.mostRecent { return $0.mostRecent > $1.mostRecent }
+            return $0.userId.uuidString < $1.userId.uuidString
+        }
     }
 
     func checkInEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {

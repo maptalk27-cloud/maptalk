@@ -110,13 +110,19 @@ private final class ProgressiveLoadingContext {
         (mediaRequests, continuation) = AsyncStream.makeStream()
         let mediaContinuation = continuation
         let author = authorID, current = currentUserID
+        // This suite tests progressive loading, not expiry. A fixed calendar
+        // date quietly made only its map variant stop returning the Reel once
+        // that date crossed the active-feed window.
+        let publicationDate = Date.now.addingTimeInterval(-60)
+        let publishedAt = publicationDate.ISO8601Format()
+        let expiresAt = publicationDate.addingTimeInterval(StoryReadKeys.freshWindow).ISO8601Format()
         let page = Data("""
         {"items":[{"id":"\(recordID)","ownerId":"\(author)",
         "owner":{"id":"\(author)","handle":"video_person"},"kind":"reel","visibility":"public",
         "location":{"latitude":37.3,"longitude":-122},"caption":"A slow video","place":null,
         "media":[{"id":"\(videoID)","mimeType":"video/mp4","byteCount":1024,"path":"/v1/media/\(videoID.uuidString.lowercased())"},
         {"id":"\(photoID)","mimeType":"image/png","byteCount":\(photo.count),"path":"/v1/media/\(photoID.uuidString.lowercased())"}],
-        "createdAt":"2026-10-20T12:00:00Z","publishedAt":"2026-10-20T12:00:00Z","expiresAt":"2026-10-21T12:00:00Z"}],"nextCursor":null}
+        "createdAt":"\(publishedAt)","publishedAt":"\(publishedAt)","expiresAt":"\(expiresAt)"}],"nextCursor":null}
         """.utf8)
         ProgressiveMediaProtocol.install { operation in
             let path = operation.request.url?.path ?? ""

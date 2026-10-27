@@ -1381,25 +1381,28 @@ private struct UserMapPOICard: View {
         if mediaCheckIns.isEmpty == false {
             let grouped = Dictionary(grouping: mediaCheckIns, by: { $0.userId })
             let contributors: [ExperienceDetailView.POIStoryContributor] = grouped.compactMap { userId, entries in
-                let sortedEntries = entries.sorted { $0.createdAt < $1.createdAt }
+                let sortedEntries = entries.sorted {
+                    if $0.activityDate != $1.activityDate { return $0.activityDate > $1.activityDate }
+                    return $0.id.uuidString < $1.id.uuidString
+                }
                 let items: [ExperienceDetailView.POIStoryContributor.Item] = sortedEntries.flatMap { checkIn in
                     checkIn.media.compactMap { media in
                         guard let displayItem = mediaDisplayItem(media) else { return nil }
                         return ExperienceDetailView.POIStoryContributor.Item(
                             id: media.id,
                             media: displayItem,
-                            timestamp: checkIn.createdAt,
+                            timestamp: checkIn.activityDate,
                             readKey: StoryReadKeys.poiStoryPage(
                                 poiId: rated.id,
                                 checkInId: checkIn.id,
                                 mediaId: media.id,
-                                timestamp: checkIn.createdAt
+                                timestamp: checkIn.activityDate
                             )
                         )
                     }
                 }
                 guard items.isEmpty == false else { return nil }
-                let mostRecent = sortedEntries.map(\.createdAt).max() ?? Date()
+                let mostRecent = sortedEntries.map(\.activityDate).max() ?? Date()
                 return ExperienceDetailView.POIStoryContributor(
                     id: userId,
                     userId: userId,
@@ -1409,7 +1412,10 @@ private struct UserMapPOICard: View {
                 )
             }
 
-            return contributors.sorted { $0.mostRecent > $1.mostRecent }
+            return contributors.sorted {
+                if $0.mostRecent != $1.mostRecent { return $0.mostRecent > $1.mostRecent }
+                return $0.userId.uuidString < $1.userId.uuidString
+            }
         }
 
         let mediaItems: [ExperienceDetailView.POIStoryContributor.Item] = rated.media.compactMap { media in

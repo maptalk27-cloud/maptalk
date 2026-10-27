@@ -14,6 +14,7 @@ const AWS = { ...BETA, MAPTALK_DEPLOYMENT_TARGET: 'aws', AWS_REGION: 'us-east-2'
 test('media storage budget keeps the 50 MiB default and accepts only explicit finite operator limits', () => {
   assert.equal(readConfig({}).backend.userMediaLimitBytes, 50 * 1024 * 1024);
   assert.equal(readConfig({ MAPTALK_USER_MEDIA_LIMIT_BYTES: String(100 * 1024 * 1024) }).backend.userMediaLimitBytes, 100 * 1024 * 1024);
+  assert.equal(readConfig({ MAPTALK_USER_MEDIA_LIMIT_BYTES: '1073741824' }).backend.userMediaLimitBytes, 1024 * 1024 * 1024);
   for (const value of ['', '0', '-1', 'Infinity', 'NaN', '1e9', ' 1048576', '1048576.5', '1048575', '1073741825']) {
     assert.throws(() => readConfig({ MAPTALK_USER_MEDIA_LIMIT_BYTES: value }), /media limit|MEDIA_LIMIT/);
   }

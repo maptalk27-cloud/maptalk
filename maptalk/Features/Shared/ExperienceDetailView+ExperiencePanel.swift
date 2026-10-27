@@ -12,10 +12,31 @@ struct ExperiencePanel: View {
     let onUserSelected: (User) -> Void
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
+    var isPlaybackActive = true
+    var commentTarget: BackendCommentTarget? = nil
+    @Environment(\.appEnv) private var environment
+    @State private var contentNeedsScrolling = false
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 28) {
+            panelContent
+                .background(ExperienceContentScrollHandoff(isScrollable: contentNeedsScrolling))
+        }
+        // Keep one content/player tree while the sheet moves. Only the outer
+        // vertical scroll view's own pan is disabled when there is no overflow;
+        // horizontal media galleries and long comments retain their scrolling.
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom
+                > geometry.containerSize.height + 1
+        } action: { _, needsScrolling in
+            contentNeedsScrolling = needsScrolling
+        }
+        .scrollBounceBehavior(.basedOnSize, axes: .vertical)
+        .padding(.horizontal, isSingleVideoHero ? 0 : -ExperienceSheetLayout.horizontalInset)
+    }
+
+    private var panelContent: some View {
+        VStack(spacing: 28) {
                 if let journey = data.journey {
                     JourneyCard(
                         journey: journey.journey,
@@ -45,6 +66,7 @@ struct ExperiencePanel: View {
                         style: .standard,
                         journeyProvider: journeyProvider,
                         userProvider: userProvider,
+                        isPlaybackActive: isPlaybackActive,
                         onUserSelected: onUserSelected,
                         onCapsuleTap: onJourneyAvatarStackTap
                     )
@@ -63,12 +85,16 @@ struct ExperiencePanel: View {
                 } else {
                     defaultExperienceContent
                 }
-            }
-            .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
-            .padding(.top, isSingleVideoHero ? 0 : 40)
-            .padding(.bottom, 60)
+
+                if let commentTarget, let backend = environment.backend {
+                    BackendCommentThread(store: backend, target: commentTarget, onUserSelected: onUserSelected)
+                        .id(commentTarget)
+                        .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+                }
         }
-        .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
+        .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
+        .padding(.top, isSingleVideoHero ? 0 : 40)
+        .padding(.bottom, 60)
     }
 
     private var isSingleVideoHero: Bool {
@@ -119,7 +145,8 @@ struct ExperiencePanel: View {
                     .padding(.horizontal, 12)
 
                 if let story = data.story {
-                    ExperienceMediaGallery(items: story.galleryItems, accentColor: data.accentColor)
+                    ExperienceMediaGallery(items: story.galleryItems, accentColor: data.accentColor,
+                                           isPlaybackActive: isPlaybackActive)
                         .frame(height: ExperienceMediaGalleryLayout.height(for: story.galleryItems))
                         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
                         .overlay {
@@ -281,7 +308,7 @@ struct POIHeroStatsRow: View {
         HStack(spacing: 8) {
             Spacer(minLength: 0)
             POIStatPill(icon: "shoeprints.fill", value: model.checkIns)
-            POIStatPill(icon: "text.bubble.fill", value: model.comments)
+            POIStatPill(icon: "text.bubble.fill", value: model.comments, commentTarget: model.commentTarget)
             POIStatPill(icon: "star.fill", value: model.favorites)
         }
         .padding(.horizontal, 2)
@@ -290,12 +317,13 @@ struct POIHeroStatsRow: View {
 struct POIStatPill: View {
     let icon: String
     let value: Int
+    var commentTarget: BackendCommentTarget? = nil
 
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
                 .font(.caption.weight(.semibold))
-            Text(ExperienceDetailView.formatCount(value))
+            ExperienceCommentCount(target: commentTarget, fallback: ExperienceDetailView.formatCount(value))
                 .font(.caption.weight(.semibold))
         }
         .foregroundStyle(.white.opacity(0.9))
@@ -692,6 +720,7 @@ struct HeroSection: View {
     let userProvider: (UUID) -> User?
     let hideMedia: Bool
     let useTallLayout: Bool
+    let isPlaybackActive: Bool
     let onUserSelected: ((User) -> Void)?
     let onCapsuleTap: ((JourneyPost) -> Void)?
 
@@ -702,6 +731,7 @@ struct HeroSection: View {
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
+        isPlaybackActive: Bool = true,
         onUserSelected: ((User) -> Void)? = nil,
         onCapsuleTap: ((JourneyPost) -> Void)? = nil
     ) {
@@ -711,6 +741,7 @@ struct HeroSection: View {
         self.userProvider = userProvider
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.isPlaybackActive = isPlaybackActive
         self.onUserSelected = onUserSelected
         self.onCapsuleTap = onCapsuleTap
     }
@@ -728,6 +759,7 @@ struct HeroSection: View {
             hideHeader: false,
             hideMedia: hideMedia,
             useTallLayout: useTallLayout,
+            isPlaybackActive: isPlaybackActive,
             onUserSelected: onUserSelected,
             onCapsuleTap: onCapsuleTap
         )

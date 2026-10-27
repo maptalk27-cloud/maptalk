@@ -114,7 +114,7 @@ struct LikesAvatarGrid: View {
         return .none
     }
 
-    private var recentStoryWindow: TimeInterval { 60 * 60 * 24 }
+    private var recentStoryWindow: TimeInterval { StoryReadKeys.freshWindow }
 
     private var storyIndexMap: [UUID: Int] {
         var map: [UUID: Int] = [:]
@@ -395,7 +395,12 @@ struct POIStoryViewer: View {
     ) -> some View {
         let activeIndex = activeItemIndex(for: contributor, direction: direction)
 
-        return mediaContent(for: contributor, itemIndex: activeIndex)
+        return mediaContent(
+            for: contributor,
+            itemIndex: activeIndex,
+            isPlaybackActive: contributor.id == currentContributor?.id && direction == .none
+                && !isPlaybackPaused && activeDragDirection == .none && dragCompletion == nil
+        )
             .overlay {
                 if direction == .none {
                     storyNavigationOverlay
@@ -420,12 +425,14 @@ struct POIStoryViewer: View {
 
     private func mediaContent(
         for contributor: ExperienceDetailView.POIStoryContributor,
-        itemIndex: Int
+        itemIndex: Int,
+        isPlaybackActive: Bool
     ) -> some View {
         GeometryReader { proxy in
             ZStack {
                 if let item = contributorItem(contributor, at: itemIndex) {
-                    MediaCardView(item: item.media, accentColor: accentColor, mode: .lightbox)
+                    MediaCardView(item: item.media, accentColor: accentColor, mode: .lightbox,
+                                  isPlaybackActive: isPlaybackActive)
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .clipped()
                 } else {

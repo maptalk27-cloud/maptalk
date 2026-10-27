@@ -495,8 +495,8 @@ final class UserMapViewModel: ObservableObject {
         environment.myMapArchive.deleteJourneyFolder(id: id)
     }
 
-    func retryPendingPublications() {
-        environment.backend?.retryPendingPublications()
+    func retryPendingPublications(id: UUID? = nil) {
+        environment.backend?.retryPendingPublications(id: id)
     }
 
     /// A MyMap delete removes the person's post, including its public version.
@@ -513,7 +513,7 @@ final class UserMapViewModel: ObservableObject {
                     guard !ids.isEmpty else {
                         throw BackendClientError.message("This memory is no longer available. Pull to refresh.")
                     }
-                    for id in ids { try await backend.deletePost(memoryID: id) }
+                    try await backend.deletePosts(memoryIDs: ids)
                 } catch {
                     issue = error.localizedDescription
                 }

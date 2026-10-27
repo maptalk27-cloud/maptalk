@@ -199,6 +199,7 @@ extension View {
         selection: Binding<PresentationDetent>
     ) -> some View {
         presentationDetents([compactDetent, .large], selection: selection)
+            .presentationContentInteraction(.resizes)
             .presentationBackground(.thinMaterial)
             .presentationCompactAdaptation(.none)
             .applyBackgroundInteractionIfAvailable()

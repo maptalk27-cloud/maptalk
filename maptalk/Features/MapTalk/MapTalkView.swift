@@ -7,6 +7,7 @@ import UIKit
 struct MapTalkView: View {
     @StateObject private var viewModel: MapTalkViewModel
     @Environment(\.appEnv) private var environment
+    @Environment(\.scenePhase) private var scenePhase
     @State private var flightController = MapFlightController()
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var selectedRealId: UUID?
@@ -20,6 +21,7 @@ struct MapTalkView: View {
     @State private var currentCamera: MapCamera?
     @State private var settledFriendFootprintRegion: MKCoordinateRegion?
     @State private var friendFootprintVisibility: FriendFootprintScreenVisibility?
+    @State private var mapControlsFrame: CGRect = .zero
     @StateObject private var friendFootprintInteractionGate =
         FriendFootprintMapInteractionGate()
     @State private var pendingRegionCause: RegionChangeCause = .initial
@@ -556,6 +558,14 @@ struct MapTalkView: View {
                             preserveVisibleRepresentatives: false
                         )
                     }
+                    .onChangeCompat(of: mapControlsFrame) { _ in
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy,
+                            canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: currentRegion ?? viewModel.region
+                        )
+                    }
                     .onChangeCompat(of: friendFootprintLayoutRevision) { _ in
                         refreshFriendFootprintVisibility(
                             using: mapProxy,
@@ -708,6 +718,11 @@ struct MapTalkView: View {
                                 },
                                 showsPublishActions: viewModel.isUserScope == false
                             )
+                            .onGeometryChange(for: CGRect.self) { controlsGeometry in
+                                controlsGeometry.frame(in: .global)
+                            } action: { frame in
+                                mapControlsFrame = frame
+                            }
                         }
                         .padding(.trailing, 20)
                         .padding(.bottom, controlsBottomPadding)
@@ -888,7 +903,8 @@ struct MapTalkView: View {
                             destination: destination,
                             requestID: requestID
                         )
-                    }
+                    },
+                    onSearchNearbyPlaces: searchNearbyPlaces
                 )
                 .presentationDetents([.fraction(0.84)])
                 .presentationDragIndicator(.hidden)
@@ -974,6 +990,45 @@ struct MapTalkView: View {
                 }
                 applyInitialStorySelectionIfNeeded()
             }
+            .onChangeCompat(of: scenePhase) { phase in
+                if phase == .active { viewModel.refreshFreshness() }
+            }
+            .onReceive(viewModel.$ratedPOIs) { places in
+                updateStandalonePlacePreview(from: places)
+            }
+            .onReceive(viewModel.$friendFootprints) { footprints in
+                updateStandalonePlacePreview(from: footprints.map(\.ratedPOI))
+            }
+            .onChangeCompat(of: viewModel.withdrawnPublicMemoryIDs) { ids in
+                if case let .reel(parent) = journeyEntry, ids.contains(parent.id) {
+                    journeyEntry = nil
+                    focusedJourneyHeader = nil
+                    journeyStack = []
+                    dismissWithdrawnPreview()
+                    return
+                }
+                // A standalone preview is deliberately independent of feed
+                // paging, but never independent of an actual withdrawal.
+                switch activeExperience {
+                case let .real(real, _):
+                    guard ids.contains(real.id) else { return }
+                case let .poi(rated, nonce):
+                    guard rated.checkIns.contains(where: { ids.contains($0.id) }) else { return }
+                    if let remaining = viewModel.removingWithdrawnVisits(from: rated) {
+                        activeExperience = .poi(rated: remaining, nonce: nonce)
+                        return
+                    }
+                case let .friendPlace(rated, sourceID, nonce):
+                    guard rated.checkIns.contains(where: { ids.contains($0.id) }) else { return }
+                    if let remaining = viewModel.removingWithdrawnVisits(from: rated) {
+                        activeExperience = .friendPlace(rated: remaining, sourceID: sourceID, nonce: nonce)
+                        return
+                    }
+                default:
+                    return
+                }
+                dismissWithdrawnPreview()
+            }
             .onChangeCompat(of: focusedJourneyHeader?.id) { identifier in
                 if identifier != nil {
                     return
@@ -992,6 +1047,10 @@ struct MapTalkView: View {
                         experiencePresentation.dismiss()
                     }
                 case let .reel(real):
+                    guard !viewModel.withdrawnPublicMemoryIDs.contains(real.id) else {
+                        dismissWithdrawnPreview()
+                        return
+                    }
                     selectedFriendFootprintID = nil
                     selectedStoryId = real.id
                     selectedRealId = real.id
@@ -1000,6 +1059,10 @@ struct MapTalkView: View {
                     activeExperience = .real(real: real, nonce: UUID())
                     experiencePresentation.presentNewContent()
                 case let .poi(rated):
+                    guard let rated = viewModel.removingWithdrawnVisits(from: rated) else {
+                        dismissWithdrawnPreview()
+                        return
+                    }
                     selectedFriendFootprintID = nil
                     selectedStoryId = rated.id
                     selectedRealId = nil
@@ -1051,6 +1114,53 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    func searchNearbyPlaces(_ query: String) async -> [MapTalkNearbyPlaceOption] {
+        guard let location = viewModel.publishableLiveLocation else { return [] }
+        let publisher = environment.nearbyPOIRepo.search(query, near: location.coordinate)
+        for await places in publisher.values {
+            guard !Task.isCancelled,
+                  let currentLocation = viewModel.publishableLiveLocation else { return [] }
+            var matchingIDs = Set<UUID>()
+            for place in places {
+                let canonicalID = environment.backend?.canonicalPlaceForSelection(place.poi).id ?? place.id
+                matchingIDs.insert(canonicalID)
+            }
+            // GPS can change while Apple's request is in flight. Revalidate
+            // every candidate against the current fix before displaying it.
+            let options = viewModel.nearbyPlaceOptions(near: currentLocation, matching: places)
+            return options.filter { option in
+                matchingIDs.contains(option.id) || option.place.poi.name.localizedStandardContains(query)
+            }
+        }
+        return []
+    }
+
+    func updateStandalonePlacePreview(from places: [RatedPOI]) {
+        // Metadata renders before media downloads. Refresh the selected card in
+        // place as photos arrive, preserving its detent, identity and map camera.
+        switch activeExperience {
+        case let .poi(previous, nonce):
+            if let current = places.first(where: { $0.id == previous.id }), current != previous {
+                activeExperience = .poi(rated: current, nonce: nonce)
+            }
+        case let .friendPlace(previous, sourceID, nonce):
+            if let current = places.first(where: { $0.id == previous.id }), current != previous {
+                activeExperience = .friendPlace(rated: current, sourceID: sourceID, nonce: nonce)
+            }
+        default:
+            break
+        }
+    }
+
+    func dismissWithdrawnPreview() {
+        selectedRealId = nil
+        selectedStoryId = nil
+        selectedFriendFootprintID = nil
+        activeExperience = nil
+        experiencePresentation.dismiss()
+        pendingViewedStoryKey = nil
+    }
+
     var selectedStandalonePOI: RatedPOI? {
         guard case let .poi(rated, _)? = activeExperience else { return nil }
         return rated
@@ -1079,13 +1189,16 @@ private extension MapTalkView {
             retaining: selectedFriendFootprintID
         )
         let projectedPlaces = layout.places.compactMap { footprint in
-            mapProxy.convert(footprint.coordinate, to: .local).map { point in
-                FriendFootprintProjectedPlace(
-                    id: footprint.id,
-                    point: point,
-                    friendCount: footprint.friendIDs.count
-                )
-            }
+            guard let point = mapProxy.convert(footprint.coordinate, to: .local),
+                  let screenPoint = mapProxy.convert(footprint.coordinate, to: .global),
+                  !FriendFootprintScreenOcclusionPolicy.isCoveredByControls(
+                    projectedPoint: screenPoint, controlsFrame: mapControlsFrame
+                  ) else { return nil as FriendFootprintProjectedPlace? }
+            return FriendFootprintProjectedPlace(
+                id: footprint.id,
+                point: point,
+                friendCount: footprint.friendIDs.count
+            )
         }
         let primaryCoordinates = viewModel.mapRenderReels(
             retaining: selectedStoryId,
@@ -1271,6 +1384,8 @@ private extension MapTalkView {
     func requestPublish(_ destination: MapTalkPublishDestination) {
         guard publishDestination == nil else { return }
 
+        viewModel.refreshNearbyPlaces()
+
         if viewModel.publishLocation(for: destination) == nil {
             // Both publishers open immediately. Location and nearby POIs can
             // arrive while the person is already composing.
@@ -1329,6 +1444,7 @@ private extension MapTalkView {
     func presentQueuedPublisherIfNeeded() {
         guard let destination = queuedPublishDestination else { return }
         queuedPublishDestination = nil
+        viewModel.refreshNearbyPlaces()
 
         if viewModel.publishLocation(for: destination) == nil {
             environment.location.requestWhenInUse()

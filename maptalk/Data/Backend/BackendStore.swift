@@ -30,12 +30,19 @@ final class BackendStore: ObservableObject {
     @Published private(set) var ownedMemories: [UUID: BackendMemory] = [:]
     @Published private(set) var pendingMemoryMutations: Set<UUID> = []
     @Published private(set) var pendingPublications: [UUID: PendingPublicationStatus] = [:]
+    @Published private(set) var publicationProgress: [UUID: Double] = [:]
+    @Published private var commentThreads: [BackendCommentTarget: [BackendComment]] = [:]
+    private var commentThreadRevisions: [BackendCommentTarget: Int] = [:]
     /// Includes cancellations still waiting for server acknowledgement.
     var hasPendingSyncWork: Bool { !localState.queued.isEmpty }
     private var privateOverrides: [UUID: BackendMemory] = [:]
     private var deletedMemoryIDs: Set<UUID> = []
     private var mediaRevision = 0
     private var knownMemories: [UUID: BackendMemory] = [:]
+    private var mapExcludedMemoryIDs: Set<UUID> = []
+    /// Viewport absence is a map-only eligibility rule, never archive deletion.
+    var excludedMapMemoryIDs: Set<UUID> { mapExcludedMemoryIDs }
+    private var mapCacheRevision = 0
     private var blockedUserIDs: Set<UUID> = []
     var onSignOut: (() -> Void)?
     var onConnectionAvailable: (() -> Void)?
@@ -45,6 +52,9 @@ final class BackendStore: ObservableObject {
     private var isUpdatingProfile = false
     private var knownPlaceIDs: Set<UUID> = []
     private var placeAliases: [UUID: UUID] = [:]
+    /// Fresh directory categories improve this session's picker presentation,
+    /// without rewriting shared places or changing check-in distance policy.
+    private var selectionDirectoryCategories: [UUID: POICategory] = [:]
     private var localMedia: [UUID: URL] = [:]
     private var localPosters: [UUID: URL] = [:]
     private var uploadedMedia: [String: BackendMedia] = [:]
@@ -60,17 +70,30 @@ final class BackendStore: ObservableObject {
     private var localState: BackendLocalState
     private var stateRevision = 0
     private var syncTask: Task<Void, Never>?
+    private var syncRetryTask: Task<Void, Never>?
+    private var syncRetryCounts: [UUID: Int] = [:]
+    private var syncRetryDates: [UUID: Date] = [:]
+    private var currentSyncID: UUID?
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundExecutionExpired = false
+    private var connectionAvailable: Bool?
     private var syncAuthorized = false
     private let automaticallySync: Bool
+    private let observesConnectivity: Bool
+    private let retryDelay: @Sendable (Int) -> TimeInterval
     private var isEnqueuing = false
     private var isSyncing = false
     private var pathMonitor: NWPathMonitor?
     private var activationSubscription: AnyCancellable?
 
-    init(user: User, api: BackendAPI, storageDirectory: URL? = nil, automaticallySync: Bool = true) {
+    init(user: User, api: BackendAPI, storageDirectory: URL? = nil, automaticallySync: Bool = true,
+         observesConnectivity: Bool = true,
+         retryDelay: @escaping @Sendable (Int) -> TimeInterval = { min(60, pow(2, Double($0))) }) {
         self.user = user
         self.api = api
         self.automaticallySync = automaticallySync
+        self.observesConnectivity = observesConnectivity
+        self.retryDelay = retryDelay
         users = [user.id: user]
         archive = MyMapArchiveStore(currentUserID: user.id, startsEmpty: true)
         let server = api.baseURL.absoluteString
@@ -87,7 +110,133 @@ final class BackendStore: ObservableObject {
 
     func user(for id: UUID) -> User? { users[id] }
 
+    /// Comments belong to an existing public post/place, never to a new visit.
+    /// Expiry only removes active-map emphasis; it does not close discussion.
+    func canComment(on target: BackendCommentTarget) -> Bool {
+        guard isActive, api.token != nil else { return false }
+        return currentRecords(Array(knownMemories.values), publicOnly: true).contains { record in
+            switch target {
+            case let .memory(id): return record.id == id
+            case let .place(id): return record.kind == "poi" && record.place?.id == id
+            }
+        }
+    }
+
+    func comments(for target: BackendCommentTarget) -> [BackendComment] {
+        guard canComment(on: target) else { return [] }
+        return (commentThreads[target] ?? []).filter { !blockedUserIDs.contains($0.userId) }
+    }
+
+    func cachedCommentCount(for target: BackendCommentTarget) -> Int? {
+        guard canComment(on: target), commentThreads[target] != nil else { return nil }
+        return comments(for: target).count
+    }
+
+    func loadComments(for target: BackendCommentTarget) async throws {
+        try requireActive()
+        guard canComment(on: target) else { return }
+        let revision = publicContentRevision
+        let threadRevision = commentThreadRevisions[target, default: 0]
+        let originalIDs = Set((commentThreads[target] ?? []).map(\.id))
+        let loaded: [BackendComment]
+        do { loaded = try await api.comments(for: target) }
+        catch {
+            if isActive, revision == publicContentRevision,
+               threadRevision == commentThreadRevisions[target, default: 0],
+               case let BackendClientError.http(status, _, _) = error,
+               status == 403 || status == 404 || status == 410 {
+                commentThreads.removeValue(forKey: target)
+            }
+            throw error
+        }
+        try requireActive()
+        guard revision == publicContentRevision, canComment(on: target) else { throw CancellationError() }
+        // A read that started before Send must not erase its confirmed reply.
+        let justSent = (commentThreads[target] ?? []).filter { !originalIDs.contains($0.id) }
+        cacheComments(loaded + justSent, for: target)
+        await prepareCommentAvatars(loaded, for: target, revision: revision)
+    }
+
+    @discardableResult
+    func addComment(to target: BackendCommentTarget, text: String, requestID: UUID) async throws -> BackendComment {
+        try requireActive()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.utf16.count <= 1_000 else {
+            throw BackendClientError.message("Write a comment of up to 1,000 characters.")
+        }
+        guard canComment(on: target) else {
+            throw BackendClientError.message("This post is no longer available for comments.")
+        }
+        let revision = publicContentRevision
+        let saved = try await api.addComment(to: target, text: trimmed, requestID: requestID)
+        try requireActive()
+        guard revision == publicContentRevision, canComment(on: target) else { throw CancellationError() }
+        guard saved.id == requestID, saved.userId == user.id, saved.author.id == user.id, saved.text == trimmed else {
+            throw BackendClientError.message("Your comment wasn't confirmed. Please try again.")
+        }
+        cacheComments((commentThreads[target] ?? []) + [saved], for: target)
+        return saved
+    }
+
+    private func cacheComments(_ comments: [BackendComment], for target: BackendCommentTarget) {
+        var unique: [UUID: BackendComment] = [:]
+        for comment in comments where comment.userId == comment.author.id && !blockedUserIDs.contains(comment.userId) {
+            unique[comment.id] = comment
+            if comment.userId != user.id { applyProfile(comment.author) }
+        }
+        commentThreads[target] = unique.values.sorted {
+            $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
+        }
+        commentThreadRevisions[target, default: 0] += 1
+    }
+
+    private func prepareCommentAvatars(_ comments: [BackendComment], for target: BackendCommentTarget,
+                                       revision: Int) async {
+        var authors: [UUID: BackendUser] = [:]
+        for comment in comments where comment.userId != user.id && !blockedUserIDs.contains(comment.userId) {
+            if let avatar = comment.author.avatar, localMedia[avatar.id] == nil {
+                authors[comment.author.id] = comment.author
+            }
+        }
+        let profiles = Array(authors.values)
+        for start in stride(from: 0, to: profiles.count, by: 4) {
+            guard isActive, !Task.isCancelled, revision == publicContentRevision, canComment(on: target) else { return }
+            let batch = Array(profiles[start..<min(start + 4, profiles.count)])
+            await withTaskGroup(of: Void.self) { group in
+                for author in batch {
+                    group.addTask { try? await self.prepareProfileAvatar(author) }
+                }
+            }
+            guard isActive, !Task.isCancelled, revision == publicContentRevision, canComment(on: target) else { return }
+            for author in batch { applyProfile(author) }
+            // Text is already visible. A missing photo must never turn a
+            // successful comment read into a failed discussion load.
+            if let comments = commentThreads[target] { commentThreads[target] = comments }
+        }
+    }
+
     func canonicalPlaceID(for sourceID: UUID) -> UUID? { placeAliases[sourceID] }
+
+    /// The server's stored classification defines the allowed publish radius
+    /// for an existing place. Apple may have richer metadata now, but that does
+    /// not silently upgrade a legacy canonical place or its publication rules.
+    func canonicalPlaceForSelection(_ poi: POI, fromDirectory: Bool = false) -> POI {
+        let canonicalID = placeAliases[poi.id] ?? poi.id
+        guard knownPlaceIDs.contains(canonicalID) else { return poi }
+        let stored = knownMemories.values
+            .filter { $0.place?.id == canonicalID && $0.moderationStatus != "local_pending" }
+            .max { $0.createdAt < $1.createdAt }?.place
+        if fromDirectory, poi.category != .other,
+           stored?.sourceId == poi.id, placeAliases[poi.id] == canonicalID {
+            selectionDirectoryCategories[canonicalID] = poi.category
+        }
+        return POI(id: canonicalID, name: stored?.name ?? poi.name,
+            coordinate: stored.map { .init(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
+                ?? poi.coordinate,
+            category: selectionDirectoryCategories[canonicalID]
+                ?? stored.flatMap { POICategory(rawValue: $0.category) } ?? poi.category,
+            directoryKind: (stored?.directoryKind).flatMap(POIDirectoryKind.init(rawValue:)))
+    }
 
     /// The upload is unreferenced until the atomic profile PATCH succeeds. A
     /// lost PATCH reply may still have committed: never delete that upload.
@@ -184,6 +333,7 @@ final class BackendStore: ObservableObject {
 
     private func performRefresh() async throws {
         try requireActive()
+        let mapRevision = mapCacheRevision
         refreshGeneration += 1
         let generation = refreshGeneration
         let identityRevision = profileRevision
@@ -202,6 +352,7 @@ final class BackendStore: ObservableObject {
         localState.mine = currentRecords(mine)
         localState.profile = currentRecords(ownPublic, publicOnly: true)
         localState.feed = currentRecords(feed, publicOnly: true)
+        restoreMapEligibility(from: localState.feed + localState.profile, ifRevision: mapRevision)
         let records = localState.mine + localState.profile + localState.feed
         remember(records)
         await loadCachedMedia(records, identity: localState.user)
@@ -233,6 +384,7 @@ final class BackendStore: ObservableObject {
 
     func loadProfile(userID: UUID, onUpdate: ((Snapshot) -> Void)? = nil) async throws -> Snapshot {
         try requireActive()
+        let mapRevision = mapCacheRevision
         if blockedUserIDs.contains(userID) { return ([], []) }
         let identityRevision = profileRevision
         let contentRevision = publicContentRevision
@@ -244,6 +396,11 @@ final class BackendStore: ObservableObject {
         guard contentRevision == publicContentRevision else { throw CancellationError() }
         if userID != user.id { profileMetadata[userID] = identity }
         let visible = currentRecords(records, publicOnly: true)
+        if restoreMapEligibility(from: visible, ifRevision: mapRevision) {
+            try? await persistLocalState()
+            try requireActive()
+            guard contentRevision == publicContentRevision else { throw CancellationError() }
+        }
         remember(visible)
         await loadCachedMedia(visible, identity: identity)
         try requireActive()
@@ -266,6 +423,8 @@ final class BackendStore: ObservableObject {
 
     func loadMap(_ region: MKCoordinateRegion, onUpdate: ((Snapshot) -> Void)? = nil) async throws -> Snapshot {
         try requireActive()
+        let mapRevision = mapCacheRevision
+        let previouslyKnownIDs = Set(knownMemories.keys)
         func wrapped(_ longitude: Double) -> Double {
             var value = longitude
             while value > 180 { value -= 360 }
@@ -277,6 +436,12 @@ final class BackendStore: ObservableObject {
         let north = min(90, region.center.latitude + region.span.latitudeDelta / 2)
         let west = halfWidth == 180 ? -180 : wrapped(region.center.longitude - halfWidth)
         let east = halfWidth == 180 ? 180 : wrapped(region.center.longitude + halfWidth)
+        func isInViewport(_ record: BackendMemory) -> Bool {
+            let coordinate = record.place?.coordinate ?? record.location
+            let inLongitude = west <= east ? (west...east).contains(coordinate.longitude)
+                : coordinate.longitude >= west || coordinate.longitude <= east
+            return (south...north).contains(coordinate.latitude) && inLongitude
+        }
         let records: [BackendMemory]
         do { records = try await api.allMemories(path: "/v1/map/memories?west=\(west)&east=\(east)&south=\(south)&north=\(north)") }
         catch {
@@ -284,16 +449,11 @@ final class BackendStore: ObservableObject {
             let mayUseCache: Bool
             switch error {
             case BackendClientError.message: mayUseCache = true
-            case let BackendClientError.http(status, _): mayUseCache = status >= 500
+            case let BackendClientError.http(status, _, _): mayUseCache = status >= 500
             default: mayUseCache = false
             }
             guard mayUseCache else { throw error }
-            return project(currentRecords(Array(knownMemories.values), publicOnly: true).filter {
-                let coordinate = $0.place?.coordinate ?? $0.location
-                let inLongitude = west <= east ? (west...east).contains(coordinate.longitude)
-                    : coordinate.longitude >= west || coordinate.longitude <= east
-                return (south...north).contains(coordinate.latitude) && inLongitude
-            })
+            return project(currentMapRecords(Array(knownMemories.values)).filter(isInViewport))
         }
         try requireActive()
         // A GET may have started before a withdrawal. Reconcile that response
@@ -302,18 +462,34 @@ final class BackendStore: ObservableObject {
         // point on, a newer withdrawal cancels every progressive update.
         let contentRevision = publicContentRevision
         let visible = currentRecords(records, publicOnly: true)
+        // allMemories exhausts nextCursor before returning. A failed/partial
+        // page never reaches this replacement, and absence only affects this
+        // viewport's map eligibility, never the person's archive or profile.
+        if mapRevision == mapCacheRevision {
+            let returnedIDs = Set(visible.map(\.id))
+            let absentIDs = Set(knownMemories.values.filter {
+                previouslyKnownIDs.contains($0.id) && Self.isPubliclyVisible($0)
+                    && isInViewport($0) && !returnedIDs.contains($0.id)
+            }.map(\.id))
+            mapExcludedMemoryIDs.formUnion(absentIDs)
+            mapExcludedMemoryIDs.subtract(returnedIDs)
+            mapCacheRevision += 1
+            try? await persistLocalState()
+            try requireActive()
+            guard contentRevision == publicContentRevision else { throw CancellationError() }
+        }
         remember(visible)
         await loadCachedMedia(visible, identity: localState.user)
         try requireActive()
         guard contentRevision == publicContentRevision else { throw CancellationError() }
-        onUpdate?(project(visible))
+        onUpdate?(project(currentMapRecords(visible)))
         try await prepareMedia(visible) { [weak self] in
             guard let self, isActive, !Task.isCancelled, contentRevision == publicContentRevision else { return }
-            onUpdate?(project(currentRecords(visible, publicOnly: true)))
+            onUpdate?(project(currentMapRecords(visible)))
         }
         try requireActive()
         guard contentRevision == publicContentRevision else { throw CancellationError() }
-        return project(currentRecords(records, publicOnly: true))
+        return project(currentMapRecords(records))
     }
 
     /// A POI row groups visits. The menu offers each of this person's visits
@@ -350,7 +526,63 @@ final class BackendStore: ObservableObject {
         await refreshAfterMemoryMutation()
     }
 
-    func deletePost(memoryID: UUID) async throws {
+    /// Editing changes this record in place; it is not a new publication and
+    /// must not restart the active-map clock. A queued upload remains immutable
+    /// until the server confirms it, because its original request may be live.
+    func updateCaption(memoryID: UUID, caption: String) async throws -> BackendMemory {
+        let original = try beginMemoryMutation(memoryID)
+        defer { pendingMemoryMutations.remove(memoryID) }
+        guard original.kind == "reel", !localState.queued.contains(where: { $0.id == memoryID }) else {
+            throw BackendClientError.message("You can edit this reel after it finishes sharing.")
+        }
+        let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.utf16.count <= 2200, !text.isEmpty || !original.media.isEmpty else {
+            throw BackendClientError.message(text.isEmpty ? "Keep a caption on a text-only reel." : "Keep the caption under 2,200 characters.")
+        }
+        let saved = try await api.updateMemoryCaption(id: memoryID, caption: text)
+        try requireActive()
+        guard saved.id == memoryID, saved.ownerId == user.id, saved.kind == "reel",
+              saved.caption == text, saved.visibility == original.visibility,
+              saved.createdAt == original.createdAt, saved.publishedAt == original.publishedAt,
+              saved.media.map(\.id) == original.media.map(\.id) else {
+            throw BackendClientError.message("The edit wasn't confirmed. Your text is kept here; please try again.")
+        }
+        // Invalidate reads begun before PATCH so they cannot roll the card back.
+        publicContentRevision += 1
+        refreshGeneration += 1
+        refreshTask?.task.cancel()
+        refreshTask = nil
+        lastRefreshAt = nil
+        knownMemories[memoryID] = saved
+        ownedMemories[memoryID] = saved
+        if privateOverrides[memoryID] != nil { privateOverrides[memoryID] = saved }
+        localState.mine = localState.mine.map { $0.id == memoryID ? saved : $0 }
+        localState.profile = localState.profile.map { $0.id == memoryID ? saved : $0 }
+        localState.feed = localState.feed.map { $0.id == memoryID ? saved : $0 }
+        rebuildLocalProjections()
+        // The server already committed. A local cache-write error must not
+        // label a successful edit as failed or discard the confirmed text.
+        do { try await persistLocalState() }
+        catch { issue = "Your edit is saved. Its offline copy will update when you refresh." }
+        return saved
+    }
+
+    func deletePosts(memoryIDs: [UUID]) async throws {
+        var completed = false
+        var seen = Set<UUID>()
+        do {
+            for id in memoryIDs where seen.insert(id).inserted {
+                try await deletePost(memoryID: id, refreshAfterward: false)
+                completed = true
+            }
+        } catch {
+            if completed { await refreshAfterMemoryMutation() }
+            throw error
+        }
+        if completed { await refreshAfterMemoryMutation() }
+    }
+
+    func deletePost(memoryID: UUID, refreshAfterward: Bool = true) async throws {
         if localState.queued.contains(where: { $0.id == memoryID }) {
             try await cancelQueuedPublication(id: memoryID)
             return
@@ -365,7 +597,7 @@ final class BackendStore: ObservableObject {
         knownMemories.removeValue(forKey: memoryID)
         finishMemoryMutation(original, deleted: true)
         try? await persistLocalState()
-        await refreshAfterMemoryMutation()
+        if refreshAfterward { await refreshAfterMemoryMutation() }
     }
 
     func blockUser(id: UUID) async throws {
@@ -393,6 +625,11 @@ final class BackendStore: ObservableObject {
         knownMemories = knownMemories.filter { $0.value.ownerId != id }
         profileMetadata.removeValue(forKey: id)
         users.removeValue(forKey: id)
+        commentThreads = commentThreads.reduce(into: [:]) { result, entry in
+            if canComment(on: entry.key) {
+                result[entry.key] = entry.value.filter { $0.userId != id }
+            }
+        }
         feedReels.send(feedReels.value.filter { $0.userId != id })
         feedPOIs.send(Self.removingMemories(ids, from: feedPOIs.value))
         publicContentChanges.send(ids)
@@ -423,6 +660,32 @@ final class BackendStore: ObservableObject {
         record.visibility == "public" && (record.moderationStatus == nil || record.moderationStatus == "approved")
     }
 
+    private static func publicExpiry(for record: BackendMemory) -> Date {
+        guard record.visibility == "public", record.moderationStatus != "local_pending" else { return record.expiresAt }
+        // Normalize pre-72-hour disk snapshots too; publication, not capture,
+        // starts the public clock. Queued local previews keep their own lifetime.
+        return (record.publishedAt ?? record.createdAt).addingTimeInterval(StoryReadKeys.freshWindow)
+    }
+
+    private func currentMapRecords(_ records: [BackendMemory]) -> [BackendMemory] {
+        currentRecords(records, publicOnly: true).filter {
+            !mapExcludedMemoryIDs.contains($0.id)
+                && ($0.kind != "reel" || Self.publicExpiry(for: $0) > .now)
+        }
+    }
+
+    @discardableResult
+    private func restoreMapEligibility(from records: [BackendMemory], ifRevision revision: Int) -> Bool {
+        // A fresh feed/profile response can confirm public visibility again.
+        // A read started before a newer viewport result may not undo its absence.
+        guard revision == mapCacheRevision else { return false }
+        let ids = Set(currentRecords(records, publicOnly: true).map(\.id))
+        guard !mapExcludedMemoryIDs.isDisjoint(with: ids) else { return false }
+        mapExcludedMemoryIDs.subtract(ids)
+        mapCacheRevision += 1
+        return true
+    }
+
     /// Prune a single check-in from grouped places, retaining unrelated visits.
     static func removingMemories(_ ids: Set<UUID>, from places: [RatedPOI]) -> [RatedPOI] {
         places.compactMap { place in
@@ -438,6 +701,10 @@ final class BackendStore: ObservableObject {
         refreshTask?.task.cancel()
         refreshTask = nil
         lastRefreshAt = nil
+        commentThreads.removeValue(forKey: .memory(original.id))
+        if let placeID = original.place?.id, !canComment(on: .place(placeID)) {
+            commentThreads.removeValue(forKey: .place(placeID))
+        }
         let ids: Set<UUID> = [original.id]
         ownPublicReels.removeAll { ids.contains($0.id) }
         ownPublicPOIs = Self.removingMemories(ids, from: ownPublicPOIs)
@@ -511,7 +778,7 @@ final class BackendStore: ObservableObject {
                 else {
                     input.place = .init(name: rated.poi.name, category: rated.poi.category.rawValue,
                         coordinate: .init(latitude: rated.poi.coordinate.latitude, longitude: rated.poi.coordinate.longitude),
-                        sourceId: rated.poi.id)
+                        sourceId: rated.poi.id, directoryKind: rated.poi.directoryKind?.rawValue)
                 }
             }
             if let media = place.media {
@@ -535,12 +802,7 @@ final class BackendStore: ObservableObject {
         }
         // Exclude changing GPS readings from retry identity. A retry uses the
         // original sent coordinates and uploaded IDs, even after a timeout.
-        var intent: [String] = [input.kind, input.visibility, input.caption ?? ""]
-        intent.append(contentsOf: [input.place?.name ?? "", input.place?.category ?? ""])
-        intent.append(contentsOf: [input.place?.sourceId?.uuidString ?? "", input.placeId?.uuidString ?? ""])
-        intent.append(contentsOf: urls.map(\.absoluteString))
-        intent.append(contentsOf: contentTypes)
-        let fingerprint = intent.joined(separator: "\u{0}")
+        let fingerprint = Self.publicationFingerprint(for: input, urls: urls, contentTypes: contentTypes)
         if let pending = pendingInputs[requestID] {
             guard pending.fingerprint == fingerprint else {
                 throw BackendClientError.publishPending("The pending save must be checked before changing its content.")
@@ -651,6 +913,22 @@ final class BackendStore: ObservableObject {
         }
     }
 
+    /// Preserve the pre-directory-metadata identity byte for byte when the
+    /// optional field is absent. In particular, an empty extra component would
+    /// insert another NUL separator and invalidate an unchanged pending draft.
+    nonisolated static func publicationFingerprint(for input: BackendMemoryInput,
+                                                   urls: [URL], contentTypes: [String]) -> String {
+        var intent = [input.kind, input.visibility, input.caption ?? ""]
+        intent.append(contentsOf: [input.place?.name ?? "", input.place?.category ?? ""])
+        intent.append(contentsOf: [input.place?.sourceId?.uuidString ?? "", input.placeId?.uuidString ?? ""])
+        intent.append(contentsOf: urls.map(\.absoluteString))
+        intent.append(contentsOf: contentTypes)
+        if let directoryKind = input.place?.directoryKind {
+            intent.append("directoryKind=\(directoryKind)")
+        }
+        return intent.joined(separator: "\u{0}")
+    }
+
     // MARK: - Offline archive and durable publishing
 
     func cacheVerifiedIdentity(profile: BackendUser? = nil) async throws {
@@ -673,6 +951,7 @@ final class BackendStore: ObservableObject {
             deletedMemoryIDs = saved.deleted
             privateOverrides = Dictionary(uniqueKeysWithValues: saved.privateOverrides.map { ($0.id, $0) })
             blockedUserIDs = saved.blocked
+            mapExcludedMemoryIDs = saved.mapExcludedMemoryIDs ?? []
             remember(saved.mine + saved.profile + saved.feed)
             await loadCachedMedia(saved.mine + saved.profile + saved.feed, identity: saved.user)
             try requireActive()
@@ -690,25 +969,44 @@ final class BackendStore: ObservableObject {
         startPendingSync()
     }
 
-    func retryPendingPublications() {
+    func retryPendingPublications(id: UUID? = nil) {
         guard isActive else { return }
-        for index in localState.queued.indices { localState.queued[index].failure = nil }
+        for index in localState.queued.indices where id == nil || localState.queued[index].id == id {
+            let key = localState.queued[index].id
+            localState.queued[index].failure = nil
+            syncRetryCounts.removeValue(forKey: key)
+            syncRetryDates.removeValue(forKey: key)
+        }
         updatePendingStatuses()
         Task { [weak self] in
             guard let self else { return }
-            do { try await persistLocalState(); startPendingSync() }
+            do {
+                try await persistLocalState()
+                syncRetryTask?.cancel()
+                syncRetryTask = nil
+                startPendingSync()
+            }
             catch { if isActive { issue = error.localizedDescription } }
         }
     }
 
     private func observeConnection() {
-        guard automaticallySync, pathMonitor == nil else { return }
+        guard automaticallySync, observesConnectivity, pathMonitor == nil else { return }
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
-            guard path.status == .satisfied else { return }
+            let available = path.status == .satisfied
             Task { @MainActor [weak self] in
                 guard let self, isActive else { return }
-                if syncAuthorized { startPendingSync() }
+                connectionAvailable = available
+                guard available else {
+                    // Stop the unacknowledged chunk, not the durable upload.
+                    // Reconnection queries the server's last committed offset.
+                    syncTask?.cancel()
+                    syncRetryTask?.cancel()
+                    syncRetryTask = nil
+                    return
+                }
+                if syncAuthorized { startPendingSync(resumeImmediately: true) }
                 else { onConnectionAvailable?() }
             }
         }
@@ -718,7 +1016,8 @@ final class BackendStore: ObservableObject {
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self, isActive else { return }
-                    if syncAuthorized { startPendingSync() }
+                    backgroundExecutionExpired = false
+                    if syncAuthorized { startPendingSync(resumeImmediately: true) }
                     else { onConnectionAvailable?() }
                 }
             }
@@ -729,6 +1028,7 @@ final class BackendStore: ObservableObject {
         localState.deleted = deletedMemoryIDs
         localState.privateOverrides = Array(privateOverrides.values)
         localState.blocked = blockedUserIDs
+        localState.mapExcludedMemoryIDs = mapExcludedMemoryIDs
         localState.mine = currentRecords(localState.mine)
         localState.profile = currentRecords(localState.profile, publicOnly: true)
         localState.feed = currentRecords(localState.feed, publicOnly: true)
@@ -767,9 +1067,11 @@ final class BackendStore: ObservableObject {
         for entry in localState.queued where !entry.cancelled {
             if let failure = entry.failure { statuses[entry.id] = .failed(failure) }
             else if pendingPublications[entry.id] == .uploading { statuses[entry.id] = .uploading }
+            else if pendingPublications[entry.id] == .processing { statuses[entry.id] = .processing }
             else { statuses[entry.id] = .waiting }
         }
         pendingPublications = statuses
+        publicationProgress = publicationProgress.filter { statuses[$0.key] != nil }
     }
 
     private func rebuildLocalProjections() {
@@ -842,11 +1144,12 @@ final class BackendStore: ObservableObject {
                 else {
                     input.place = .init(name: rated.poi.name, category: rated.poi.category.rawValue,
                         coordinate: .init(latitude: rated.poi.coordinate.latitude, longitude: rated.poi.coordinate.longitude),
-                        sourceId: rated.poi.id)
+                        sourceId: rated.poi.id, directoryKind: rated.poi.directoryKind?.rawValue)
                 }
                 place = BackendPlace(id: canonical, sourceId: rated.poi.id, name: rated.poi.name,
                     category: rated.poi.category.rawValue,
-                    coordinate: .init(latitude: rated.poi.coordinate.latitude, longitude: rated.poi.coordinate.longitude))
+                    coordinate: .init(latitude: rated.poi.coordinate.latitude, longitude: rated.poi.coordinate.longitude),
+                    directoryKind: rated.poi.directoryKind?.rawValue)
             }
             if let media = value.media {
                 switch media.kind {
@@ -889,52 +1192,132 @@ final class BackendStore: ObservableObject {
         throw BackendClientError.message("This memory couldn't be prepared. Try again.")
     }
 
-    private func startPendingSync() {
-        guard automaticallySync, syncAuthorized, isActive, syncTask == nil,
+    private func startPendingSync(resumeImmediately: Bool = false) {
+        if resumeImmediately {
+            syncRetryTask?.cancel()
+            syncRetryTask = nil
+            syncRetryDates.removeAll()
+        }
+        guard automaticallySync, syncAuthorized, isActive, connectionAvailable != false,
+              !backgroundExecutionExpired, syncTask == nil,
               localState.queued.contains(where: { $0.cancelled || $0.failure == nil }) else { return }
+        syncRetryTask?.cancel()
+        syncRetryTask = nil
         syncTask = Task { [weak self] in
             guard let self else { return }
-            await syncPendingPublications()
+            beginSyncBackgroundGrace()
+            await syncPendingPublications(respectingBackoff: true)
+            endSyncBackgroundGrace()
             syncTask = nil
-            // Bounded retries while the app is running; network/foreground
-            // callbacks also resume the durable queue. No busy retry loop.
-            if isActive, localState.queued.contains(where: { $0.cancelled || $0.failure == nil }) {
-                syncTask = Task { [weak self] in
-                    do { try await Task.sleep(for: .seconds(15)) } catch { return }
-                    guard let self, isActive else { return }
-                    syncTask = nil
-                    startPendingSync()
-                }
+            schedulePendingRetry()
+        }
+    }
+
+    private func schedulePendingRetry() {
+        guard automaticallySync, isActive, syncAuthorized, connectionAvailable != false,
+              !backgroundExecutionExpired else { return }
+        let dates = localState.queued.filter { $0.cancelled || $0.failure == nil }
+            .map { syncRetryDates[$0.id] ?? Date() }
+        guard let next = dates.min() else { return }
+        let delay = max(0.01, next.timeIntervalSinceNow)
+        syncRetryTask?.cancel()
+        syncRetryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, isActive else { return }
+            syncRetryTask = nil
+            startPendingSync()
+        }
+    }
+
+    private func beginSyncBackgroundGrace() {
+        guard backgroundTask == .invalid else { return }
+        // A short OS-granted window can finish the current chunk when leaving
+        // the app. It is not a promise of unlimited background uploading.
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "MapTalk upload") { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                backgroundExecutionExpired = true
+                syncTask?.cancel()
+                syncRetryTask?.cancel()
+                syncRetryTask = nil
+                endSyncBackgroundGrace()
             }
         }
     }
 
+    private func endSyncBackgroundGrace() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
     /// Also callable by isolated tests; never retries with a new post/photo ID.
-    func syncPendingPublications() async {
+    func syncPendingPublications(respectingBackoff: Bool = false) async {
         guard syncAuthorized, isActive, !isSyncing else { return }
         isSyncing = true
-        defer { isSyncing = false }
+        defer { isSyncing = false; currentSyncID = nil }
         let ids = localState.queued.map(\.id)
         for id in ids {
             guard let entry = localState.queued.first(where: { $0.id == id }), entry.cancelled || entry.failure == nil else { continue }
+            if respectingBackoff, let next = syncRetryDates[id], next > Date() { continue }
+            currentSyncID = id
+            var reconcilingVideoUpload = false
             do {
+                try Task.checkCancellation()
                 try requireActive()
                 if entry.cancelled { try await finishCancelledPublication(id); continue }
                 pendingPublications[id] = .uploading
                 for photo in entry.photos where photo.uploaded == nil {
                     let url = stateDisk.mediaURL(photo)
-                    let data = try await Task.detached { try Data(contentsOf: url) }.value
                     try requireActive()
                     guard let current = localState.queued.first(where: { $0.id == id }), !current.cancelled else { break }
-                    let media = try await api.uploadMedia(data, mimeType: photo.contentType, idempotencyKey: photo.id)
+                    let finishedCount = current.photos.filter { $0.uploaded != nil }.count
+                    let attachmentCount = max(1, current.photos.count)
+                    pendingPublications[id] = .uploading
+                    let confirmedProgress = Double(finishedCount) / Double(attachmentCount)
+                    // Keep the last acknowledged fraction while PUT reconciles
+                    // an interrupted video. Its response is authoritative and
+                    // may reset this if the server expired/restarted the upload.
+                    publicationProgress[id] = photo.isVideo
+                        ? max(publicationProgress[id] ?? confirmedProgress, confirmedProgress)
+                        : confirmedProgress
+                    let media: BackendMedia
+                    if photo.isVideo {
+                        reconcilingVideoUpload = true
+                        media = try await api.uploadVideo(at: url, idempotencyKey: photo.id,
+                            checkActive: { [weak self] in
+                                guard let self else { throw CancellationError() }
+                                try requireActive()
+                                guard localState.queued.contains(where: { $0.id == id && !$0.cancelled }) else { throw CancellationError() }
+                            }, onProgress: { [weak self] fraction in
+                                guard let self, canUpdatePublicationProgress(id) else { return }
+                                publicationProgress[id] = (Double(finishedCount) + fraction) / Double(attachmentCount)
+                                pendingPublications[id] = .uploading
+                            }, onProcessing: { [weak self] in
+                                guard let self, canUpdatePublicationProgress(id) else { return }
+                                pendingPublications[id] = .processing
+                            })
+                        reconcilingVideoUpload = false
+                    } else {
+                        let data = try await Task.detached { try Data(contentsOf: url) }.value
+                        try Task.checkCancellation()
+                        media = try await api.uploadMedia(data, mimeType: photo.contentType, idempotencyKey: photo.id)
+                    }
                     try requireActive()
                     guard let index = localState.queued.firstIndex(where: { $0.id == id }),
                           let photoIndex = localState.queued[index].photos.firstIndex(where: { $0.id == photo.id }) else { throw CancellationError() }
                     localState.queued[index].photos[photoIndex].uploaded = media
                     try await persistLocalState()
+                    if canUpdatePublicationProgress(id) {
+                        publicationProgress[id] = Double(finishedCount + 1) / Double(attachmentCount)
+                        pendingPublications[id] = .uploading
+                    }
                 }
                 guard let index = localState.queued.firstIndex(where: { $0.id == id }) else { continue }
                 if localState.queued[index].cancelled { try await finishCancelledPublication(id); continue }
+                // Video processing is complete. Photo uploads and the final
+                // post confirmation use the ordinary uploading state again.
+                pendingPublications[id] = .uploading
                 localState.queued[index].input.mediaIds = localState.queued[index].photos.compactMap { $0.uploaded?.id }
                 localState.queued[index].attemptedPost = true
                 try await persistLocalState()
@@ -969,6 +1352,7 @@ final class BackendStore: ObservableObject {
                 localState.mine.removeAll { $0.id == id }
                 localState.mine.insert(saved, at: 0)
                 if Self.isPubliclyVisible(saved) {
+                    restoreMapEligibility(from: [saved], ifRevision: mapCacheRevision)
                     localState.profile.removeAll { $0.id == id }
                     localState.profile.insert(saved, at: 0)
                     localState.feed.removeAll { $0.id == id }
@@ -983,28 +1367,67 @@ final class BackendStore: ObservableObject {
                     throw error
                 }
                 stateDisk.removePhotos(sending.photos.map(\.id))
+                syncRetryCounts.removeValue(forKey: id)
+                syncRetryDates.removeValue(forKey: id)
                 for item in sending.photos {
                     localMedia.removeValue(forKey: item.id)
                     localPosters.removeValue(forKey: item.id)
                 }
                 remember([saved])
                 rebuildLocalProjections()
-            } catch is CancellationError { return }
+            } catch is CancellationError {
+                if localState.queued.contains(where: { $0.id == id && !$0.cancelled }) { pendingPublications[id] = .waiting }
+                return
+            }
             catch {
                 guard isActive else { return }
                 if let index = localState.queued.firstIndex(where: { $0.id == id }) {
                     let permanent: Bool
-                    if case let BackendClientError.http(status, _) = error {
-                        permanent = [400, 403, 404, 409, 410, 413, 415, 422].contains(status)
+                    if case let BackendClientError.http(status, _, code) = error {
+                        let reconcile = reconcilingVideoUpload
+                            && ["upload_offset_mismatch", "upload_incomplete", "incomplete_body", "not_found"].contains(code ?? "")
+                        permanent = !reconcile && [400, 403, 404, 409, 410, 413, 415, 422].contains(status)
                     } else { permanent = error is CocoaError }
-                    if permanent { localState.queued[index].failure = error.localizedDescription }
-                    pendingPublications[id] = permanent ? .failed(error.localizedDescription) : .waiting
+                    let message = publicationFailureMessage(error)
+                    if permanent { localState.queued[index].failure = message }
+                    // Cancellation remains eligible until the server confirms
+                    // its tombstone and media cleanup. Even a permanent-looking
+                    // cleanup refusal (e.g. media_in_use) must back off rather
+                    // than bypassing failure and spinning on the next tick.
+                    if !permanent || localState.queued[index].cancelled {
+                        let attempt = min(6, (syncRetryCounts[id] ?? 0) + 1)
+                        syncRetryCounts[id] = attempt
+                        syncRetryDates[id] = Date().addingTimeInterval(max(0.01, retryDelay(attempt)))
+                    }
+                    pendingPublications[id] = permanent ? .failed(message) : .waiting
                     try? await persistLocalState()
                     updatePendingStatuses()
-                    if !permanent { return }
+                    // A single interrupted video must not strand independent
+                    // photos/posts behind it. Each entry has bounded backoff.
                 }
             }
         }
+    }
+
+    private func canUpdatePublicationProgress(_ id: UUID) -> Bool {
+        isActive && !Task.isCancelled && currentSyncID == id
+            && localState.queued.contains { $0.id == id && !$0.cancelled }
+    }
+
+    private func publicationFailureMessage(_ error: Error) -> String {
+        if case let BackendClientError.http(_, _, code) = error {
+            if code == "media_quota" {
+                return "Your storage is full. Delete an older post to free space, then retry. Your media is saved on this phone."
+            }
+            // Server/decoder diagnostics are not instructions for the person
+            // publishing. In particular, a validation error alone cannot prove
+            // their original video is damaged. The local preview stays usable.
+            return "Couldn't publish yet. Your post is saved on this phone. Please try again."
+        }
+        if error is CocoaError {
+            return "The saved media couldn't be read. Your post is still on this phone; check available storage and retry."
+        }
+        return "Couldn't publish yet. Your post is saved on this phone. Please try again."
     }
 
     private func cancelQueuedPublication(id: UUID) async throws {
@@ -1022,7 +1445,8 @@ final class BackendStore: ObservableObject {
         knownMemories.removeValue(forKey: id)
         finishMemoryMutation(original.record, deleted: true)
         rebuildLocalProjections()
-        startPendingSync()
+        if currentSyncID == id { syncTask?.cancel() }
+        startPendingSync(resumeImmediately: true)
     }
 
     private func finishCancelledPublication(_ id: UUID) async throws {
@@ -1057,10 +1481,16 @@ final class BackendStore: ObservableObject {
         syncAuthorized = false
         syncTask?.cancel()
         syncTask = nil
+        syncRetryTask?.cancel()
+        syncRetryTask = nil
+        syncRetryDates.removeAll()
+        syncRetryCounts.removeAll()
+        endSyncBackgroundGrace()
         pathMonitor?.cancel()
         pathMonitor = nil
         activationSubscription = nil
         pendingPublications.removeAll()
+        publicationProgress.removeAll()
         let preserved = preservePendingPublications ? BackendLocalState(ownerID: user.id,
             server: api.baseURL.absoluteString, user: localState.user, queued: localState.queued,
             deleted: localState.deleted) : nil
@@ -1080,10 +1510,15 @@ final class BackendStore: ObservableObject {
         deletedMemoryIDs.removeAll()
         pendingMemoryMutations.removeAll()
         knownMemories.removeAll()
+        commentThreads.removeAll()
+        commentThreadRevisions.removeAll()
+        mapExcludedMemoryIDs.removeAll()
+        mapCacheRevision += 1
         profileMetadata.removeAll()
         blockedUserIDs.removeAll()
         knownPlaceIDs.removeAll()
         placeAliases.removeAll()
+        selectionDirectoryCategories.removeAll()
         user.avatarURL = nil
         users = [user.id: user]
         archive.replaceServerRecords(pois: [], reels: [])
@@ -1201,12 +1636,13 @@ final class BackendStore: ObservableObject {
                     radiusMeters: 220, message: record.caption.isEmpty ? nil : record.caption,
                     attachments: attachments, likes: [], comments: [],
                     visibility: record.visibility == "public" ? .publicAll : .privateOnly,
-                    createdAt: record.createdAt, expiresAt: record.expiresAt, publishedAt: record.publishedAt))
+                    createdAt: record.createdAt, expiresAt: Self.publicExpiry(for: record), publishedAt: record.publishedAt))
             } else if let place = record.place {
                 var rated = places[place.id] ?? RatedPOI(
                     poi: .init(id: place.id, name: place.name,
                         coordinate: .init(latitude: place.coordinate.latitude, longitude: place.coordinate.longitude),
-                        category: POICategory(rawValue: place.category) ?? .other),
+                        category: POICategory(rawValue: place.category) ?? .other,
+                        directoryKind: place.directoryKind.flatMap(POIDirectoryKind.init(rawValue:))),
                     highlight: nil, secondary: nil, media: [], checkIns: [], comments: [],
                     endorsements: .init(hype: 0, solid: 0, meh: 0, questionable: 0), tags: [],
                     isFavoritedByCurrentUser: false, favoritesCount: 0)

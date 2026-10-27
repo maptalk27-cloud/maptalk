@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { createBackend } from '../src/server.mjs';
 import { DEFAULT_USER_MEDIA_LIMIT_BYTES } from '../src/media-storage.mjs';
 import { videoFixture } from './helpers/video.mjs';
+import { digest } from '../src/security.mjs';
+import { UPLOAD_CHUNK_SIZE } from '../src/resumable-uploads.mjs';
 
 const location = { latitude: 37.3688, longitude: -122.0363 };
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS1cAAAAASUVORK5CYII=', 'base64');
@@ -147,4 +149,39 @@ test('HTTP video rejects unsupported input and oversized bodies before persistin
   expected(await api.upload(owner.token, valid.subarray(0, valid.length - 100)), 422);
   expected(await api.upload(owner.token, Buffer.alloc(20 * 1024 * 1024 + 1)), 413);
   expected(await api.upload(owner.token, valid), 201, 'a rejected upload must not poison later uploads');
+});
+
+test('resumable video completes through the real decoder, survives restart, and remains compatible with legacy retry and private playback', async t => {
+  const api = await fixture(t), owner = await api.register('resumereal'), viewer = await api.register('resumeviewer');
+  const video = await videoFixture({ duration: 2, rotation: 90 });
+  // A legal free box makes this a multi-chunk transfer without a huge/slow fixture.
+  const padding = Buffer.alloc(UPLOAD_CHUNK_SIZE + 8); padding.writeUInt32BE(padding.length); padding.write('free', 4);
+  const input = Buffer.concat([video, padding]), key = randomUUID(), path = `/v1/media/uploads/${key}`;
+  const metadata = { mimeType: 'video/mp4', byteCount: input.length, sha256: digest(input) };
+  expected(await api.call(path, { method: 'PUT', token: owner.token, json: metadata }), 200);
+  for (let offset = 0; offset < input.length; offset += UPLOAD_CHUNK_SIZE) {
+    const part = input.subarray(offset, offset + UPLOAD_CHUNK_SIZE);
+    const status = expected(await api.call(path, { method: 'PATCH', token: owner.token, body: part,
+      headers: { 'content-type': 'application/octet-stream', 'upload-offset': String(offset) } }), 200);
+    assert.equal(status.receivedBytes, offset + part.length);
+  }
+  await api.restart();
+  const completed = expected(await api.call(`${path}/complete`, { method: 'POST', token: owner.token, json: {} }), 200);
+  assert.equal(completed.receivedBytes, input.length);
+  assert.equal(completed.media.mimeType, 'video/mp4');
+  assert.ok(completed.media.byteCount < input.length, 'normalization removes free metadata padding');
+  assert.deepEqual(expected(await api.upload(owner.token, input, key), 200), completed.media);
+  assert.deepEqual(expected(await api.call(path, { method: 'PUT', token: owner.token, json: metadata }), 200), completed);
+  assert.deepEqual(expected(await api.call(`${path}/complete`, { method: 'POST', token: owner.token, json: {} }), 200), completed);
+  expected(await api.call(path, { token: viewer.token }), 404);
+  expected(await api.call(completed.media.path, { token: viewer.token }), 404);
+  const post = expected(await api.publish(owner.token, [completed.media.id]), 201);
+  expected(await api.call(completed.media.path, { token: viewer.token, headers: { range: 'bytes=0-1' } }), 206);
+  expected(await api.call(`/v1/memories/${post.id}`, { method: 'DELETE', token: owner.token }), 204);
+  assert.equal(expected(await api.call(path, { method: 'PUT', token: owner.token, json: metadata }), 410).error.code, 'media_deleted');
+  // A completed upload from the old protocol can be adopted without another body.
+  const oldKey = randomUUID(), oldMedia = expected(await api.upload(owner.token, video, oldKey), 201);
+  const adopted = expected(await api.call(`/v1/media/uploads/${oldKey}`, { method: 'PUT', token: owner.token,
+    json: { mimeType: 'video/mp4', byteCount: video.length, sha256: digest(video) } }), 200);
+  assert.deepEqual(adopted.media, oldMedia); assert.equal(adopted.receivedBytes, video.length);
 });

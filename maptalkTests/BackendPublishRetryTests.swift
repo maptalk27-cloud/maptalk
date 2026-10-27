@@ -23,7 +23,7 @@ struct BackendPublishRetryTests {
         } catch let error as BackendClientError {
             #expect(error.confirmsPublishRejection)
             if status != 401 {
-                guard case let .http(actualStatus, _) = error else {
+                guard case let .http(actualStatus, _, _) = error else {
                     Issue.record("HTTP refusals must retain their status")
                     return
                 }

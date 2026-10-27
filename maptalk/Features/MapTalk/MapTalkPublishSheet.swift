@@ -146,6 +146,7 @@ struct MapTalkPublishComposer: View {
     /// Keep the draft alive until it is saved to the durable local outbox.
     /// A stable request ID lets a retry resolve the same submission.
     let onPublish: (MapTalkPublishDraft, MapPublishAudience, UUID) async throws -> Void
+    let onSearchNearbyPlaces: (String) async -> [MapTalkNearbyPlaceOption]
 
     @State private var mediaPickerItem: PhotosPickerItem?
     @State private var selectedMedia: ComposerMediaAsset?
@@ -153,7 +154,7 @@ struct MapTalkPublishComposer: View {
     @State private var didFailMediaLoad = false
     @State private var mediaImportToken = UUID()
     @State private var placeVideoPlayer: AVPlayer?
-    @State private var isShowingPlaceCamera = false
+    @State private var isPlaceCameraBusy = false
     @State private var isShowingPlaceLibrary = false
     @State private var placeAudience: MapPublishAudience = .privateMyMap
     @State private var isShowingPlaceAudienceChoices = false
@@ -163,6 +164,9 @@ struct MapTalkPublishComposer: View {
     /// the visible order while the person is choosing so rows never jump
     /// beneath their finger.
     @State private var nearbyPlaceChoiceSnapshot: [MapTalkNearbyPlaceOption] = []
+    @State private var nearbyPlaceSearchText = ""
+    @State private var nearbyPlaceSearchResults: [MapTalkNearbyPlaceOption] = []
+    @State private var isSearchingPlaces = false
     /// Keep the person's choice independent from live search results. Nearby
     /// results can refresh while the composer is open; that must not silently
     /// clear a landmark they already confirmed.
@@ -198,6 +202,7 @@ struct MapTalkPublishComposer: View {
     @State private var reelMediaDeleteTargetFrame: CGRect = .zero
     @State private var isReelMediaDeleteTargeted = false
     @FocusState private var isTextFocused: Bool
+    @FocusState private var isPlaceSearchFocused: Bool
     @Namespace private var bubbleTabNamespace
 
     private var selectedNearbyPOI: RatedPOI? {
@@ -218,7 +223,28 @@ struct MapTalkPublishComposer: View {
 
     private var presentedNearbyPlaces: [MapTalkNearbyPlaceOption] {
         let options = nearbyPlaceChoiceSnapshot.isEmpty ? nearbyPlaces : nearbyPlaceChoiceSnapshot
-        return Array(options.prefix(8))
+        guard !nearbyPlaceSearchQuery.isEmpty else { return options }
+        let local = options.filter { $0.place.poi.name.localizedStandardContains(nearbyPlaceSearchQuery) }
+        var seen = Set<UUID>()
+        return (local + nearbyPlaceSearchResults).filter { seen.insert($0.id).inserted }
+    }
+
+    private var nearbyPlaceSearchQuery: String {
+        nearbyPlaceSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private struct NearbyPlaceSearchRequest: Equatable {
+        let query: String
+        let isVisible: Bool
+        let hasLiveLocation: Bool
+        let nearbyPlaceIDs: [UUID]
+    }
+
+    private var nearbyPlaceSearchRequest: NearbyPlaceSearchRequest {
+        .init(query: nearbyPlaceSearchQuery,
+              isVisible: isShowingNearbyPlaceChoices && !isShowingNewPlaceEditor,
+              hasLiveLocation: hasLiveLocation,
+              nearbyPlaceIDs: nearbyPlaces.map(\.id))
     }
 
     private var remainingReelAssetCapacity: Int {
@@ -228,6 +254,7 @@ struct MapTalkPublishComposer: View {
     private var canSubmit: Bool {
         guard isSubmitting == false,
               isLoadingMedia == false,
+              isPlaceCameraBusy == false,
               reelIsImporting == false,
               mediaPickerItem == nil,
               reelPickerItems.isEmpty,
@@ -282,12 +309,29 @@ struct MapTalkPublishComposer: View {
             placeVideoPlayer?.pause()
         }
         .onChange(of: nearbyPlaces.map(\.id)) { _, _ in
-            if isShowingNearbyPlaceChoices,
-               nearbyPlaceChoiceSnapshot.isEmpty,
-               nearbyPlaces.isEmpty == false {
-                nearbyPlaceChoiceSnapshot = Array(nearbyPlaces.prefix(8))
+            if isShowingNearbyPlaceChoices {
+                // Preserve rows under a finger, but don't freeze away newly
+                // discovered places when location or directory results improve.
+                let latest = Dictionary(nearbyPlaces.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+                let previousIDs = Set(nearbyPlaceChoiceSnapshot.map(\.id))
+                nearbyPlaceChoiceSnapshot = nearbyPlaceChoiceSnapshot.compactMap { latest[$0.id] }
+                    + nearbyPlaces.filter { !previousIDs.contains($0.id) }
             }
             synchronizeNearbySelection()
+        }
+        .task(id: nearbyPlaceSearchRequest) {
+            nearbyPlaceSearchResults = []
+            let request = nearbyPlaceSearchRequest
+            guard request.isVisible, request.hasLiveLocation, !request.query.isEmpty else {
+                isSearchingPlaces = false
+                return
+            }
+            isSearchingPlaces = true
+            do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
+            let results = await onSearchNearbyPlaces(request.query)
+            guard !Task.isCancelled, nearbyPlaceSearchRequest == request else { return }
+            nearbyPlaceSearchResults = results
+            isSearchingPlaces = false
         }
         .onChange(of: hasLiveLocation) { _, isReady in
             guard isReady, submissionIssue == "Finding your location. Try again in a moment." else { return }
@@ -316,19 +360,6 @@ struct MapTalkPublishComposer: View {
             selection: $mediaPickerItem,
             matching: .any(of: [.images, .videos])
         )
-        .fullScreenCover(isPresented: $isShowingPlaceCamera) {
-            MapTalkCameraCaptureView(
-                allowsVideo: true,
-                onCapture: { result in
-                    isShowingPlaceCamera = false
-                    importPlaceCameraCapture(result)
-                },
-                onCancel: {
-                    isShowingPlaceCamera = false
-                }
-            )
-            .ignoresSafeArea()
-        }
         .sheet(item: $previewedReelVideo) { video in
             ComposerVideoPlayer(url: video.url)
         }
@@ -363,6 +394,7 @@ struct MapTalkPublishComposer: View {
                     placeDetails
                         .padding(.horizontal, 20)
                         .padding(.top, 18)
+                        .disabled(isPlaceCameraBusy)
 
                     if let submissionIssue {
                         Text(submissionIssue)
@@ -409,6 +441,33 @@ struct MapTalkPublishComposer: View {
                 backAction: dismissNearbyPlaceChoices
             )
 
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(Color.black.opacity(0.4))
+                TextField("Search nearby places", text: $nearbyPlaceSearchText)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.black)
+                    .focused($isPlaceSearchFocused)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+                    .onSubmit { isPlaceSearchFocused = false }
+                    .accessibilityIdentifier("maptalk.place.search")
+                if isSearchingPlaces {
+                    ProgressView().controlSize(.small).tint(.gray)
+                }
+                if !nearbyPlaceSearchText.isEmpty {
+                    Button { nearbyPlaceSearchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.gray)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear place search")
+                }
+            }
+            .padding(12)
+            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+
             ScrollView(showsIndicators: false) {
                 nearbyPlaceChoices
                     .padding(.horizontal, 20)
@@ -416,6 +475,14 @@ struct MapTalkPublishComposer: View {
                     .padding(.bottom, 24)
             }
             .scrollDismissesKeyboard(.interactively)
+
+            VStack(spacing: 0) {
+                placePickerDivider
+                createPlaceButton
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 10)
+            .background(Color.white)
         }
         .padding(.top, 6)
         .background(Color.white)
@@ -1083,38 +1150,56 @@ struct MapTalkPublishComposer: View {
     private var placeMediaStage: some View {
         GeometryReader { proxy in
             ZStack {
-                placeMediaVisual
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    .clipped()
+                if selectedMedia == nil {
+                    MapTalkInlineCameraView(
+                        isActive: !isLoadingMedia && !isShowingPlaceLibrary
+                            && !isShowingNearbyPlaceChoices && !isSubmitting
+                            && !hasUnconfirmedSubmission,
+                        onCapture: importPlaceCameraCapture,
+                        onOpenLibrary: presentPlaceLibrary,
+                        onIssue: { submissionIssue = $0 },
+                        onCaptureActivityChanged: { isPlaceCameraBusy = $0 }
+                    )
+                } else {
+                    placeMediaVisual
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
 
-            if selectedMedia == nil, isLoadingMedia == false {
-                Button(action: presentPlaceCapture) {
-                    VStack(spacing: 12) {
-                        Image(systemName: "camera")
-                            .font(.system(size: 30, weight: .regular))
-                            .frame(width: 64, height: 64)
-                            .background(.white.opacity(0.10), in: Circle())
+                    VStack {
+                        Spacer(minLength: 0)
+                        HStack(spacing: 20) {
+                            Button(action: presentPlaceCapture) {
+                                Text("Retake")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .frame(minHeight: 44)
+                            }
+                            .buttonStyle(ComposerPressStyle())
+                            .accessibilityIdentifier("maptalk.place.retake")
 
-                        Text(didFailMediaLoad ? "Try again" : "Take a photo or video")
-                            .font(.system(size: 15, weight: .semibold))
+                            Spacer(minLength: 0)
+
+                            Button(action: presentPlaceLibrary) {
+                                Image(systemName: "photo.on.rectangle")
+                                    .font(.system(size: 19, weight: .medium))
+                                    .frame(width: 44, height: 44)
+                            }
+                            .buttonStyle(ComposerPressStyle())
+                            .accessibilityLabel("Choose from library")
+                            .accessibilityIdentifier("maptalk.place.library")
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 8)
+                        .background {
+                            LinearGradient(colors: [.clear, .black.opacity(0.65)],
+                                           startPoint: .top, endPoint: .bottom)
+                                .padding(.top, -32)
+                        }
                     }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .buttonStyle(ComposerPressStyle())
-                .accessibilityLabel("Take a photo or video")
-                .accessibilityIdentifier("maptalk.place.add-media")
-            }
-
-            if isLoadingMedia {
-                ProgressView()
-                    .tint(.white)
-            }
 
                 VStack {
-                    Spacer(minLength: 0)
-
-                    HStack(spacing: 18) {
+                    HStack {
                         HStack(spacing: 6) {
                             Circle()
                                 .fill(hasLiveLocation ? Theme.neonPrimary : Color.white.opacity(0.72))
@@ -1123,36 +1208,21 @@ struct MapTalkPublishComposer: View {
                                 .font(.system(size: 13, weight: .semibold))
                         }
                         .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.6), radius: 4)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(.black.opacity(0.28), in: Capsule())
                         .accessibilityLabel("Uses your live location")
                         .accessibilityIdentifier("maptalk.publish-live-location")
-
                         Spacer(minLength: 0)
-
-                        if selectedMedia != nil {
-                            Button(action: presentPlaceCapture) {
-                                Text("Retake")
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(.white)
-                            }
-                            .buttonStyle(ComposerPressStyle())
-                            .accessibilityIdentifier("maptalk.place.retake")
-                        }
-
-                        Button {
-                            presentPlaceLibrary()
-                        } label: {
-                            Image(systemName: "photo.on.rectangle")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 30, height: 30)
-                        }
-                        .buttonStyle(ComposerPressStyle())
-                        .accessibilityLabel("Choose from library")
-                        .accessibilityIdentifier("maptalk.place.library")
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 14)
+                    .padding(12)
+                    Spacer(minLength: 0)
+                }
+                .allowsHitTesting(false)
+
+                if isLoadingMedia {
+                    ProgressView()
+                        .tint(.white)
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
@@ -1229,15 +1299,9 @@ struct MapTalkPublishComposer: View {
     private var nearbyPlaceChoices: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Text("Nearby places")
+                Text(nearbyPlaceSearchQuery.isEmpty ? "Nearby places" : "Search results")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.black.opacity(0.48))
-
-                if isLoadingNearbyPlaces, presentedNearbyPlaces.isEmpty {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .tint(Color.black.opacity(0.44))
-                }
 
                 Spacer(minLength: 0)
             }
@@ -1247,17 +1311,19 @@ struct MapTalkPublishComposer: View {
 
             if presentedNearbyPlaces.isEmpty {
                 VStack(spacing: 10) {
-                    if isLoadingNearbyPlaces {
+                    if isLoadingNearbyPlaces, !isSearchingPlaces,
+                       nearbyPlaceSearchQuery.isEmpty || !hasLiveLocation {
                         ProgressView()
                             .controlSize(.small)
                             .tint(.black)
-                    } else {
+                    } else if !isSearchingPlaces {
                         Image(systemName: "mappin.slash")
                             .font(.system(size: 16, weight: .medium))
                             .foregroundStyle(Color.black.opacity(0.38))
                     }
 
-                    Text(emptyNearbyPlacesMessage)
+                    Text(nearbyPlaceSearchQuery.isEmpty || !hasLiveLocation ? emptyNearbyPlacesMessage
+                        : (isSearchingPlaces ? "Searching nearby…" : "No matching place nearby"))
                         .font(.system(size: 14, weight: .regular))
                         .foregroundStyle(Color.black.opacity(0.52))
                 }
@@ -1273,28 +1339,28 @@ struct MapTalkPublishComposer: View {
                     }
                 }
             }
-
-            placePickerDivider
-
-            Button(action: beginCreatingPlace) {
-                HStack(spacing: 10) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.black)
-                        .frame(width: 18)
-
-                    Text(isCreatingLandmark ? "Edit custom place" : "Create new place")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.black)
-
-                    Spacer(minLength: 0)
-                }
-                .frame(height: 56)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("maptalk.place.create-new")
         }
+    }
+
+    private var createPlaceButton: some View {
+        Button(action: beginCreatingPlace) {
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.black)
+                    .frame(width: 18)
+
+                Text(isCreatingLandmark ? "Edit custom place" : "Create new place")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.black)
+
+                Spacer(minLength: 0)
+            }
+            .frame(height: 56)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("maptalk.place.create-new")
     }
 
     private func nearbyPlaceChoice(_ option: MapTalkNearbyPlaceOption) -> some View {
@@ -1354,7 +1420,7 @@ struct MapTalkPublishComposer: View {
             context.append("In MyMap")
         }
         if context.isEmpty {
-            context.append(option.place.poi.category.displayName)
+            context.append(option.place.poi.directoryKind == .airport ? "Airport" : option.place.poi.category.displayName)
         }
 
         return context.joined(separator: " · ")
@@ -2185,7 +2251,10 @@ struct MapTalkPublishComposer: View {
     private func toggleNearbyPlaceChoices() {
         placeVideoPlayer?.pause()
         isTextFocused = false
-        nearbyPlaceChoiceSnapshot = Array(nearbyPlaces.prefix(8))
+        isPlaceSearchFocused = false
+        nearbyPlaceChoiceSnapshot = nearbyPlaces
+        nearbyPlaceSearchText = ""
+        nearbyPlaceSearchResults = []
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -2198,6 +2267,7 @@ struct MapTalkPublishComposer: View {
     }
 
     private func dismissNearbyPlaceChoices() {
+        isPlaceSearchFocused = false
         withAnimation(.easeOut(duration: 0.14)) {
             isShowingNearbyPlaceChoices = false
         }
@@ -2206,6 +2276,7 @@ struct MapTalkPublishComposer: View {
     private func selectNearbyPlace(_ option: MapTalkNearbyPlaceOption) {
         UISelectionFeedbackGenerator().selectionChanged()
         isTextFocused = false
+        isPlaceSearchFocused = false
         withAnimation(.easeOut(duration: 0.14)) {
             selectedNearbyPlaceOption = option
             isCreatingLandmark = false
@@ -2221,6 +2292,7 @@ struct MapTalkPublishComposer: View {
     private func beginCreatingPlace() {
         UISelectionFeedbackGenerator().selectionChanged()
         isTextFocused = false
+        isPlaceSearchFocused = false
         if isCreatingLandmark, newLandmarkNameDraft.isEmpty {
             newLandmarkNameDraft = landmarkName
             newLandmarkCategoryDraft = landmarkCategory
@@ -2279,24 +2351,17 @@ struct MapTalkPublishComposer: View {
     private func presentPlaceCapture() {
         guard isSubmitting == false, hasUnconfirmedSubmission == false, isLoadingMedia == false else { return }
         placeVideoPlayer?.pause()
+        placeVideoPlayer = nil
+        selectedMedia.map(discard)
+        selectedMedia = nil
+        didFailMediaLoad = false
         isTextFocused = false
         submissionIssue = nil
-#if targetEnvironment(simulator)
-        submissionIssue = "Camera isn't available in Simulator. Use the library button."
-#else
-        let cameraAuthorization = AVCaptureDevice.authorizationStatus(for: .video)
-        if UIImagePickerController.isSourceTypeAvailable(.camera),
-           cameraAuthorization != .denied,
-           cameraAuthorization != .restricted {
-            isShowingPlaceCamera = true
-        } else {
-            submissionIssue = "Camera isn't available. Use the library button."
-        }
-#endif
     }
 
     private func presentPlaceLibrary() {
-        guard isSubmitting == false, hasUnconfirmedSubmission == false, isLoadingMedia == false else { return }
+        guard isSubmitting == false, hasUnconfirmedSubmission == false,
+              isLoadingMedia == false, isPlaceCameraBusy == false else { return }
         placeVideoPlayer?.pause()
         isTextFocused = false
         submissionIssue = nil

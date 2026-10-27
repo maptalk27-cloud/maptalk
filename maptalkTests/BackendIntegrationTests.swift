@@ -258,7 +258,7 @@ struct BackendIntegrationTests {
         let publicationTime = try #require(publishedLater.publishedAt)
         #expect(publishedLater.createdAt == privateVisit.createdAt)
         #expect(publicationTime > privateVisit.createdAt)
-        #expect(publishedLater.expiresAt.timeIntervalSince(publicationTime) == 86_400)
+        #expect(publishedLater.expiresAt.timeIntervalSince(publicationTime) == StoryReadKeys.freshWindow)
         try await reloaded.refresh()
         #expect(reloaded.archive.privatePOIs.isEmpty, "Changing visibility must not undo archive hiding")
         let promotedCheckIn = try #require(reloaded.ownPublicPOIs.first { $0.id == placeID }?
@@ -306,12 +306,12 @@ struct BackendIntegrationTests {
         {"id":"\(recordID)","ownerId":"\(userID)","owner":{"id":"\(userID)","handle":"alice"},
         "kind":"reel","visibility":"public","location":{"latitude":37.3,"longitude":-122.0},
         "caption":"Saved earlier","place":null,"media":[],"createdAt":"2026-10-15T12:00:00.123Z",
-        "publishedAt":"2026-10-17T12:00:00Z","expiresAt":"2026-10-18T12:00:00.000Z"}
+        "publishedAt":"2026-10-17T12:00:00Z","expiresAt":"2026-10-20T12:00:00.000Z"}
         """
         let memory = try BackendAPI.decoder.decode(BackendMemory.self, from: Data(json.utf8))
         let published = try #require(memory.publishedAt)
         #expect(published > memory.createdAt)
-        #expect(memory.expiresAt.timeIntervalSince(published) == 86_400)
+        #expect(memory.expiresAt.timeIntervalSince(published) == StoryReadKeys.freshWindow)
         #expect(memory.id == recordID)
         #expect(memory.owner.id == userID)
         #expect(memory.owner.handle == "alice")

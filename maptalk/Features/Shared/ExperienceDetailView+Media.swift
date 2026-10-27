@@ -8,13 +8,15 @@ extension ExperienceDetailView {
 struct ExperienceMediaGallery: View {
     let items: [MediaDisplayItem]
     let accentColor: Color
+    let isPlaybackActive: Bool
 
     @State private var selection: UUID
     @State private var isLightboxPresented = false
 
-    init(items: [MediaDisplayItem], accentColor: Color) {
+    init(items: [MediaDisplayItem], accentColor: Color, isPlaybackActive: Bool = true) {
         self.items = items
         self.accentColor = accentColor
+        self.isPlaybackActive = isPlaybackActive
         _selection = State(initialValue: items.first?.id ?? UUID())
     }
 
@@ -26,7 +28,8 @@ struct ExperienceMediaGallery: View {
                 if usesGridLayout {
                     LazyVGrid(columns: ExperienceMediaGalleryLayout.gridColumns, spacing: ExperienceMediaGalleryLayout.gridSpacing) {
                         ForEach(items) { item in
-                            MediaCardView(item: item, accentColor: accentColor, mode: .card)
+                            MediaCardView(item: item, accentColor: accentColor, mode: .card,
+                                          isPlaybackActive: isPlaybackActive && selection == item.id && !isLightboxPresented)
                                 .frame(height: ExperienceMediaGalleryLayout.gridItemHeight)
                                 .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                                 .overlay {
@@ -43,7 +46,8 @@ struct ExperienceMediaGallery: View {
                 } else {
                     TabView(selection: $selection) {
                         ForEach(items) { item in
-                            MediaCardView(item: item, accentColor: accentColor, mode: .card)
+                            MediaCardView(item: item, accentColor: accentColor, mode: .card,
+                                          isPlaybackActive: isPlaybackActive && selection == item.id && !isLightboxPresented)
                                 .tag(item.id)
                         }
                     }
@@ -162,10 +166,13 @@ struct MediaLightbox: View {
 
             TabView(selection: $selection) {
                 ForEach(items) { item in
-                    MediaCardView(item: item, accentColor: accentColor, mode: .lightbox)
+                    let isVideo = isVideoItem(item)
+                    MediaCardView(item: item, accentColor: accentColor, mode: .lightbox,
+                                  isPlaybackActive: selection == item.id && isPresented)
                         .tag(item.id)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 40)
+                        .padding(.horizontal, isVideo ? 0 : 20)
+                        .padding(.vertical, isVideo ? 0 : 40)
+                        .ignoresSafeArea(edges: isVideo ? .all : [])
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .automatic))
@@ -190,6 +197,8 @@ struct MediaLightbox: View {
                             .font(.system(size: 32, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.85))
                     }
+                    .accessibilityLabel("Close")
+                    .accessibilityIdentifier("experience.media-lightbox.close")
                 }
                 .padding(.top, 30)
                 .padding(.horizontal, 24)
@@ -201,6 +210,11 @@ struct MediaLightbox: View {
 
     private var currentIndex: Int {
         items.firstIndex(where: { $0.id == selection }) ?? 0
+    }
+
+    private func isVideoItem(_ item: MediaDisplayItem) -> Bool {
+        if case .video = item.content { return true }
+        return false
     }
 
     private var summaryText: String? {
@@ -238,6 +252,7 @@ struct MediaCardView: View {
     let item: MediaDisplayItem
     let accentColor: Color
     let mode: Mode
+    var isPlaybackActive = true
 
     var body: some View {
         ZStack {
@@ -301,13 +316,14 @@ struct MediaCardView: View {
     }
 
     private func videoView(url: URL, poster: URL?, metadata: RealPost.Attachment.VideoMetadata?) -> some View {
-        let shouldFit = metadata?.isStandardLandscape == false
+        let shouldFit = mode == .lightbox || metadata?.isStandardLandscape == false
         return AutoPlayVideoView(
             url: url,
             poster: poster,
             accentColor: accentColor,
             mode: mode,
-            usesAspectFit: shouldFit
+            usesAspectFit: shouldFit,
+            isPlaybackActive: isPlaybackActive
         )
     }
 
@@ -350,7 +366,9 @@ struct AutoPlayVideoView: View {
     let showsPlaceholderBadge: Bool
     let usesAspectFit: Bool
     let isMuted: Bool
+    let isPlaybackActive: Bool
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isVideoVisible = false
 
     init(
@@ -360,7 +378,8 @@ struct AutoPlayVideoView: View {
         mode: MediaCardView.Mode,
         showsPlaceholderBadge: Bool = true,
         usesAspectFit: Bool = false,
-        isMuted: Bool = true
+        isMuted: Bool? = nil,
+        isPlaybackActive: Bool = true
     ) {
         self.url = url
         self.poster = poster
@@ -368,19 +387,28 @@ struct AutoPlayVideoView: View {
         self.mode = mode
         self.showsPlaceholderBadge = showsPlaceholderBadge
         self.usesAspectFit = usesAspectFit
-        self.isMuted = isMuted
+        self.isMuted = isMuted ?? (mode == .card)
+        self.isPlaybackActive = isPlaybackActive
     }
 
     var body: some View {
-        ZStack {
-            posterLayer
+        GeometryReader { geometry in
+            ZStack {
+                posterLayer
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .clipped()
 
-            LoopingVideoPlayerView(
-                url: url,
-                isMuted: isMuted,
-                shouldPlay: isVideoVisible,
-                videoGravity: usesAspectFit ? .resizeAspect : .resizeAspectFill
-            )
+                LoopingVideoPlayerView(
+                    url: url,
+                    isMuted: isMuted,
+                    shouldPlay: VideoPlaybackPolicy.shouldPlay(
+                        isVisible: isVideoVisible,
+                        isSelected: isPlaybackActive,
+                        isSceneActive: scenePhase == .active
+                    ),
+                    videoGravity: usesAspectFit ? .resizeAspect : .resizeAspectFill
+                )
+                .frame(width: geometry.size.width, height: geometry.size.height)
                 .opacity(isVideoVisible ? 1 : 0)
                 .onAppear {
                     withAnimation(.easeInOut(duration: 0.25)) {
@@ -391,11 +419,14 @@ struct AutoPlayVideoView: View {
                     isVideoVisible = false
                 }
 
-            LinearGradient(
-                colors: [.clear, .black.opacity(mode == .lightbox ? 0.25 : 0.35)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+                LinearGradient(
+                    colors: [.clear, .black.opacity(mode == .lightbox ? 0.25 : 0.35)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
         }
     }
 
@@ -480,6 +511,8 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
         private var player: AVQueuePlayer?
         private var looper: AVPlayerLooper?
         private var currentURL: URL?
+        private var isMuted = true
+        private let audioOwner = UUID()
 
         override static var layerClass: AnyClass {
             AVPlayerLayer.self
@@ -495,15 +528,19 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
         func configure(with url: URL, muted: Bool, videoGravity: AVLayerVideoGravity) {
             playerLayer.videoGravity = videoGravity
             guard currentURL != url else {
-                player?.isMuted = muted
+                isMuted = muted
                 return
             }
             cleanup()
             currentURL = url
+            isMuted = muted
 
             let item = AVPlayerItem(url: url)
             let queuePlayer = AVQueuePlayer()
-            queuePlayer.isMuted = muted
+            // Do not expose audio until the selected, foreground player has
+            // successfully acquired its short-lived playback audio session.
+            queuePlayer.isMuted = true
+            queuePlayer.audiovisualBackgroundPlaybackPolicy = .pauses
             let looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
 
             playerLayer.player = queuePlayer
@@ -516,14 +553,28 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
         func setPlaying(_ shouldPlay: Bool) {
             guard let player else { return }
             if shouldPlay {
+                if isMuted {
+                    if !player.isMuted { player.pause() }
+                    player.isMuted = true
+                    VideoPlaybackAudioSession.shared.release(owner: audioOwner)
+                } else {
+                    let acquired = VideoPlaybackAudioSession.shared.acquire(owner: audioOwner) { [weak self] in
+                        self?.setPlaying(false)
+                    }
+                    player.isMuted = !acquired
+                }
                 player.play()
             } else {
                 player.pause()
+                player.isMuted = true
+                VideoPlaybackAudioSession.shared.release(owner: audioOwner)
             }
         }
 
         func cleanup() {
             player?.pause()
+            player?.isMuted = true
+            VideoPlaybackAudioSession.shared.release(owner: audioOwner)
             playerLayer.player = nil
             player = nil
             looper = nil

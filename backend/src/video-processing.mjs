@@ -21,9 +21,23 @@ export class VideoProcessingError extends Error {
   }
 }
 const invalid = () => new VideoProcessingError(422, 'invalid_video',
-  'This video is damaged or incomplete. Please choose another video.');
+  "This video couldn't be processed. Please try again.");
 const unsupported = () => new VideoProcessingError(415, 'unsupported_video',
   'Choose an MP4 video exported as H.264 with AAC audio.');
+
+export function videoProcessingFailure(error) {
+  if (error instanceof VideoProcessingError) return error;
+  if (error.killed || error.code === 'ETIMEDOUT' || error.signal === 'SIGKILL') {
+    return new VideoProcessingError(503, 'video_processing_timeout',
+      'Video processing took too long. Your upload is saved and can be retried.');
+  }
+  if (['ENOENT', 'EACCES', 'EPERM', 'EAGAIN', 'ENOMEM', 'ENOSPC', 'EMFILE', 'ENFILE', 'EIO',
+    'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'].includes(error.code)) {
+    return new VideoProcessingError(503, 'video_processing_unavailable',
+      'Video processing is temporarily unavailable. Please retry shortly.');
+  }
+  return invalid();
+}
 
 // Reject truncation before calling a native decoder. This is deliberately a
 // narrow, self-contained MP4 contract, not a generic media/playlist importer.
@@ -71,21 +85,29 @@ async function tool(name, args, timeout) {
     if (result.stderr.trim()) throw invalid();
     return result;
   } catch (error) {
-    if (error.code === 'ENOENT') throw new VideoProcessingError(503, 'video_processing_unavailable',
-      'Video uploads are temporarily unavailable. Your video can be retried later.');
     // Never return native logs, embedded metadata or file paths to callers.
-    throw invalid();
+    throw videoProcessingFailure(error);
   }
 }
 
 async function probe(path) {
-  const result = await tool('ffprobe', [...inputOptions, '-show_entries',
-    'format=duration:stream=codec_type,codec_name,width,height,pix_fmt,duration,avg_frame_rate,channels,sample_rate:stream_disposition=attached_pic:stream_side_data_list',
+  const result = await tool('ffprobe', [...inputOptions, '-count_packets', '-show_entries',
+    'format=duration:stream=codec_type,codec_name,width,height,pix_fmt,duration,avg_frame_rate,channels,sample_rate,time_base,nb_read_packets:stream_disposition=attached_pic:stream_side_data_list',
     '-of', 'json', path], 10_000);
   return JSON.parse(result.stdout);
 }
 
-export function validateVideoMetadata(metadata) {
+function preservationTolerance(track) {
+  const [numerator, denominator] = String(track?.time_base).split('/').map(Number);
+  const tick = Number.isSafeInteger(numerator) && numerator > 0
+    && Number.isSafeInteger(denominator) && denominator > 0 ? numerator / denominator : 0;
+  // MP4 edit lists can end between B-frame decode ticks. FFmpeg 5 can round
+  // that boundary by one source tick (e.g. 1/600 s on an iPhone). Never allow
+  // frame-sized fuzz or an untrusted coarse time base to enlarge the budget.
+  return Math.max(0.001, Math.min(tick, 0.002)) + 0.000001;
+}
+
+export function validateVideoMetadata(metadata, { normalizationSource } = {}) {
   const streams = metadata?.streams;
   if (!Array.isArray(streams)) throw invalid();
   const video = streams.filter(stream => stream.codec_type === 'video');
@@ -109,7 +131,9 @@ export function validateVideoMetadata(metadata) {
   const containerDuration = Number(metadata.format?.duration);
   if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(containerDuration) || containerDuration <= 0) throw invalid();
   // AAC can add a final fraction of a frame; the video itself remains <=60 s.
-  if (duration > VIDEO_LIMITS.durationSeconds + 0.001 || containerDuration > VIDEO_LIMITS.durationSeconds + 0.1
+  const remuxRounding = normalizationSource
+    ? preservationTolerance(normalizationSource.streams?.find(stream => stream.codec_type === 'video')) : 0;
+  if (duration > VIDEO_LIMITS.durationSeconds + 0.001 + remuxRounding || containerDuration > VIDEO_LIMITS.durationSeconds + 0.1
     || audio.some(stream => Number(stream.duration) > VIDEO_LIMITS.durationSeconds + 0.1)) {
     throw new VideoProcessingError(413, 'video_duration_exceeded', 'Choose a video up to 60 seconds long.');
   }
@@ -119,6 +143,28 @@ export function validateVideoMetadata(metadata) {
   if (audio.some(stream => stream.codec_name !== 'aac' || ![1, 2].includes(stream.channels)
     || !Number.isFinite(Number(stream.sample_rate)) || Number(stream.sample_rate) < 8000
     || Number(stream.sample_rate) > 48000)) throw unsupported();
+}
+
+export function validateVideoPreservation(original, normalized) {
+  if (!Array.isArray(original?.streams) || !Array.isArray(normalized?.streams)) throw invalid();
+  for (const type of ['video', 'audio']) {
+    const before = original.streams.find(stream => stream.codec_type === type);
+    const after = normalized.streams.find(stream => stream.codec_type === type);
+    // Packet counts prove that a resource limit did not silently drop the end.
+    // Duration may differ only by a tightly bounded source-clock rounding.
+    if (Boolean(before) !== Boolean(after)
+      || (before && (![Number(before.duration), Number(after.duration)].every(Number.isFinite)
+        || Math.abs(Number(before.duration) - Number(after.duration)) > preservationTolerance(before)))) throw invalid();
+    if (before) {
+      const beforePackets = Number(before.nb_read_packets);
+      const afterPackets = Number(after.nb_read_packets);
+      if (!Number.isSafeInteger(beforePackets) || beforePackets < 1 || beforePackets !== afterPackets) throw invalid();
+    }
+    if (type === 'video' && before) {
+      const rotation = track => ((track.side_data_list?.find(side => side.rotation !== undefined)?.rotation ?? 0) % 360 + 360) % 360;
+      if (Math.abs(rotation(before) - rotation(after)) > 0.001) throw invalid();
+    }
+  }
 }
 
 /** Validate every frame, then create a fresh fast-start, metadata-free MP4.
@@ -148,31 +194,30 @@ export async function normalizeVideo(bytes, mimeType) {
       '-threads', '1', '-filter_threads', '1', '-progress', 'pipe:1', '-nostats', '-f', 'null', '-'], 45_000);
     const frames = [...decoded.stdout.matchAll(/^frame=(\d+)$/gm)].map(match => Number(match[1]));
     if (!frames.length || frames.at(-1) < 1 || frames.at(-1) > VIDEO_LIMITS.durationSeconds * VIDEO_LIMITS.framesPerSecond + 1) throw invalid();
+    // Apple exports can put H.264 reorder padding in the last packet's
+    // duration and trim it with an MP4 edit list. A plain remux loses that
+    // presentation end, falsely changing a valid clip's duration. Preserve the
+    // already-validated picture timeline without dropping/re-encoding frames,
+    // changing PTS/DTS, or touching AAC priming and audio packet durations.
+    const videoDuration = Number(original.streams.find(stream => stream.codec_type === 'video').duration);
+    const videoFilters = `filter_units=remove_types=6,setts=pts=PTS:dts=DTS:duration='min(DURATION,max(STARTPTS+${videoDuration}/TB-PTS,0))'`;
     await tool('ffmpeg', ['-nostdin', ...inputOptions, '-i', input,
-      '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-bsf:v', 'filter_units=remove_types=6',
+      '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-bsf:v', videoFilters,
       '-map_metadata', '-1', '-map_metadata:s', '-1', '-map_chapters', '-1',
-      '-movflags', '+faststart', '-fs', String(VIDEO_LIMITS.outputBytes + 1), '-f', 'mp4', output], 15_000);
+      // The default 1 kHz movie/edit-list clock can add >1 ms on FFmpeg 5.
+      // Keep sub-millisecond source timing instead of loosening validation.
+      '-movie_timescale', '1000000', '-movflags', '+faststart',
+      '-fs', String(VIDEO_LIMITS.outputBytes + 1), '-f', 'mp4', output], 15_000);
     const information = await stat(output);
     if (information.size > VIDEO_LIMITS.outputBytes) throw new VideoProcessingError(413, 'video_too_large', 'Choose a video smaller than 20 MiB.');
     const normalized = await probe(output);
-    validateVideoMetadata(normalized);
-    for (const type of ['video', 'audio']) {
-      const before = original.streams.find(stream => stream.codec_type === type);
-      const after = normalized.streams.find(stream => stream.codec_type === type);
-      // A resource limit must reject, never silently truncate someone's video.
-      if (Boolean(before) !== Boolean(after)
-        || (before && Math.abs(Number(before.duration) - Number(after.duration)) > 0.001)) throw invalid();
-      if (type === 'video' && before) {
-        const rotation = track => ((track.side_data_list?.find(side => side.rotation !== undefined)?.rotation ?? 0) % 360 + 360) % 360;
-        if (Math.abs(rotation(before) - rotation(after)) > 0.001) throw invalid();
-      }
-    }
+    validateVideoPreservation(original, normalized);
+    validateVideoMetadata(normalized, { normalizationSource: original });
     const result = await readFile(output);
     validateVideoContainer(result);
     return { bytes: result, mimeType: 'video/mp4' };
   } catch (error) {
-    if (error instanceof VideoProcessingError) throw error;
-    throw invalid();
+    throw videoProcessingFailure(error);
   } finally {
     try { if (directory) await rm(directory, { recursive: true, force: true }); }
     finally { processing--; }

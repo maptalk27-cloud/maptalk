@@ -442,9 +442,9 @@ private struct POICategoryMarker: View {
 
 extension RatedPOI {
     var hasRecentPhotoShare: Bool {
-        let recentThreshold = Date().addingTimeInterval(-60 * 60 * 24)
+        let recentThreshold = Date().addingTimeInterval(-StoryReadKeys.freshWindow)
         return checkIns.contains { checkIn in
-            guard checkIn.createdAt >= recentThreshold else { return false }
+            guard checkIn.activityDate > recentThreshold else { return false }
             return checkIn.media.contains { media in
                 if case .photo = media.kind { return true }
                 return false

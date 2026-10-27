@@ -62,7 +62,7 @@ struct BackendOutboxTests {
         restored.resumeVerifiedConnection()
         await restored.syncPendingPublications()
         let videoUploads = context.fixture.uploads.filter { $0.mimeType == "video/mp4" }
-        #expect(videoUploads.count == 2)
+        #expect(videoUploads.count == 1, "The acknowledged video bytes must not be uploaded again after a lost reply")
         #expect(Set(videoUploads.map(\.key)).count == 1)
         #expect(videoUploads.allSatisfy { $0.bytes == bytes })
         #expect(restored.pendingPublications.isEmpty)
@@ -109,6 +109,7 @@ struct BackendOutboxTests {
         restored.resumeVerifiedConnection()
         await restored.syncPendingPublications()
         #expect(context.fixture.savedMediaCount == 0)
+        #expect(context.fixture.stagedVideoCount == 0)
         #expect(context.fixture.inputs.isEmpty)
         #expect(context.fixture.cancelledUploadKeys == Set(context.fixture.uploads.map(\.key)))
         #expect(!FileManager.default.fileExists(atPath: url.path))
@@ -454,6 +455,350 @@ struct BackendOutboxTests {
         #expect(restored.feedReels.value.map(\.id) == [id])
     }
 
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func interruptedVideoRetriesOnlyTheUnacknowledgedPart(lostAcknowledgment: Bool) async throws {
+        let context = try OutboxTestContext(uploadOutcomes: [.success,
+            lostAcknowledgment ? .lostResponse : .interruptedBeforeCommit])
+        defer { context.finish() }
+        let bytes = Data((0..<(1_024 * 1_024 + 17)).map { UInt8($0 % 251) })
+        let file = context.directory.appendingPathComponent("chunk-test.mp4")
+        try bytes.write(to: file)
+        let id = UUID()
+        do {
+            _ = try await context.api.uploadVideo(at: file, idempotencyKey: id)
+            Issue.record("The second chunk must interrupt the first attempt")
+        } catch { #expect(error is BackendClientError) }
+        #expect(context.fixture.chunkOffsets == [0, 524_288])
+        #expect(context.fixture.savedMediaCount == 0)
+        // No local offset is required: a new API instance reconciles with the
+        // same stable upload ID, exactly as after process recreation.
+        let restoredAPI = BackendAPI(baseURL: context.api.baseURL, session: context.session)
+        restoredAPI.token = "isolated-test-session"
+        var progress: [Double] = []
+        let saved = try await restoredAPI.uploadVideo(at: file, idempotencyKey: id,
+            onProgress: { progress.append($0) })
+        #expect(saved.byteCount == bytes.count)
+        #expect(context.fixture.uploadStarts == [id, id])
+        #expect(context.fixture.chunkOffsets == (lostAcknowledgment
+            ? [0, 524_288, 1_048_576] : [0, 524_288, 524_288, 1_048_576]))
+        #expect(progress.first == Double(lostAcknowledgment ? 1_048_576 : 524_288) / Double(bytes.count))
+        #expect(progress.last == 1)
+        #expect(context.fixture.savedMediaCount == 1)
+        #expect(context.fixture.requests.allSatisfy { $0 != "POST /v1/media" })
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func lostVideoCompletionReplyReconcilesWithoutSendingAnyMoreBytes() async throws {
+        let context = try OutboxTestContext()
+        defer { context.finish() }
+        context.fixture.setFinishOutcomes([.lostResponse])
+        let file = context.directory.appendingPathComponent("complete-test.mp4")
+        try Data(repeating: 9, count: 524_289).write(to: file)
+        let id = UUID()
+        do {
+            _ = try await context.api.uploadVideo(at: file, idempotencyKey: id)
+            Issue.record("The committed completion reply should be lost")
+        } catch { #expect(error is BackendClientError) }
+        #expect(context.fixture.savedMediaCount == 1)
+        let chunksBefore = context.fixture.chunkOffsets
+        let saved = try await context.api.uploadVideo(at: file, idempotencyKey: id)
+        #expect(saved.mimeType == "video/mp4")
+        #expect(context.fixture.chunkOffsets == chunksBefore)
+        #expect(context.fixture.requests.filter { $0.hasSuffix("/complete") }.count == 1)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func quotaFailureExplainsTheProblemAndDoesNotBlockTheNextPost() async throws {
+        let context = try OutboxTestContext()
+        defer { context.finish() }
+        context.fixture.setFinishOutcomes([.http(413, "media_quota")])
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let file = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let videoID = UUID()
+        let photoID = UUID()
+        _ = try await store.enqueuePublish(.reel(.init(text: "Full video storage", attachments: [
+            .init(kind: .video(url: file, poster: try context.photo()))], bubbleSource: nil)),
+            audience: .livePublic, location: location, requestID: videoID)
+        _ = try await store.enqueuePublish(draft("Independent photo", photo: try context.photo()),
+            audience: .livePublic, location: location, requestID: photoID)
+        await store.syncPendingPublications()
+        guard case let .failed(reason) = store.pendingPublications[videoID] else {
+            Issue.record("Quota must be actionable, not silently retried"); return
+        }
+        #expect(reason.contains("storage is full"))
+        #expect(reason.contains("saved on this phone"))
+        #expect(store.pendingPublications[photoID] == nil)
+        #expect(context.fixture.inputs.map(\.id) == [photoID])
+        let count = context.fixture.requests.count
+        await store.syncPendingPublications()
+        #expect(context.fixture.requests.count == count, "Permanent failure must wait for explicit retry")
+        let restored = context.makeStore()
+        #expect(await restored.restoreCachedState())
+        #expect(restored.pendingPublications[videoID] == .failed(reason))
+        #expect(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["invalid_video", "unsupported_video", "unexpected_decoder_reason"])
+    func videoRejectionKeepsLocalPreviewWithoutSurfacingServerDiagnostics(code: String) async throws {
+        let context = try OutboxTestContext()
+        defer { context.finish() }
+        context.fixture.setFinishOutcomes([.http(422, code)])
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let source = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let id = UUID()
+        _ = try await store.enqueuePublish(.reel(.init(text: "Still mine to watch", attachments: [
+            .init(kind: .video(url: source, poster: try context.photo()))], bubbleSource: nil)),
+            audience: .livePublic, location: location, requestID: id)
+        await store.syncPendingPublications()
+        guard case let .failed(reason) = store.pendingPublications[id] else {
+            Issue.record("Expected a retained failed publication"); return
+        }
+        #expect(reason == "Couldn't publish yet. Your post is saved on this phone. Please try again.")
+        #expect(!reason.contains(code))
+        #expect(store.feedReels.value.isEmpty, "Local preview must not pretend the post is public")
+
+        context.fixture.setOffline(true)
+        let restored = context.makeStore()
+        #expect(await restored.restoreCachedState())
+        #expect(restored.pendingPublications[id] == .failed(reason))
+        let reel = try #require(restored.archive.privateReels.first(where: { $0.id == id }))
+        guard case let .video(url, poster) = reel.attachments.first?.kind else {
+            Issue.record("Failed upload must keep its normal local video preview"); return
+        }
+        #expect(url.isFileURL)
+        #expect(try Data(contentsOf: url) == Data(contentsOf: source))
+        #expect(FileManager.default.fileExists(atPath: try #require(poster).path))
+        #expect(context.fixture.inputs.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func transientVideoInterruptionDoesNotBlockAnIndependentPost() async throws {
+        let context = try OutboxTestContext(uploadOutcomes: [.lostResponse])
+        defer { context.finish() }
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let file = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let videoID = UUID()
+        let nextID = UUID()
+        _ = try await store.enqueuePublish(.reel(.init(text: "Interrupted", attachments: [
+            .init(kind: .video(url: file, poster: try context.photo()))], bubbleSource: nil)),
+            audience: .livePublic, location: location, requestID: videoID)
+        _ = try await store.enqueuePublish(draft("This should not wait"), audience: .livePublic,
+            location: location, requestID: nextID)
+        await store.syncPendingPublications()
+        #expect(store.pendingPublications[videoID] == .waiting)
+        #expect(store.pendingPublications[nextID] == nil)
+        #expect(context.fixture.inputs.map(\.id) == [nextID])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func oldServerNeverFallsBackToAWholeVideoUpload() async throws {
+        let context = try OutboxTestContext()
+        defer { context.finish() }
+        context.fixture.setLegacyOnly(true)
+        let file = context.directory.appendingPathComponent("legacy-server.mp4")
+        try Data(repeating: 1, count: 12).write(to: file)
+        do {
+            _ = try await context.api.uploadVideo(at: file, idempotencyKey: UUID())
+            Issue.record("An older server cannot acknowledge resumable uploads")
+        } catch { #expect(error.localizedDescription.contains("server update")) }
+        #expect(context.fixture.requests.count == 1)
+        #expect(context.fixture.requests.allSatisfy { $0.hasPrefix("PUT /v1/media/uploads/") })
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func cancellingBetweenChunksStopsBeforeCompletionAndTombstonePreventsResurrection() async throws {
+        let context = try OutboxTestContext()
+        defer { context.finish() }
+        let file = context.directory.appendingPathComponent("cancel-chunks.mp4")
+        try Data(repeating: 3, count: 1_048_576).write(to: file)
+        let id = UUID()
+        var cancelled = false
+        do {
+            _ = try await context.api.uploadVideo(at: file, idempotencyKey: id,
+                checkActive: { if cancelled { throw CancellationError() } },
+                onProgress: { if $0 > 0 { cancelled = true } })
+            Issue.record("Cancellation must stop between chunks")
+        } catch { #expect(error is CancellationError) }
+        #expect(context.fixture.chunkOffsets == [0])
+        #expect(context.fixture.savedMediaCount == 0)
+        #expect(context.fixture.requests.allSatisfy { !$0.hasSuffix("/complete") })
+        try await context.api.cancelPhotoUpload(key: id)
+        #expect(context.fixture.stagedVideoCount == 0)
+        do {
+            _ = try await context.api.uploadVideo(at: file, idempotencyKey: id)
+            Issue.record("Cancelled upload identity must never restart")
+        } catch {
+            guard case let BackendClientError.http(status, _, code) = error else { Issue.record("Expected HTTP cancellation"); return }
+            #expect(status == 410)
+            #expect(code == "media_deleted")
+        }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func mixedAttachmentProgressNeverRestartsForTheNextVideo() async throws {
+        let context = try OutboxTestContext()
+        defer { context.finish() }
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let file = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let photo = try context.photo()
+        let id = UUID()
+        var progress: [Double] = []
+        var statuses: [PendingPublicationStatus] = []
+        let progressObserver = store.$publicationProgress.sink { values in
+            if let value = values[id] { progress.append(value) }
+        }
+        let statusObserver = store.$pendingPublications.sink { values in
+            if let value = values[id] { statuses.append(value) }
+        }
+        defer { progressObserver.cancel(); statusObserver.cancel() }
+        _ = try await store.enqueuePublish(.reel(.init(text: "Mixed progress", attachments: [
+            .init(kind: .video(url: file, poster: photo)), .init(kind: .photo(photo)),
+            .init(kind: .video(url: file, poster: photo))], bubbleSource: nil)),
+            audience: .livePublic, location: location, requestID: id)
+        await store.syncPendingPublications()
+        #expect(store.pendingPublications[id] == nil)
+        #expect(zip(progress, progress.dropFirst()).allSatisfy { pair in pair.0 <= pair.1 })
+        #expect(progress.contains(1.0 / 3.0))
+        #expect(progress.contains(2.0 / 3.0))
+        #expect(progress.last == 1)
+        #expect(statuses.contains(.processing))
+        #expect(statuses.last == .uploading, "Video processing must end before post confirmation")
+        #expect(store.publicationProgress[id] == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func automaticSchedulerRetriesWithoutAManualSyncOrNetworkEvent() async throws {
+        let context = try OutboxTestContext(uploadOutcomes: [.lostResponse, .success])
+        defer { context.finish() }
+        let store = context.makeStore(automaticallySync: true)
+        try await store.cacheVerifiedIdentity()
+        let id = UUID()
+        _ = try await store.enqueuePublish(draft("Automatic retry", photo: try context.photo()),
+            audience: .livePublic, location: location, requestID: id)
+        #expect(await eventually { context.fixture.inputs.map(\.id) == [id] && store.pendingPublications[id] == nil })
+        #expect(context.fixture.uploads.count == 2)
+        #expect(Set(context.fixture.uploads.map(\.key)).count == 1)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func automaticSchedulerStopsPermanentFailuresAndRetryTargetsOnlyOnePost() async throws {
+        let context = try OutboxTestContext(uploadOutcomes: [.http(413, "media_quota"), .http(413, "media_quota")])
+        defer { context.finish() }
+        let store = context.makeStore(automaticallySync: true)
+        try await store.cacheVerifiedIdentity()
+        let firstID = UUID()
+        let secondID = UUID()
+        _ = try await store.enqueuePublish(draft("First full", photo: try context.photo()),
+            audience: .livePublic, location: location, requestID: firstID)
+        _ = try await store.enqueuePublish(draft("Second full", photo: try context.photo()),
+            audience: .livePublic, location: location, requestID: secondID)
+        #expect(await eventually {
+            if case .failed = store.pendingPublications[firstID], case .failed = store.pendingPublications[secondID] { return true }
+            return false
+        })
+        let attempts = context.fixture.requests.count
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(context.fixture.requests.count == attempts)
+        store.retryPendingPublications(id: firstID)
+        #expect(await eventually { context.fixture.inputs.map(\.id) == [firstID] && store.pendingPublications[firstID] == nil })
+        guard case .failed = store.pendingPublications[secondID] else {
+            Issue.record("Retrying one row must not retry a different failed post"); return
+        }
+        #expect(context.fixture.uploads.count == 3)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func cancelledCleanupRefusalBacksOffInsteadOfSpinning() async throws {
+        let context = try OutboxTestContext(uploadOutcomes: [.lostResponse])
+        defer { context.finish() }
+        context.fixture.setCancellationOutcomes([.http(409, "media_in_use")])
+        let store = context.makeStore(automaticallySync: true, retryDelay: { _ in 0.3 })
+        try await store.cacheVerifiedIdentity()
+        let id = UUID()
+        _ = try await store.enqueuePublish(draft("Cancel after lost reply", photo: try context.photo()),
+            audience: .livePublic, location: location, requestID: id)
+        #expect(await eventually { context.fixture.uploads.count == 1 && store.pendingPublications[id] == .waiting })
+        try await store.deletePost(memoryID: id)
+        #expect(await eventually { context.fixture.cancellationAttempts == 1 })
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(context.fixture.cancellationAttempts == 1, "Cleanup refusals must not trigger immediate retries")
+        #expect(store.hasPendingSyncWork, "The cancellation tombstone must survive until acknowledged")
+        #expect(await eventually { !store.hasPendingSyncWork })
+        #expect(context.fixture.cancellationAttempts == 2)
+        #expect(context.fixture.savedMediaCount == 0)
+        #expect(store.pendingPublications.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func interruptedChunkBodyRemainsRetryableInsteadOfPermanentlyFailingTheVideo() async throws {
+        let context = try OutboxTestContext(uploadOutcomes: [.http(400, "incomplete_body")])
+        defer { context.finish() }
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let file = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let id = UUID()
+        _ = try await store.enqueuePublish(.reel(.init(text: "Interrupted body", attachments: [
+            .init(kind: .video(url: file, poster: try context.photo()))], bubbleSource: nil)),
+            audience: .livePublic, location: location, requestID: id)
+        await store.syncPendingPublications()
+        #expect(store.pendingPublications[id] == .waiting)
+        #expect(context.fixture.inputs.isEmpty)
+        await store.syncPendingPublications()
+        #expect(store.pendingPublications[id] == nil)
+        #expect(context.fixture.chunkOffsets == [0, 0])
+        #expect(context.fixture.inputs.map(\.id) == [id])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func interruptedRetryKeepsAcknowledgedProgressWhileReconciliationIsWaiting() async throws {
+        let context = try OutboxTestContext()
+        defer { context.finish() }
+        context.fixture.setFinishOutcomes([.interruptedBeforeCommit])
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let file = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: file) }
+        let photo = try context.photo()
+        let id = UUID()
+        _ = try await store.enqueuePublish(.reel(.init(text: "Keep progress while reconnecting", attachments: [
+            .init(kind: .video(url: file, poster: photo)), .init(kind: .photo(photo))], bubbleSource: nil)),
+            audience: .livePublic, location: location, requestID: id)
+        await store.syncPendingPublications()
+        #expect(store.pendingPublications[id] == .waiting)
+        #expect(store.publicationProgress[id] == 0.5)
+        context.fixture.holdNextUploadStart()
+        let retry = Task { await store.syncPendingPublications() }
+        defer { retry.cancel(); context.fixture.releaseHeldUploadStarts() }
+        let isHeld = await eventually { context.fixture.heldUploadStartCount == 1 }
+        #expect(isHeld)
+        guard isHeld else { return }
+        #expect(store.pendingPublications[id] == .uploading)
+        #expect(store.publicationProgress[id] == 0.5, "A slow reconciliation must not flash back to 0%")
+        context.fixture.releaseHeldUploadStarts()
+        await retry.value
+        #expect(store.pendingPublications[id] == nil)
+        #expect(store.publicationProgress[id] == nil)
+        #expect(context.fixture.inputs.map(\.id) == [id])
+        #expect(context.fixture.chunkOffsets == [0], "Confirmed video bytes must not be resent")
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition(), Date() < deadline {
+            do { try await Task.sleep(for: .milliseconds(20)) } catch { return false }
+        }
+        return condition()
+    }
+
     private func draft(_ caption: String, photo: URL? = nil) -> MapTalkPublishDraft {
         .reel(.init(text: caption, attachments: photo.map { [.init(kind: .photo($0))] } ?? [], bubbleSource: nil))
     }
@@ -485,9 +830,11 @@ private final class OutboxTestContext {
         api.token = "isolated-test-session"
     }
 
-    func makeStore() -> BackendStore {
+    func makeStore(automaticallySync: Bool = false,
+                   retryDelay: @escaping @Sendable (Int) -> TimeInterval = { _ in 0.03 }) -> BackendStore {
         let store = BackendStore(user: .init(id: fixture.userID, handle: "fresh_identity", avatarURL: nil),
-            api: api, storageDirectory: directory, automaticallySync: false)
+            api: api, storageDirectory: directory, automaticallySync: automaticallySync,
+            observesConnectivity: false, retryDelay: retryDelay)
         stores.append(store)
         return store
     }
@@ -519,8 +866,14 @@ private final class OutboxTestContext {
 }
 
 private final class OutboxFixture: @unchecked Sendable {
-    enum Outcome { case success, lostResponse }
+    enum Outcome { case success, lostResponse, interruptedBeforeCommit, http(Int, String) }
     struct Upload { let key: UUID; let bytes: Data; let mimeType: String }
+    struct VideoStage {
+        let byteCount: Int
+        let hash: String
+        var bytes = Data()
+        var media: BackendMedia?
+    }
     let userID = UUID()
     let canonicalPlaceID = UUID()
     private let lock = NSLock()
@@ -531,12 +884,26 @@ private final class OutboxFixture: @unchecked Sendable {
     private var postInputs: [BackendMemoryInput] = []
     private var requestLog: [String] = []
     private var media: [UUID: BackendMedia] = [:]
+    private var videoStages: [UUID: VideoStage] = [:]
+    private var offsets: [Int] = []
+    private var finishOutcomes: [Outcome] = []
+    private var cancellationOutcomes: [Outcome] = []
+    private var cancellationRequestCount = 0
+    private var starts: [UUID] = []
+    private var legacyOnly = false
+    private var shouldHoldNextUploadStart = false
+    private var heldUploadStarts: [(OutboxURLProtocol, Data)] = []
     private var memories: [UUID: BackendMemory] = [:]
     private var places: [UUID: BackendPlace] = [:]
     private var placeSources: [UUID: UUID] = [:]
     private var cancelled: Set<UUID> = []
     private var cancelledUploads: Set<UUID> = []
     var uploads: [Upload] { lock.withLock { uploadAttempts } }
+    var chunkOffsets: [Int] { lock.withLock { offsets } }
+    var uploadStarts: [UUID] { lock.withLock { starts } }
+    var stagedVideoCount: Int { lock.withLock { videoStages.count } }
+    var cancellationAttempts: Int { lock.withLock { cancellationRequestCount } }
+    var heldUploadStartCount: Int { lock.withLock { heldUploadStarts.count } }
     var inputs: [BackendMemoryInput] { lock.withLock { postInputs } }
     var requests: [String] { lock.withLock { requestLog } }
     var savedMediaCount: Int { lock.withLock { media.count } }
@@ -551,6 +918,18 @@ private final class OutboxFixture: @unchecked Sendable {
     }
 
     func setOffline(_ value: Bool) { lock.withLock { offline = value } }
+    func setFinishOutcomes(_ value: [Outcome]) { lock.withLock { finishOutcomes = value } }
+    func setCancellationOutcomes(_ value: [Outcome]) { lock.withLock { cancellationOutcomes = value } }
+    func setLegacyOnly(_ value: Bool) { lock.withLock { legacyOnly = value } }
+    func holdNextUploadStart() { lock.withLock { shouldHoldNextUploadStart = true } }
+    func releaseHeldUploadStarts() {
+        let held = lock.withLock {
+            let result = heldUploadStarts
+            heldUploadStarts.removeAll()
+            return result
+        }
+        for (operation, response) in held { operation.respond(status: 200, data: response) }
+    }
 
     func handle(_ operation: OutboxURLProtocol) {
         let request = operation.request
@@ -562,7 +941,86 @@ private final class OutboxFixture: @unchecked Sendable {
         }
         if isOffline { operation.fail(URLError(.notConnectedToInternet)); return }
         do {
-            if method == "POST", path == "/v1/media" {
+            if path.hasPrefix("/v1/media/uploads/") {
+                if lock.withLock({ legacyOnly }) {
+                    operation.respond(status: 404, data: Data()); return
+                }
+                let components = path.split(separator: "/")
+                guard components.count >= 4, let key = UUID(uuidString: String(components[3])) else {
+                    operation.respond(status: 400, data: Data()); return
+                }
+                if lock.withLock({ cancelledUploads.contains(key) }) {
+                    operation.respond(status: 410, data: errorData("media_deleted")); return
+                }
+                if method == "PUT" {
+                    struct Input: Decodable { let mimeType: String; let byteCount: Int; let sha256: String }
+                    let input = try JSONDecoder().decode(Input.self, from: body(of: request))
+                    let stage = lock.withLock {
+                        starts.append(key)
+                        if let existing = videoStages[key] { return existing }
+                        let value = VideoStage(byteCount: input.byteCount, hash: input.sha256)
+                        videoStages[key] = value
+                        return value
+                    }
+                    guard input.mimeType == "video/mp4", stage.byteCount == input.byteCount, stage.hash == input.sha256 else {
+                        operation.respond(status: 409, data: errorData("idempotency_conflict")); return
+                    }
+                    let response = try uploadStatus(key, stage)
+                    let held = lock.withLock {
+                        guard shouldHoldNextUploadStart else { return false }
+                        shouldHoldNextUploadStart = false
+                        heldUploadStarts.append((operation, response))
+                        return true
+                    }
+                    if !held { operation.respond(status: 200, data: response) }
+                } else if method == "PATCH" {
+                    guard let offset = request.value(forHTTPHeaderField: "Upload-Offset").flatMap(Int.init) else {
+                        operation.respond(status: 400, data: Data()); return
+                    }
+                    let bytes = body(of: request)
+                    let (stage, outcome) = lock.withLock { () -> (VideoStage?, Outcome) in
+                        offsets.append(offset)
+                        uploadAttempts.append(.init(key: key, bytes: bytes, mimeType: "video/mp4"))
+                        let outcome = uploadOutcomes.isEmpty ? Outcome.success : uploadOutcomes.removeFirst()
+                        guard var stage = videoStages[key], stage.bytes.count == offset else { return (nil, outcome) }
+                        switch outcome {
+                        case .interruptedBeforeCommit, .http: break
+                        case .success, .lostResponse:
+                            stage.bytes.append(bytes)
+                            videoStages[key] = stage
+                        }
+                        return (stage, outcome)
+                    }
+                    guard let stage else { operation.respond(status: 409, data: errorData("upload_offset_mismatch")); return }
+                    switch outcome {
+                    case .lostResponse, .interruptedBeforeCommit: operation.fail(URLError(.networkConnectionLost))
+                    case let .http(status, code): operation.respond(status: status, data: errorData(code))
+                    case .success: operation.respond(status: 200, data: try uploadStatus(key, stage))
+                    }
+                } else if method == "POST", path.hasSuffix("/complete") {
+                    let (stage, outcome) = lock.withLock { () -> (VideoStage?, Outcome) in
+                        let outcome = finishOutcomes.isEmpty ? Outcome.success : finishOutcomes.removeFirst()
+                        guard var stage = videoStages[key], stage.bytes.count == stage.byteCount else { return (nil, outcome) }
+                        switch outcome {
+                        case .interruptedBeforeCommit, .http: break
+                        case .success, .lostResponse:
+                            let mediaID = stage.media?.id ?? UUID()
+                            let saved = BackendMedia(id: mediaID, mimeType: "video/mp4", byteCount: stage.bytes.count,
+                                path: "/v1/media/\(mediaID.uuidString.lowercased())")
+                            stage.media = saved
+                            media[key] = saved
+                            videoStages[key] = stage
+                        }
+                        return (stage, outcome)
+                    }
+                    guard let stage else { operation.respond(status: 409, data: errorData("upload_incomplete")); return }
+                    switch outcome {
+                    case .lostResponse, .interruptedBeforeCommit: operation.fail(URLError(.networkConnectionLost))
+                    case let .http(status, code): operation.respond(status: status, data: errorData(code))
+                    case .success: operation.respond(status: 200, data: try uploadStatus(key, stage))
+                    }
+                } else { operation.respond(status: 500, data: Data()) }
+            } else if method == "POST", path == "/v1/media" {
                 guard let key = request.value(forHTTPHeaderField: "Idempotency-Key").flatMap(UUID.init(uuidString:)) else {
                     operation.respond(status: 400, data: Data()); return
                 }
@@ -573,11 +1031,18 @@ private final class OutboxFixture: @unchecked Sendable {
                     let saved = media[key] ?? BackendMedia(id: UUID(), mimeType: mime, byteCount: data.count, path: "")
                     let normalized = BackendMedia(id: saved.id, mimeType: saved.mimeType, byteCount: saved.byteCount,
                         path: "/v1/media/\(saved.id.uuidString.lowercased())")
-                    media[key] = normalized
-                    return (normalized, uploadOutcomes.isEmpty ? Outcome.success : uploadOutcomes.removeFirst())
+                    let outcome = uploadOutcomes.isEmpty ? Outcome.success : uploadOutcomes.removeFirst()
+                    switch outcome {
+                    case .success, .lostResponse: media[key] = normalized
+                    case .interruptedBeforeCommit, .http: break
+                    }
+                    return (normalized, outcome)
                 }
-                if case .lostResponse = outcome { operation.fail(URLError(.networkConnectionLost)); return }
-                operation.respond(status: 201, data: try encode(saved))
+                switch outcome {
+                case .lostResponse, .interruptedBeforeCommit: operation.fail(URLError(.networkConnectionLost))
+                case let .http(status, code): operation.respond(status: status, data: errorData(code))
+                case .success: operation.respond(status: 201, data: try encode(saved))
+                }
             } else if method == "POST", path == "/v1/memories" {
                 let input = try JSONDecoder().decode(BackendMemoryInput.self, from: body(of: request))
                 let captured = try Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(input.capturedAt ?? "")
@@ -621,7 +1086,14 @@ private final class OutboxFixture: @unchecked Sendable {
                 operation.respond(status: 204, data: Data())
             } else if method == "DELETE", path.hasPrefix("/v1/media/by-upload-key/"),
                       let key = UUID(uuidString: String(path.dropFirst("/v1/media/by-upload-key/".count))) {
-                lock.withLock { _ = cancelledUploads.insert(key); media.removeValue(forKey: key) }
+                let outcome = lock.withLock {
+                    cancellationRequestCount += 1
+                    return cancellationOutcomes.isEmpty ? Outcome.success : cancellationOutcomes.removeFirst()
+                }
+                if case let .http(status, code) = outcome {
+                    operation.respond(status: status, data: errorData(code)); return
+                }
+                lock.withLock { _ = cancelledUploads.insert(key); media.removeValue(forKey: key); videoStages.removeValue(forKey: key) }
                 operation.respond(status: 200, data: Data("{}".utf8))
             } else if method == "DELETE", path.hasPrefix("/v1/media/") {
                 operation.respond(status: 204, data: Data())
@@ -636,6 +1108,15 @@ private final class OutboxFixture: @unchecked Sendable {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(value)
+    }
+
+    private func uploadStatus(_ key: UUID, _ stage: VideoStage) throws -> Data {
+        try encode(BackendUploadStatus(uploadID: key, mimeType: "video/mp4", byteCount: stage.byteCount,
+            receivedBytes: stage.bytes.count, chunkSize: 512 * 1_024, media: stage.media))
+    }
+
+    private func errorData(_ code: String) -> Data {
+        Data("{\"error\":{\"code\":\"\(code)\",\"message\":\"\(code)\"}}".utf8)
     }
 
     private func body(of request: URLRequest) -> Data {

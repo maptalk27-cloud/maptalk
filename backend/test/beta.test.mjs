@@ -11,6 +11,8 @@ import { openDatabase } from '../src/database.mjs';
 import { createConcurrentGate, deploymentConfiguration, issueInvite, moderateMemory, revokeBetaAccess } from '../src/beta.mjs';
 import { readConfig } from '../src/runtime-config.mjs';
 import { videoFixture } from './helpers/video.mjs';
+import { digest } from '../src/security.mjs';
+import { UPLOAD_CHUNK_SIZE } from '../src/resumable-uploads.mjs';
 
 const SERVER_ID = '100000-beta.apps.googleusercontent.com';
 const IOS_ID = '100000-ios.apps.googleusercontent.com';
@@ -102,6 +104,31 @@ test('hosted deployment requires opt-in, HTTPS canonical origin, persistent path
   assert.equal(readConfig({}).backend.deployment.mode, 'local');
 });
 
+test('beta comment threads enforce invitations, revoked author visibility and owner access on reads and retries', async t => {
+  const api = await fixture(t);
+  const owner = await api.account('comments-owner');
+  const author = await api.account('comments-author');
+  const viewer = await api.account('comments-viewer');
+  const uninvited = await api.account('comments-uninvited', false);
+  const post = await api.post(owner);
+  const path = `/v1/memories/${post.id}/comments`;
+  const payload = { id: randomUUID(), text: 'A comment, not a check-in' };
+  for (const method of ['GET', 'POST']) {
+    assert.equal((await api.call(path, { method, token: uninvited.token,
+      ...(method === 'POST' ? { json: payload } : {}) })).status, 403);
+  }
+  assert.equal((await api.call(path, { method: 'POST', token: author.token, json: payload })).status, 201);
+  assert.equal((await api.call(path, { token: viewer.token })).data.items.length, 1);
+  api.admin(db => revokeBetaAccess(db, { userID: author.user.id, now: START }));
+  assert.equal((await api.call(path, { token: viewer.token })).data.items.length, 0);
+  assert.equal((await api.call(path, { token: author.token })).status, 403);
+  assert.equal((await api.call(path, { method: 'POST', token: author.token, json: payload })).status, 403);
+  api.admin(db => revokeBetaAccess(db, { userID: owner.user.id, now: START }));
+  assert.equal((await api.call(path, { token: viewer.token })).status, 404);
+  assert.equal((await api.call(path, { method: 'POST', token: viewer.token,
+    json: { id: randomUUID(), text: 'No longer accessible' } })).status, 404);
+});
+
 test('beta media retries return the original normalized photo, not a second asset, and respect revoked access', async t => {
   const api = await fixture(t);
   const account = await api.account('offline-upload');
@@ -121,6 +148,56 @@ test('beta media retries return the original normalized photo, not a second asse
     db.prepare("UPDATE beta_members SET status = 'revoked' WHERE user_id = ?").run(account.user.id);
   });
   assert.equal((await api.call('/v1/media', options)).status, 403);
+});
+
+test('beta video chunks have an independent bounded transfer budget and never block cancellation, deletion or profile changes', async t => {
+  const api = await fixture(t), owner = await api.account('transfer-budget'), other = await api.account('transfer-independent');
+  const post = await api.post(owner);
+  const bytes = Buffer.alloc(20 * 1024 * 1024, 5), chunk = bytes.subarray(0, UPLOAD_CHUNK_SIZE);
+  const metadata = { mimeType: 'video/mp4', byteCount: bytes.length, sha256: digest(bytes) };
+  const keys = [randomUUID(), randomUUID()];
+  const begin = (key, token = owner.token) => api.call(`/v1/media/uploads/${key}`, { method: 'PUT', token, json: metadata });
+  for (const key of keys) {
+    assert.equal((await begin(key)).status, 200);
+    for (let offset = 0; offset < bytes.length; offset += UPLOAD_CHUNK_SIZE) {
+      const result = await api.call(`/v1/media/uploads/${key}`, { method: 'PATCH', token: owner.token, body: chunk,
+        headers: { 'content-type': 'application/octet-stream', 'upload-offset': String(offset) } });
+      assert.equal(result.status, 200, JSON.stringify(result.data));
+      assert.equal(result.data.receivedBytes, offset + chunk.length);
+    }
+  }
+  // Two PUTs + 80 PATCHes, all inside the same fixed clock minute.
+  assert.equal((await api.call('/v1/me', { method: 'PATCH', token: owner.token, json: { handle: 'profile_during_upload' } })).status, 200);
+  for (let i = 82; i < 120; i++) assert.equal((await begin(keys[1])).status, 200);
+  const limited = await begin(keys[1]);
+  assert.equal(limited.status, 429); assert.equal(limited.data.error.code, 'upload_rate_limited');
+  assert.equal(limited.headers['retry-after'], '60');
+  assert.equal((await api.call(`/v1/media/uploads/${keys[1]}`, { token: owner.token })).data.receivedBytes, bytes.length);
+  assert.equal((await begin(keys[1], other.token)).status, 200, 'one uploader cannot exhaust another account budget');
+  assert.equal((await api.call(`/v1/media/by-upload-key/${keys[0]}`, { method: 'DELETE', token: owner.token })).status, 204);
+  assert.equal((await api.call(`/v1/memories/${post.id}`, { method: 'DELETE', token: owner.token })).status, 204);
+  assert.equal((await api.call('/v1/me', { method: 'PATCH', token: owner.token, json: { handle: 'profile_after_limit' } })).status, 200);
+  api.advance(60_000);
+  assert.equal((await begin(keys[1])).status, 200, 'transfer limiter recovers after its own window');
+  for (let i = 1; i < 121; i++) await begin(keys[1]);
+  assert.equal((await api.call('/v1/me', { method: 'DELETE', token: owner.token })).status, 204, 'account deletion remains available while transfer-limited');
+  api.admin(db => {
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM media_upload_sessions WHERE owner_id = ?').get(owner.user.id).n, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM media_upload_chunks WHERE owner_id = ?').get(owner.user.id).n, 0);
+  });
+});
+
+test('beta user-mutation protections remain independent from video transfer allowance', async t => {
+  const api = await fixture(t), owner = await api.account('mutation-budget');
+  // Invitation redemption already used one mutation in this minute.
+  for (let i = 1; i < 60; i++) {
+    assert.equal((await api.call('/v1/me', { method: 'PATCH', token: owner.token, json: { handle: 'mutation_preserved' } })).status, 200);
+  }
+  const blocked = await api.call('/v1/me', { method: 'PATCH', token: owner.token, json: { handle: 'still_limited' } });
+  assert.equal(blocked.status, 429); assert.equal(blocked.data.error.code, 'rate_limited');
+  const bytes = Buffer.from('independent'), key = randomUUID();
+  assert.equal((await api.call(`/v1/media/uploads/${key}`, { method: 'PUT', token: owner.token,
+    json: { mimeType: 'video/mp4', byteCount: bytes.length, sha256: digest(bytes) } })).status, 200);
 });
 
 test('beta videos use the same invitation, moderation and blocking boundaries for full and ranged playback', async t => {

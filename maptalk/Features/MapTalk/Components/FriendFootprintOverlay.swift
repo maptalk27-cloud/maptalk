@@ -20,6 +20,20 @@ struct MapTalkFriendFootprint: Identifiable {
         self.friendIDs = friendIDs
     }
 
+    /// The server supplies only visible public visits. The legacy name is kept
+    /// for the existing renderer; these IDs are visitors, not fabricated friends.
+    static func history(for place: RatedPOI, asOf now: Date) -> MapTalkFriendFootprint? {
+        guard !place.checkIns.isEmpty,
+              place.checkIns.allSatisfy({ $0.activityDate.addingTimeInterval(StoryReadKeys.freshWindow) <= now }) else {
+            return nil
+        }
+        return MapTalkFriendFootprint(
+            id: "place-\(place.id.uuidString)",
+            ratedPOI: place,
+            friendIDs: place.checkInPeople().map(\.userID)
+        )
+    }
+
     /// Preview footprints still carry real POI-shaped data. That lets the map
     /// prototype exercise the production card without promoting these older
     /// traces into the live POI repository or story shelf.
@@ -169,6 +183,14 @@ enum FriendFootprintDensityStyle: Equatable {
 enum FriendFootprintScreenOcclusionPolicy {
     static let markerClearance: CGFloat = 32
     static let compactMarkerClearance: CGFloat = 16
+
+    static func isCoveredByControls(projectedPoint: CGPoint, controlsFrame: CGRect) -> Bool {
+        guard !controlsFrame.isEmpty else { return false }
+        // Account for the full expanded diamond as well as the small circle.
+        // Coordinates stay geographic; obscured controls simply aren't drawn.
+        return controlsFrame.insetBy(dx: -markerClearance, dy: -markerClearance)
+            .contains(projectedPoint)
+    }
 
     static func isOccluded(
         projectedPoint: CGPoint?,
@@ -1486,8 +1508,8 @@ struct FriendFootprintOverlay: MapContent {
                         )
                     )
                     .accessibilityLabel(footprint.placeName)
-                    .accessibilityValue("Visited by \(footprint.friendIDs.count) friends")
-                    .accessibilityHint("Open friend activity")
+                    .accessibilityValue("Visited by \(footprint.friendIDs.count) people")
+                    .accessibilityHint("Open place history")
                     .accessibilityIdentifier(
                         "maptalk.friend-place.\(isExpanded ? "expanded" : "compact").\(footprint.id)"
                     )

@@ -71,9 +71,9 @@ Debug 默认连接 `http://127.0.0.1:8787`，可用 App 环境变量 `MAPTALK_BA
 - POI 无文字，允许零或一个媒体（照片或短视频）；Reel 需要文字或媒体，最多九个照片 / 视频混合排列。照片支持 JPEG、PNG、WebP；视频上传使用已在手机压缩的 H.264 MP4，可含单声道 / 双声道 AAC 音频。
 - 单段视频最长 60 秒、最多 20 MiB、长边 1280 / 短边 720、最多 60 fps；服务端独立完整解码、校验、去掉位置等元数据，再封装 fast-start MP4。保留竖屏方向，不接受外部媒体引用或播放列表；视频不能作为头像。每账号 50 MiB 总媒体额度保持不变。
 - 私密记录和照片只允许本人访问。beta 的公开记录发布后立即向已邀请且未互相屏蔽的成员可见，尚无好友关系限制。未获邀请／已撤销账号不能读取内容；举报下架仍会隐藏违规内容。
-- MyMap 返回自己的公开和私密记录。Feed 包含首次公开后 24 小时内的 POI 和 Reel；地图搜索返回视野内的公开历史记录。Feed 到期不会删除记录。
-- `createdAt` 是保存时间；`publishedAt` 是首次公开时间，未公开为 `null`。私密记录日后首次公开，从公开时计算 24 小时；反复切换隐私不会刷新动态时间。
-- 引用已有地标时，提交坐标必须在该地标 150 米内，与当前 App 的候选地点范围一致。这只校验坐标距离，不能证明用户的真实位置。
+- MyMap 返回自己的公开和私密记录。Feed 包含首次公开后 72 小时内的 POI 和 Reel；主地图只显示未过期的 Reel，同时保留视野内公开 POI 的历史足迹。到期不会删除记录，个人主页和 MyMap 仍可回看历史。
+- `createdAt` 是拍摄／记录时间；`publishedAt` 是首次公开时间，未公开为 `null`。私密记录日后首次公开，从公开时计算 72 小时；反复切换隐私不会刷新动态时间。接口读取和 `expiresAt` 统一按首次公开时间计算，兼容原有 24 小时数据；缺少首次公开时间的历史记录回退到 `createdAt`，不需要改写数据或升级 schema。
+- 普通／自建地标仍要求提交坐标在地标 150 米内；目录明确标记的机场允许距中心 2 公里。引用既有地标使用数据库保存的类型和中心，不能用本次请求扩大范围或搬动地标。这只校验坐标距离，不能证明用户的真实位置。
 - 相同记录 UUID 和相同内容的重试不会重复创建。永久删除后保留 ID 墓碑，旧请求不能恢复已删除记录。
 
 ## 接口
@@ -102,12 +102,21 @@ Debug 默认连接 `http://127.0.0.1:8787`，可用 App 环境变量 `MAPTALK_BA
 | `POST /v1/blocks` | `{ userId }`，双向隐藏该账号的公开内容 |
 | `DELETE /v1/blocks/:userId` | 解除自己的屏蔽 |
 | `POST /v1/media` | 原始图片 / 已标准化视频字节，Content-Type 为图片类型或 `video/mp4`；支持 UUID `Idempotency-Key` |
+| `PUT /v1/media/uploads/:id` | schema 10：建立或恢复视频会话，`{ mimeType: "video/mp4", byteCount, sha256 }`；UUID 在所有重试中保持不变 |
+| `GET /v1/media/uploads/:id` | 返回已持久保存的偏移量；已完成则直接返回媒体，不必重传 |
+| `PATCH /v1/media/uploads/:id` | `application/octet-stream`、512 KiB 对齐的十进制 `Upload-Offset`；每段 512 KiB（最后一段为剩余大小），整段收到后原子确认 |
+| `POST /v1/media/uploads/:id/complete` | `{}`，校验 SHA-256 并验证视频，成功返回媒体；繁忙或超时只重试此步骤 |
+| `DELETE /v1/media/by-upload-key/:id` | 取消未引用的上传，清理已接收分段并保留取消墓碑；旧请求不可恢复它 |
 | `GET /v1/media/:id` | 权限检查后的媒体字节，支持单个 `Range: bytes=...`；206 / 416 遵循字节范围规则 |
 | `HEAD /v1/media/:id` | 相同权限边界下的媒体长度 / 类型，不下载字节 |
 | `DELETE /v1/media/:id` | 删除自己未被记录或头像引用的媒体 |
 | `POST /v1/memories` | 新建 POI 打卡或 Reel |
 | `GET /v1/memories/:id` | 有权限访问的单条记录 |
-| `PATCH /v1/memories/:id` | `{ visibility: "public" 或 "private" }` |
+| `GET /v1/memories/:id/comments` | 公开 Reel 的文字讨论，支持 `limit` / `cursor` |
+| `POST /v1/memories/:id/comments` | `{ id, text }`；UUID 用于幂等重试，不需要媒体、定位或新打卡 |
+| `GET /v1/places/:id/comments` | 公开地点的共同讨论，不因单人重复打卡拆成多个讨论串 |
+| `POST /v1/places/:id/comments` | `{ id, text }`；同地点访问共用，至少有一条对当前用户可见的公开打卡 |
+| `PATCH /v1/memories/:id` | 修改自己的 `visibility`；Reel 也可修改 `caption`，不改变发布时间或续期 |
 | `DELETE /v1/memories/:id` | 永久删除自己的记录 |
 | `GET /v1/me/memories` | 自己的全部记录 |
 | `POST /v1/me/archive/hide` | `{ kind: "poi" 或 "reel", id }`，仅从自己的 MyMap 移除 |
@@ -115,6 +124,22 @@ Debug 默认连接 `http://127.0.0.1:8787`，可用 App 环境变量 `MAPTALK_BA
 | `GET /v1/users/:id/memories` | 该用户的公开历史，包括已退出 Feed 的记录 |
 | `GET /v1/feed` | 当前公开动态 |
 | `GET /v1/map/memories` | 视野内的公开历史记录 |
+
+### 视频断点续传（2026-10-21 已部署 schema 10，真机弱网验收待用户操作）
+
+现有 EC2 已完成增量升级；159 项目标 Linux ARM64 隔离测试通过。加密备份经 S3 取回并认证恢复，迁移前后全部 22 张旧表内容一致；公网 HTTPS 健康和未登录上传拦截通过。兼容客户端已覆盖安装到机主 iPhone，未卸载或操作手机界面；真实视频续传和锁屏恢复仍由用户验收。
+
+PUT / GET / PATCH / complete 成功统一返回 HTTP 200：`{ uploadID, mimeType, byteCount, receivedBytes, chunkSize: 524288, media? }`。`byteCount` / `receivedBytes` 是上传源文件字节，不是服务端处理后的媒体大小。新客户端每次恢复先 PUT，再从服务端确认的偏移继续；已完成的 `media` 直接复用。旧版已完成上传会通过已有幂等 hash 校验并被接管，不重发视频。GET 旧版未接管 receipt 时大小暂取标准化媒体大小；先 PUT 后即可获得准确源大小。
+
+断网中断的半个 chunk 不确认，重发该 chunk 即可；已经确认的完全相同 chunk 重发无副作用，不同字节返回 `upload_chunk_conflict`。`upload_offset_mismatch` / `upload_incomplete` 需要查询进度继续；`404 not_found` 可能是 7 天未活动的未完成会话已过期，可重新 PUT。明确删除返回 `410 media_deleted`，不能复活。`429` / `503 video_processing_timeout` / `503 video_processing_unavailable` 可重试；当前客户端按 2–60 秒退避重试，服务端也在 `429` 响应提供 `Retry-After` 提示。真正格式损坏仍拒绝，处理繁忙或暂时失败不丢已传字节。
+
+Apple 导出文件的 edit-list / B-frame 时间表示不能直接按普通 remux 的毫秒差判损坏：保留 PTS/DTS、每个音视频 packet 和旋转，限制尾部 reorder padding，使用高精度 movie clock；前后时长仅允许一个源时钟 tick 的有界舍入误差（最多 2ms + 1µs）。输入 60 秒及大小、画幅、完整解码限制不变。本地等待／失败记录仍按普通 MyMap 内容预览，错误代码与解码器原始诊断不直接展示给用户；重试与预览动作独立，只有服务端确认的记录才进入公开 feed。
+
+iOS 当前使用受限的后台执行宽限期，不保证锁屏后一直上传；系统暂停后保留已确认分段，回到 App / 恢复网络时接续。旧版本已经标记失败的任务需在 MyMap 点重试，不会被静默删除或重新创建。
+
+会话和分段仅保存在现有 SQLite / 加密数据盘，不能作为可下载媒体或发帖附件。每用户最多 9 个未完成会话，声明长度预占现有 50 MiB 配额；旧上传接口也遵守预占。完成后删除 staging bytes，保留轻量 receipt；取消、删号及 7 天未活动过期会清理分段（启动、请求及每小时清理）。续传 PUT / PATCH / complete 使用独立的每用户每分钟 120 次传输限流（最多 60 MiB 请求体），超出返回 `429 upload_rate_limited` 和 `Retry-After`；不会占用取消、删除、资料修改等原有每分钟 60 次操作预算。原来的照片和整段视频接口保持兼容。
+
+上传诊断只记录有限量的 `media_request_failed`、错误 code 和 HTTP status，不记录用户、URL、坐标、文件内容或令牌。
 
 创建记录示例，`id` 每条记录生成一次，网络重试保持不变：
 
@@ -132,6 +157,8 @@ Debug 默认连接 `http://127.0.0.1:8787`，可用 App 环境变量 `MAPTALK_BA
 已有地标用 `placeId` 替代 `place`，两者不可同时提交。类别沿用 App：`viewpoint`、`restaurant`、`coffee`、`nightlife`、`art`、`market`、`other`。Reel 不传地标，使用 `caption` 和 / 或 `mediaIds`。
 
 Apple 地点首次写入可在 `place` 中附上 `sourceId` UUID 和独立的 `coordinate`。服务用来源 ID 合并同一地标，不用拍摄位置覆盖地标位置；随后引用同一 ID 不能改写已有名称或坐标。目前来源 ID 由客户端提供，服务未向 Apple 验证。
+
+机场额外传 `directoryKind: "airport"`，必须同时有 `sourceId` 和 `coordinate`；不新增视觉类别，其他地点不传该字段。响应仅在机场提供 `place.directoryKind`。`memory.location` 始终保留用户提交的 GPS，`place.coordinate` 保留目录中心。Schema 11 仅给地标增加可空类型列；旧数据保持空值，机场名称不会自动扩大范围，旧发布重试哈希不变。
 
 列表接受 `limit`（1–100，默认 50）和上次返回的 `cursor`。Cursor 是不透明值，只用于同一查询的下一页。Feed 按首次公开时间降序；MyMap 和地图历史按保存时间降序。地图接口必须提供 `west`、`east`、`south`、`north`，支持跨越国际日期变更线。
 
@@ -161,6 +188,6 @@ MAPTALK_DATABASE=/absolute/path/to/new-backup.sqlite npm start
 
 本地闭环不等于全部产品功能完成。照片读取使用授权请求，不提供永久公开链接；账户恢复仍依赖本机保存的会话，没有忘记密码流程。
 
-Collection 已做本机按账号保存，Bubble 仍是发布时附带的内容，尚无服务端实现，没有将两者变成另一类公开帖子。用户名和头像支持真实账号保存；好友、聊天、评论、点赞、推送仍未接入，真实模式隐藏 Chats 和其他未连接的社交入口。原卡片中的其他演示操作不代表服务器已经支持，不能纳入亲友验收承诺。
+Collection 已做本机按账号保存，Bubble 仍是发布时附带的内容，尚无服务端实现，没有将两者变成另一类公开帖子。用户名和头像支持真实账号保存；schema 12 增加公开帖子／地点的纯文字评论，部署状态见 DEPLOYMENT.md。客户端在原展开卡片中展示最近 100 条；更早评论分页、评论通知及回复层级尚未接入。好友、聊天、点赞、推送仍未接入，真实模式隐藏 Chats 和其他未连接的社交入口。原卡片中的其他演示操作不代表服务器已经支持，不能纳入亲友验收承诺。
 
 上传图片先完整解码再转为最大长边 2048 的 JPEG，移除 EXIF/GPS 等元数据；拒绝损坏／动画／过大图片，限制处理并发。输入单张最多 10 MiB，每账号媒体限额 50 MiB。短视频处理并发为 1，解码 / 探测均有时限，下载按 64 KiB 分块与背压读取，不会为每次播放范围请求复制整段视频。照片和短视频字节仍随 SQLite 持久化，只面向小规模内测，不是无限视频／大规模对象存储方案。上线仍需平台凭证、实际 HTTPS 部署、隐私及支持页面、审核负责人、异地备份和真机网络验收；美国、中国大陆和欧洲不能仅凭本机通过就承诺可用。

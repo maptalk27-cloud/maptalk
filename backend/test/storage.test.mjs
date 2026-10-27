@@ -73,7 +73,7 @@ test('schema upgrades preserve existing private and public records', async () =>
     insert.run('public-id', 'public');
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     const rows = db.prepare('SELECT * FROM memories ORDER BY id').all();
     assert.equal(rows.length, 2);
     assert.equal(rows[0].visibility, 'private');
@@ -100,10 +100,10 @@ test('version two databases acquire archive/source tables without changing recor
     db.prepare(`INSERT INTO memories(id, owner_id, kind, visibility, latitude, longitude,
       caption, created_at, expires_at, request_hash, published_at)
       VALUES ('memory-a', 'user-a', 'reel', 'private', 37, -122, 'Kept', 1000, 86401000, 'test', NULL)`).run();
-    db.exec('DROP TABLE place_sources; DROP TABLE archive_hidden; PRAGMA user_version = 2;');
+    db.exec('DROP TABLE comments; DROP TABLE place_sources; DROP TABLE archive_hidden; PRAGMA user_version = 2;');
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     assert.equal(db.prepare('SELECT caption FROM memories').get().caption, 'Kept');
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM archive_hidden').get().count, 0);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM place_sources').get().count, 0);
@@ -121,10 +121,10 @@ test('version three upgrade adds Apple identities without changing existing acco
   try {
     db.prepare('INSERT INTO users(id, handle, password_hash, created_at) VALUES (?, ?, ?, ?)').run('user-a', 'alice', 'existing-password-hash', 1);
     const session = issueSession(db, 'user-a', 1);
-    db.exec('DROP TABLE auth_identities; DROP TABLE apple_auth_challenges; PRAGMA user_version = 3;');
+    db.exec('DROP TABLE comments; DROP TABLE auth_identities; DROP TABLE apple_auth_challenges; PRAGMA user_version = 3;');
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     assert.equal(db.prepare('SELECT password_hash FROM users').get().password_hash, 'existing-password-hash');
     assert.equal(db.prepare('SELECT token_hash FROM sessions').get().token_hash, digest(session.token));
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM auth_identities').get().count, 0);
@@ -148,6 +148,7 @@ test('version four upgrade preserves Apple identities, sessions and content whil
       caption, created_at, expires_at, request_hash, published_at)
       VALUES ('memory-a', 'apple-user', 'reel', 'private', 37, -122, 'Kept', 1000, 86401000, 'test', NULL)`).run();
     db.exec(`
+      DROP TABLE comments;
       DROP TABLE auth_identities;
       CREATE TABLE auth_identities (
         provider TEXT NOT NULL CHECK(provider = 'apple'), provider_subject TEXT NOT NULL,
@@ -160,7 +161,7 @@ test('version four upgrade preserves Apple identities, sessions and content whil
     `);
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     assert.equal(db.prepare('SELECT provider_subject FROM auth_identities').get().provider_subject, 'stable-apple-sub');
     assert.equal(db.prepare('SELECT token_hash FROM sessions').get().token_hash, digest(session.token));
     assert.equal(db.prepare('SELECT caption FROM memories').get().caption, 'Kept');
@@ -195,6 +196,7 @@ test('version six migration approves only pending records and preserves privacy,
       INSERT INTO archive_hidden VALUES ('owner', 'reel', 'public-pending', 13);
       INSERT INTO deleted_memories VALUES ('deleted-record', 'owner', 14);
       INSERT INTO content_reports VALUES ('report', 'viewer', 'public-rejected', 'Keep rejection', 15);
+      DROP TABLE comments;
       DROP TABLE user_profiles;
       PRAGMA user_version = 6;
     `);
@@ -203,7 +205,7 @@ test('version six migration approves only pending records and preserves privacy,
     const safety = Object.fromEntries(safetyTables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     assert.deepEqual(db.prepare('SELECT * FROM memories ORDER BY id').all().map(row => ({ ...row })), before.map(row => ({ ...row,
       moderation_status: row.moderation_status === 'pending' ? 'approved' : row.moderation_status })));
     for (const table of safetyTables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), safety[table], table);
@@ -233,13 +235,14 @@ test('version seven adds retry mappings without changing media, records, avatars
         VALUES ('post', 'owner', 'reel', 'private', 37, -122, 'Kept', 3, 4, 'original-hash');
       INSERT INTO memory_media VALUES ('post', 'photo', 0);
       INSERT INTO deleted_memories VALUES ('deleted', 'owner', 5);
+      DROP TABLE comments;
       DROP TABLE media_upload_requests;
       PRAGMA user_version = 7;
     `);
     const tables = ['users', 'media', 'user_profiles', 'memories', 'memory_media', 'deleted_memories'];
     const before = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
     db.close(); db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     for (const table of tables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table]);
     db.prepare('INSERT INTO media_upload_requests VALUES (?, ?, ?, ?, ?)').run('owner', 'key', 'hash', 'photo', 6);
     db.exec("DELETE FROM memories; UPDATE user_profiles SET avatar_media_id = NULL; DELETE FROM media;");
@@ -277,13 +280,14 @@ test('version eight media rebuild preserves exact bytes, avatars, links and retr
       ALTER TABLE media_v8 RENAME TO media;
       CREATE INDEX media_owner ON media(owner_id);
       PRAGMA foreign_keys = ON;
+      DROP TABLE comments;
       PRAGMA user_version = 8;
     `);
     assert.throws(() => db.exec("INSERT INTO media VALUES ('movie', 'owner', 'video/mp4', 1, X'00', 7)"), /CHECK/);
     const tables = ['users', 'media', 'user_profiles', 'memories', 'memory_media', 'media_upload_requests'];
     const before = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
     db.close(); db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
     assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
     for (const table of tables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table], table);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
@@ -300,5 +304,152 @@ test('version eight media rebuild preserves exact bytes, avatars, links and retr
     db.exec("DELETE FROM users WHERE id = 'owner';");
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM media').get().n, 0, 'owner cascade still deletes movie bytes');
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM media_upload_requests').get().n, 0);
+  } finally { restored?.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('version nine additive upload migration preserves all existing rows and backup restores staged progress', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'maptalk-v9-resume-migration-'));
+  const path = join(directory, 'v9.sqlite');
+  let db = openDatabase(path), restored;
+  try {
+    db.exec(`
+      DROP TABLE comments;
+      DROP TABLE media_upload_chunks;
+      DROP TABLE media_upload_sessions;
+      INSERT INTO users(id, handle, password_hash, created_at) VALUES ('owner', 'alice', 'kept-hash', 1);
+      INSERT INTO media VALUES ('movie', 'owner', 'video/mp4', 3, X'010203', 2);
+      INSERT INTO media_upload_requests VALUES ('owner', 'completed', 'kept-hash', 'movie', 3);
+      INSERT INTO media_upload_requests VALUES ('owner', 'cancelled', '', NULL, 4);
+      PRAGMA user_version = 9;
+    `);
+    const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
+    const before = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
+    const priorBackup = join(directory, 'before.sqlite');
+    await backupDatabase(path, priorBackup);
+    db.close(); db = openDatabase(path);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    for (const table of tables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table], table);
+    restored = openDatabase(priorBackup);
+    for (const table of tables) assert.deepEqual(restored.prepare(`SELECT * FROM ${table}`).all(), before[table], `backup ${table}`);
+    restored.close(); restored = undefined;
+    const acceptedChunk = Buffer.alloc(524288, 97);
+    db.prepare('INSERT INTO media_upload_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('owner', 'pending', 'video/mp4', acceptedChunk.length + 3, digest(Buffer.concat([acceptedChunk, Buffer.from('end')])), acceptedChunk.length, 5, 5);
+    db.prepare('INSERT INTO media_upload_chunks VALUES (?, ?, ?, ?)').run('owner', 'pending', 0, acceptedChunk);
+    const resumableBackup = join(directory, 'with-progress.sqlite');
+    await backupDatabase(path, resumableBackup);
+    restored = openDatabase(resumableBackup);
+    assert.deepEqual(restored.prepare('SELECT * FROM media_upload_sessions').all(), db.prepare('SELECT * FROM media_upload_sessions').all());
+    assert.deepEqual(restored.prepare('SELECT * FROM media_upload_chunks').all(), db.prepare('SELECT * FROM media_upload_chunks').all());
+    assert.deepEqual(restored.prepare('PRAGMA foreign_key_check').all(), []);
+    assert.equal(restored.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  } finally { restored?.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('version ten airport metadata migration preserves every old row and resumable byte; restored backup matches', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'maptalk-v10-airport-migration-'));
+  const path = join(directory, 'v10.sqlite');
+  let db = openDatabase(path), restored;
+  try {
+    db.exec(`
+      DROP TABLE comments;
+      ALTER TABLE places DROP COLUMN directory_kind;
+      PRAGMA user_version = 10;
+      INSERT INTO users(id, handle, password_hash, created_at) VALUES ('owner', 'alice', 'kept-hash', 1), ('friend', 'bob', 'other-hash', 2);
+      INSERT INTO places(id, name, category, latitude, longitude) VALUES ('place', 'Airport Café', 'coffee', 47.45, -122.31);
+      INSERT INTO place_sources VALUES ('apple-source', 'place');
+      INSERT INTO media VALUES ('movie', 'owner', 'video/mp4', 3, X'010203', 3);
+      INSERT INTO media_upload_requests VALUES ('owner', 'completed', 'upload-hash', 'movie', 4), ('owner', 'cancelled', '', NULL, 5);
+      INSERT INTO memories(id, owner_id, kind, visibility, latitude, longitude, caption, place_id, created_at, expires_at, request_hash, published_at)
+        VALUES ('visit', 'owner', 'poi', 'public', 47.4501, -122.31, '', 'place', 6, 7, 'visit-original-hash', 6),
+               ('private', 'owner', 'reel', 'private', 47.45, -122.31, 'Keep private', NULL, 8, 9, 'reel-original-hash', NULL);
+      INSERT INTO memory_media VALUES ('visit', 'movie', 0);
+      INSERT INTO user_profiles VALUES ('owner', 'movie');
+      INSERT INTO user_blocks VALUES ('owner', 'friend', 10);
+      INSERT INTO deleted_memories VALUES ('deleted', 'owner', 11);
+      INSERT INTO archive_hidden VALUES ('owner', 'reel', 'private', 12);
+      INSERT INTO auth_identities VALUES ('apple', 'stable-identity', 'owner', 13);
+      INSERT INTO beta_members VALUES ('owner', 'active', 14);
+    `);
+    issueSession(db, 'owner', 15);
+    const chunk = Buffer.from('already-uploaded');
+    db.prepare('INSERT INTO media_upload_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('owner', 'pending', 'video/mp4', chunk.length + 3, digest(Buffer.concat([chunk, Buffer.from('end')])), chunk.length, 16, 16);
+    db.prepare('INSERT INTO media_upload_chunks VALUES (?, ?, ?, ?)').run('owner', 'pending', 0, chunk);
+    const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
+    const before = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
+    const backup = join(directory, 'before-v11.sqlite');
+    await backupDatabase(path, backup);
+    db.close(); db = openDatabase(path);
+    restored = openDatabase(backup);
+    for (const database of [db, restored]) {
+      assert.equal(database.prepare('PRAGMA user_version').get().user_version, 12);
+      assert.deepEqual(database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name), [...tables, 'comments'].sort());
+      assert.equal(database.prepare('SELECT COUNT(*) AS n FROM comments').get().n, 0);
+      for (const table of tables) {
+        const after = database.prepare(`SELECT * FROM ${table}`).all();
+        if (table === 'places') {
+          assert.ok(after.every(row => row.directory_kind === null), 'airport-like names must not classify existing places');
+          assert.deepEqual(after.map(({ directory_kind, ...row }) => row), before[table].map(row => ({ ...row })));
+        } else assert.deepEqual(after, before[table], table);
+      }
+      assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
+      assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+      assert.throws(() => database.exec("UPDATE places SET directory_kind = 'mall'"), /CHECK/);
+      database.exec("UPDATE places SET directory_kind = 'airport'");
+      assert.equal(database.prepare('SELECT directory_kind FROM places').get().directory_kind, 'airport');
+    }
+    db.close(); db = openDatabase(path);
+    assert.equal(db.prepare('SELECT directory_kind FROM places').get().directory_kind, 'airport', 'reopening does not run or reset the migration');
+  } finally { restored?.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('version eleven comments migration only adds empty discussion storage and preserves all existing data', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'maptalk-v11-comments-migration-'));
+  const path = join(directory, 'v11.sqlite');
+  let db = openDatabase(path), restored;
+  try {
+    db.exec(`
+      DROP TABLE comments;
+      PRAGMA user_version = 11;
+      INSERT INTO users(id, handle, password_hash, created_at) VALUES ('owner', 'alice', 'unchanged-hash', 1);
+      INSERT INTO places(id, name, category, latitude, longitude, directory_kind)
+        VALUES ('airport', 'Airport', 'other', 47.45, -122.31, 'airport');
+      INSERT INTO place_sources VALUES ('apple-airport', 'airport');
+      INSERT INTO media VALUES ('video', 'owner', 'video/mp4', 3, X'010203', 2);
+      INSERT INTO memories(id, owner_id, kind, visibility, latitude, longitude, caption, place_id,
+        created_at, expires_at, request_hash, published_at)
+        VALUES ('visit', 'owner', 'poi', 'public', 47.4501, -122.31, '', 'airport', 3, 4, 'original-visit', 3),
+               ('draft', 'owner', 'reel', 'private', 47.45, -122.31, 'Keep this', NULL, 5, 6, 'original-draft', NULL);
+      INSERT INTO memory_media VALUES ('visit', 'video', 0);
+      INSERT INTO media_upload_requests VALUES ('owner', 'completed', 'media-hash', 'video', 7);
+      INSERT INTO archive_hidden VALUES ('owner', 'reel', 'draft', 8);
+      INSERT INTO deleted_memories VALUES ('deleted-post', 'owner', 9);
+    `);
+    issueSession(db, 'owner', 10);
+    const bytes = Buffer.from('partial-video');
+    db.prepare('INSERT INTO media_upload_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('owner', 'pending', 'video/mp4', bytes.length + 1, digest(Buffer.concat([bytes, Buffer.from('x')])), bytes.length, 11, 11);
+    db.prepare('INSERT INTO media_upload_chunks VALUES (?, ?, ?, ?)').run('owner', 'pending', 0, bytes);
+    const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
+    const before = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
+    const backup = join(directory, 'restored-v11.sqlite');
+    await backupDatabase(path, backup);
+    db.close(); db = openDatabase(path); restored = openDatabase(backup);
+    for (const current of [db, restored]) {
+      assert.equal(current.prepare('PRAGMA user_version').get().user_version, 12);
+      for (const table of tables) assert.deepEqual(current.prepare(`SELECT * FROM ${table}`).all(), before[table], table);
+      assert.equal(current.prepare('SELECT COUNT(*) AS n FROM comments').get().n, 0);
+      assert.deepEqual(current.prepare('PRAGMA foreign_key_check').all(), []);
+      assert.equal(current.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+      const insert = current.prepare('INSERT INTO comments VALUES (?, ?, ?, ?, ?, ?)');
+      assert.throws(() => insert.run('missing-target', 'owner', null, null, 'Reply', 12), /CHECK/);
+      assert.throws(() => insert.run('both-targets', 'owner', 'visit', 'airport', 'Reply', 12), /CHECK/);
+      assert.throws(() => insert.run('missing-author', 'unknown', 'visit', null, 'Reply', 12), /FOREIGN KEY/);
+      insert.run('post-comment', 'owner', 'visit', null, 'Reply', 12);
+      insert.run('place-comment', 'owner', null, 'airport', 'Advice', 13);
+    }
+    db.close(); db = openDatabase(path);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM comments').get().n, 2, 'reopening keeps new discussion');
   } finally { restored?.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
 });

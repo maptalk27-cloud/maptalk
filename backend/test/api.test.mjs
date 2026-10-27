@@ -5,7 +5,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { createBackend } from '../src/server.mjs';
+import { digest } from '../src/security.mjs';
 
 const PASSWORD = 'a-private-test-password-42';
 const PNG = Buffer.from(
@@ -28,6 +30,7 @@ async function fixture(t, options = {}) {
   let address = await backend.listen(0);
 
   return {
+    databasePath,
     get url() { return address.url; },
     async restart() {
       await backend.close();
@@ -565,7 +568,7 @@ test('queued posts keep capture time while the feed lifetime begins on actual pu
   const saved = await publish(api, alice, draft);
   assert.equal(saved.createdAt, draft.capturedAt);
   assert.equal(saved.publishedAt, '2026-10-20T12:00:00.000Z');
-  assert.equal(saved.expiresAt, '2026-10-21T12:00:00.000Z');
+  assert.equal(saved.expiresAt, '2026-10-23T12:00:00.000Z');
   assert.deepEqual((await listAll(api, alice, '/v1/feed')).map(item => item.id), [saved.id]);
   await api.restart();
   time += 600_000;
@@ -586,7 +589,7 @@ test('queued posts keep capture time while the feed lifetime begins on actual pu
     json: { visibility: 'public' } }), 200);
   assert.equal(published.createdAt, privatePost.createdAt);
   assert.equal(published.publishedAt, new Date(time).toISOString());
-  assert.equal(published.expiresAt, new Date(time + 86400_000).toISOString());
+  assert.equal(published.expiresAt, new Date(time + 72 * 60 * 60 * 1000).toISOString());
 });
 
 test('pending cancellation is durable before a late post arrives and cannot cancel another owner records', async t => {
@@ -775,7 +778,7 @@ test('first publication starts feed time without changing capture time or refres
   }), 200);
   assert.equal(published.createdAt, captureTime);
   assert.equal(published.publishedAt, new Date(publicationTime).toISOString());
-  assert.equal(published.expiresAt, new Date(publicationTime + 24 * 60 * 60 * 1000).toISOString());
+  assert.equal(published.expiresAt, new Date(publicationTime + 72 * 60 * 60 * 1000).toISOString());
   const feed = await listAll(api, bob, '/v1/feed', 1);
   assert.deepEqual(feed.map((item) => item.id), [saved.id, laterCapture.id]);
   const archive = await listAll(api, alice, '/v1/me/memories', 1);
@@ -796,35 +799,193 @@ test('first publication starts feed time without changing capture time or refres
   assert.equal(reshared.publishedAt, published.publishedAt);
   assert.equal(reshared.expiresAt, published.expiresAt);
 
-  time = publicationTime + 24 * 60 * 60 * 1000 + 1;
+  time = publicationTime + 72 * 60 * 60 * 1000 + 1;
   assert.equal(expectStatus(await api.call('/v1/feed', { token: bob.token }), 200).items.length, 0);
   expectStatus(await api.call(`/v1/memories/${saved.id}`, { token: bob.token }), 200);
 });
 
-test('active feed expires after 24 hours while archives and viewport history remain', async (t) => {
+test('caption edits keep the original post, media and publication clock, including after expiry', async (t) => {
+  let time = Date.UTC(2026, 9, 22, 12);
+  const api = await fixture(t, { now: () => time });
+  const alice = await register(api, 'alice');
+  const bob = await register(api, 'bob');
+  const photo = await upload(api, alice);
+  const draft = reel({ mediaIds: [photo.id] });
+  const original = await publish(api, alice, draft);
+  time += 73 * 60 * 60 * 1000;
+  const updated = expectStatus(await api.call(`/v1/memories/${original.id}`, {
+    method: 'PATCH', token: alice.token, json: { caption: '  A better caption.  ' },
+  }), 200);
+  assert.equal(updated.caption, 'A better caption.');
+  for (const key of ['id', 'ownerId', 'visibility', 'createdAt', 'publishedAt', 'expiresAt', 'moderationStatus']) {
+    assert.equal(updated[key], original[key], key);
+  }
+  assert.deepEqual(updated.location, original.location);
+  assert.deepEqual(updated.media, original.media);
+  assert.deepEqual((await listAll(api, bob, '/v1/feed')).map(item => item.id), []);
+  assert.equal(expectStatus(await api.call(`/v1/memories/${original.id}`, { token: bob.token }), 200).caption, 'A better caption.');
+  // Retrying the original publish is still idempotent, not a duplicate or reset.
+  const retried = expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200);
+  assert.equal(retried.caption, updated.caption);
+  assert.equal(retried.expiresAt, original.expiresAt);
+  const cleared = expectStatus(await api.call(`/v1/memories/${original.id}`, {
+    method: 'PATCH', token: alice.token, json: { caption: ' \n ' },
+  }), 200);
+  assert.equal(cleared.caption, '');
+  assert.deepEqual(cleared.media, original.media);
+});
+
+test('caption editing is owner-only and cannot change a shared place or empty a text-only reel', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'alice');
+  const bob = await register(api, 'bob');
+  const original = await publish(api, alice);
+  expectStatus(await api.call(`/v1/memories/${original.id}`, {
+    method: 'PATCH', token: bob.token, json: { caption: 'Not mine' },
+  }), 404);
+  for (const json of [{}, { caption: '' }, { caption: null }, { caption: 'x'.repeat(2201) }, { caption: 'new', location: LOCATION }]) {
+    expectStatus(await api.call(`/v1/memories/${original.id}`, { method: 'PATCH', token: alice.token, json }), 422);
+  }
+  const place = await publish(api, alice, {
+    id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Shared café', category: 'coffee' },
+  });
+  expectStatus(await api.call(`/v1/memories/${place.id}`, {
+    method: 'PATCH', token: alice.token, json: { caption: 'POI text' },
+  }), 422);
+  assert.equal(expectStatus(await api.call(`/v1/memories/${original.id}`, { token: alice.token }), 200).caption, original.caption);
+  const privatePost = await publish(api, alice, reel({ visibility: 'private' }));
+  const privateEdit = expectStatus(await api.call(`/v1/memories/${privatePost.id}`, {
+    method: 'PATCH', token: alice.token, json: { caption: 'Still only mine' },
+  }), 200);
+  assert.equal(privateEdit.visibility, 'private');
+  assert.equal(privateEdit.publishedAt, null);
+  assert.equal(privateEdit.expiresAt, privatePost.expiresAt);
+});
+
+test('editing a legacy public record without published_at does not republish it', async (t) => {
+  let time = Date.UTC(2026, 9, 22, 12);
+  const api = await fixture(t, { now: () => time });
+  const alice = await register(api, 'alice');
+  const original = await publish(api, alice);
+  const database = new DatabaseSync(api.databasePath);
+  database.prepare('UPDATE memories SET published_at = NULL WHERE id = ?').run(original.id);
+  database.close();
+  time += 73 * 60 * 60 * 1000;
+  const edited = expectStatus(await api.call(`/v1/memories/${original.id}`, {
+    method: 'PATCH', token: alice.token, json: { caption: 'An old memory' },
+  }), 200);
+  assert.equal(edited.publishedAt, null);
+  assert.equal(edited.createdAt, original.createdAt);
+  assert.equal(edited.expiresAt, original.expiresAt);
+  assert.equal((await listAll(api, alice, '/v1/feed')).length, 0);
+});
+
+test('72-hour boundary removes active POIs and Reels but only Reels leave the global map', async (t) => {
   let time = Date.UTC(2026, 9, 17, 12);
+  const publicationTime = time;
   const api = await fixture(t, { now: () => time });
   const alice = await register(api, 'alice');
   const bob = await register(api, 'bob');
   const old = await publish(api, alice, reel({ location: { latitude: 10, longitude: 179.8 } }));
+  const oldPOI = await publish(api, alice, {
+    id: randomUUID(), kind: 'poi', visibility: 'public',
+    location: { latitude: 10, longitude: 179.8 }, place: { name: 'Historic overlook', category: 'viewpoint' },
+  });
+  const otherVisit = await publish(api, bob, {
+    id: randomUUID(), kind: 'poi', visibility: 'public',
+    location: oldPOI.location, placeId: oldPOI.place.id,
+  });
   await publish(api, alice, reel({
     visibility: 'private', location: { latitude: 10, longitude: -179.7 },
   }));
-  time += 25 * 60 * 60 * 1000;
+  const mapPath = '/v1/map/memories?west=179&east=-179&south=9&north=11';
+  const originalPublicIDs = new Set([old.id, oldPOI.id, otherVisit.id]);
+  time = publicationTime + 72 * 60 * 60 * 1000 - 1;
+  for (const path of ['/v1/feed', mapPath]) {
+    const visible = await listAll(api, bob, path, 1);
+    assert.deepEqual(new Set(visible.map(item => item.id)), originalPublicIDs);
+    assert.ok(visible.every(item => item.expiresAt === new Date(time + 1).toISOString()));
+  }
+  time += 1;
+  assert.deepEqual(await listAll(api, bob, '/v1/feed'), [], 'exactly 72 hours is no longer active');
+  assert.deepEqual(new Set((await listAll(api, bob, mapPath, 1)).map(item => item.id)),
+    new Set([oldPOI.id, otherVisit.id]), 'expired POIs remain historical map footprints');
+  assert.deepEqual(new Set((await listAll(api, bob, `/v1/users/${alice.user.id}/memories`, 1)).map(item => item.id)),
+    new Set([old.id, oldPOI.id]), 'expiry does not hide public profile history');
+  assert.equal((await listAll(api, alice, '/v1/me/memories', 1)).length, 3);
+  expectStatus(await api.call(`/v1/memories/${old.id}`, { token: bob.token }), 200);
+
   const recent = await publish(api, alice, reel({ location: { latitude: 10, longitude: -179.8 } }));
   const feed = expectStatus(await api.call('/v1/feed', { token: bob.token }), 200);
   assert.deepEqual(feed.items.map((item) => item.id), [recent.id]);
-  expectStatus(await api.call(`/v1/memories/${old.id}`, { token: bob.token }), 200);
-  assert.equal(expectStatus(await api.call('/v1/me/memories', { token: alice.token }), 200).items.length, 3);
-
-  const crossing = expectStatus(await api.call(
-    '/v1/map/memories?west=179&east=-179&south=9&north=11', { token: bob.token },
-  ), 200);
-  assert.deepEqual(new Set(crossing.items.map((item) => item.id)), new Set([old.id, recent.id]));
+  assert.deepEqual(new Set((await listAll(api, bob, mapPath, 1)).map(item => item.id)),
+    new Set([oldPOI.id, otherVisit.id, recent.id]));
   const outside = expectStatus(await api.call(
     '/v1/map/memories?west=-123&east=-121&south=37&north=38', { token: bob.token },
   ), 200);
   assert.equal(outside.items.length, 0);
+
+  for (const memory of [old, oldPOI]) {
+    expectStatus(await api.call(`/v1/memories/${memory.id}`, { method: 'DELETE', token: alice.token }), 204);
+    expectStatus(await api.call(`/v1/memories/${memory.id}`, { token: bob.token }), 404);
+  }
+  await api.restart();
+  assert.deepEqual(new Set((await listAll(api, bob, mapPath, 1)).map(item => item.id)),
+    new Set([otherVisit.id, recent.id]), 'deleting one person’s expired visit preserves another person’s place footprint');
+  assert.deepEqual((await listAll(api, bob, `/v1/users/${alice.user.id}/memories`)).map(item => item.id), [recent.id]);
+  assert.equal((await listAll(api, alice, '/v1/me/memories')).length, 2);
+  expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token,
+    json: reel({ id: old.id, location: old.location }) }), 410);
+  assert.deepEqual((await listAll(api, bob, '/v1/feed')).map(item => item.id), [recent.id]);
+});
+
+test('existing 24-hour rows use 72-hour publication expiry without mutating stored history', async t => {
+  let time = Date.UTC(2026, 9, 17, 12);
+  const publicationTime = time;
+  const api = await fixture(t, { now: () => time });
+  const alice = await register(api, 'alice');
+  const bob = await register(api, 'bob');
+  const capturedEarlier = await publish(api, alice, reel({ capturedAt: '2026-10-10T12:00:00.000Z' }));
+  const legacy = await publish(api, alice);
+  const poi = await publish(api, alice, {
+    id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Legacy coffee', category: 'coffee' },
+  });
+  const db = new DatabaseSync(api.databasePath);
+  let schemaVersion;
+  let stored;
+  try {
+    schemaVersion = db.prepare('PRAGMA user_version').get().user_version;
+    db.prepare('UPDATE memories SET expires_at = ?').run(publicationTime + 24 * 60 * 60 * 1000);
+    db.prepare('UPDATE memories SET published_at = NULL, created_at = ? WHERE id = ?').run(publicationTime - 1000, legacy.id);
+    stored = db.prepare('SELECT id, created_at, published_at, expires_at FROM memories ORDER BY id').all();
+  } finally { db.close(); }
+  time += 48 * 60 * 60 * 1000;
+  await api.restart();
+  const expectedIDs = new Set([capturedEarlier.id, legacy.id, poi.id]);
+  const mapPath = '/v1/map/memories?west=-123&east=-121&south=37&north=38';
+  for (const path of ['/v1/feed', mapPath, '/v1/me/memories', `/v1/users/${alice.user.id}/memories`]) {
+    const records = await listAll(api, alice, path, 1);
+    assert.deepEqual(new Set(records.map(item => item.id)), expectedIDs);
+    for (const record of records) {
+      const start = record.id === legacy.id ? publicationTime - 1000 : publicationTime;
+      assert.equal(record.expiresAt, new Date(start + 72 * 60 * 60 * 1000).toISOString());
+    }
+    if (path === '/v1/feed') assert.equal(records.at(-1).id, legacy.id, 'fallback time also governs pagination order');
+  }
+  assert.equal(expectStatus(await api.call(`/v1/memories/${capturedEarlier.id}`, { token: bob.token }), 200).expiresAt,
+    new Date(publicationTime + 72 * 60 * 60 * 1000).toISOString(), 'capture time does not shorten delayed publication');
+  time = publicationTime + 72 * 60 * 60 * 1000 - 1000;
+  assert.deepEqual(new Set((await listAll(api, bob, '/v1/feed', 1)).map(item => item.id)), new Set([capturedEarlier.id, poi.id]));
+  time += 1000;
+  assert.deepEqual(await listAll(api, bob, '/v1/feed'), []);
+  assert.deepEqual((await listAll(api, bob, mapPath)).map(item => item.id), [poi.id]);
+  const reloaded = new DatabaseSync(api.databasePath);
+  try {
+    assert.equal(reloaded.prepare('PRAGMA user_version').get().user_version, schemaVersion);
+    assert.deepEqual(reloaded.prepare('SELECT id, created_at, published_at, expires_at FROM memories ORDER BY id').all(), stored);
+  } finally { reloaded.close(); }
 });
 
 test('cursor pagination is stable even when records have the same timestamp', async (t) => {
@@ -1109,6 +1270,116 @@ test('new and reused Apple places must remain near the submitted location', asyn
   assert.equal((await listAll(api, alice, '/v1/me/memories')).length, 1);
 });
 
+test('airport directory centers allow terminal check-ins while preserving the actual GPS location', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'alice');
+  const center = { latitude: 47.4502, longitude: -122.3088 };
+  const terminalGPS = { latitude: center.latitude + 0.011, longitude: center.longitude };
+  const airport = { name: 'Seattle–Tacoma International Airport', category: 'other', sourceId: randomUUID(),
+    coordinate: center, directoryKind: 'airport' };
+  const draft = { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS, place: airport };
+  const published = await publish(api, alice, draft);
+  assert.deepEqual(published.location, terminalGPS, 'post location must never be replaced by a directory centroid');
+  assert.deepEqual(published.place.coordinate, center);
+  assert.equal(published.place.directoryKind, 'airport');
+  assert.equal(published.place.category, 'other', 'airport metadata does not add or replace visual categories');
+  assert.equal(published.place.sourceId, airport.sourceId);
+  expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200);
+  await api.restart();
+  const stored = expectStatus(await api.call(`/v1/memories/${published.id}`, { token: alice.token }), 200);
+  assert.deepEqual(stored.place, published.place);
+  assert.deepEqual(stored.location, terminalGPS);
+  assert.deepEqual((await listAll(api, alice, '/v1/feed'))[0].place, published.place);
+});
+
+test('only explicit directory airports get 2km; ordinary and custom places keep 150m', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'alice');
+  const center = { latitude: 47.4502, longitude: -122.3088 };
+  const gpsAt = meters => ({ latitude: center.latitude + meters / 6_371_000 * 180 / Math.PI, longitude: center.longitude });
+  const post = place => ({ id: randomUUID(), kind: 'poi', visibility: 'public', location: gpsAt(1000), place });
+  const directory = { name: 'Airport', category: 'other', sourceId: randomUUID(), coordinate: center };
+  for (const place of [directory, { ...directory, name: 'SeaTac Airport Café', category: 'coffee' },
+    { name: 'Custom airport name', category: 'other', coordinate: center }]) {
+    expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: post(place) }), 422);
+  }
+  for (const place of [
+    { ...directory, directoryKind: 'mall' }, { ...directory, directoryKind: null },
+    { ...directory, directoryKind: 'airport', sourceId: undefined },
+    { ...directory, directoryKind: 'airport', coordinate: undefined },
+  ]) {
+    expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: post(place) }), 422);
+  }
+  const airport = { ...directory, directoryKind: 'airport' };
+  await publish(api, alice, { ...post(airport), location: gpsAt(1990) });
+  expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token,
+    json: { ...post({ ...airport, sourceId: randomUUID() }), location: gpsAt(2010) } }), 422);
+  await publish(api, alice, { ...post(directory), location: gpsAt(149), place: { ...directory, sourceId: randomUUID() } });
+  expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token,
+    json: { ...post(directory), location: gpsAt(151), place: { ...directory, sourceId: randomUUID() } } }), 422);
+});
+
+test('canonical airport reuse uses stored type and center; check-ins cannot upgrade or relocate ordinary places', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'alice');
+  const bob = await register(api, 'bob');
+  const center = { latitude: 47.4502, longitude: -122.3088 };
+  const terminalGPS = { latitude: center.latitude + 0.01, longitude: center.longitude };
+  const directory = { name: 'Seattle–Tacoma International Airport', category: 'other', sourceId: randomUUID(),
+    coordinate: center, directoryKind: 'airport' };
+  const airport = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: center, place: directory });
+  // Old clients omit directoryKind; canonical metadata still permits the terminal.
+  const bySource = await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS,
+    place: { name: 'Must not rename', category: 'coffee', sourceId: directory.sourceId, coordinate: terminalGPS } });
+  const byID = await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS, placeId: airport.place.id });
+  for (const result of [bySource, byID]) {
+    assert.deepEqual(result.place, airport.place);
+    assert.deepEqual(result.location, terminalGPS);
+  }
+  const farGPS = { latitude: center.latitude + 0.03, longitude: center.longitude };
+  for (const placeChoice of [
+    { placeId: airport.place.id },
+    { place: { ...directory, coordinate: farGPS } },
+  ]) {
+    expectStatus(await api.call('/v1/memories', { method: 'POST', token: bob.token,
+      json: { id: randomUUID(), kind: 'poi', visibility: 'public', location: farGPS, ...placeChoice } }), 422);
+  }
+  const caféDirectory = { name: 'Terminal café', category: 'coffee', sourceId: randomUUID(), coordinate: center };
+  const café = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: center, place: caféDirectory });
+  for (const location of [center, terminalGPS]) {
+    expectStatus(await api.call('/v1/memories', { method: 'POST', token: bob.token,
+      json: { id: randomUUID(), kind: 'poi', visibility: 'public', location,
+        place: { ...caféDirectory, directoryKind: 'airport' } } }), 422);
+  }
+  expectStatus(await api.call('/v1/memories', { method: 'POST', token: bob.token,
+    json: { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS, placeId: café.place.id } }), 422);
+  const preserved = expectStatus(await api.call(`/v1/memories/${café.id}`, { token: alice.token }), 200);
+  assert.deepEqual(preserved.place, café.place);
+  assert.equal(Object.hasOwn(preserved.place, 'directoryKind'), false);
+});
+
+test('legacy place payloads keep their pre-airport idempotency hashes', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'alice');
+  const draft = { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Existing café', category: 'coffee', coordinate: LOCATION, sourceId: randomUUID() } };
+  const original = await publish(api, alice, draft);
+  const oldNormalized = { id: draft.id, kind: draft.kind, visibility: draft.visibility, location: LOCATION,
+    caption: '', mediaIds: [], place: draft.place, placeId: null };
+  let db = new DatabaseSync(api.databasePath);
+  assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
+  // Reopen a genuine v10 shape, then retry the saved original request.
+  db.exec('DROP TABLE comments; ALTER TABLE places DROP COLUMN directory_kind; PRAGMA user_version = 10;');
+  db.close();
+  await api.restart();
+  const retried = expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200);
+  assert.deepEqual(retried, original);
+  db = new DatabaseSync(api.databasePath);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+  assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
+  db.close();
+});
+
 test('archive hiding is private, persistent, and separate from public record deletion', async (t) => {
   const api = await fixture(t);
   const alice = await register(api, 'alice');
@@ -1181,7 +1452,7 @@ test('public profiles expose only public historical memories with stable owner i
   expectStatus(await api.call('/v1/me/archive/hide', {
     method: 'POST', token: alice.token, json: { kind: 'reel', id: first.id },
   }), 204);
-  time += 2 * 24 * 60 * 60 * 1000;
+  time += 4 * 24 * 60 * 60 * 1000;
   assert.equal((await listAll(api, bob, '/v1/feed')).length, 0);
   const memories = await listAll(api, bob, `${profilePath}/memories`, 1);
   assert.deepEqual(new Set(memories.map(item => item.id)), new Set([first.id, second.id]));

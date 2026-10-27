@@ -21,15 +21,6 @@ struct MapTalkNearbyPlaceOption: Identifiable {
 
 @MainActor
 final class MapTalkViewModel: ObservableObject {
-    /// A normal list stays within roughly one block. GPS accuracy and venue
-    /// centroids get a little breathing room, while a sparse list can quietly
-    /// fill to 150 m. We never expand to the old 250 m neighborhood search.
-    private static let minimumPlaceSelectionRadius: CLLocationDistance = 90
-    private static let maximumPrimaryPlaceSelectionRadius: CLLocationDistance = 120
-    private static let fallbackPlaceSelectionRadius: CLLocationDistance = 150
-    private static let minimumNearbyPlaceCount = 3
-    private static let maximumNearbyPlaceCount = 6
-
     enum Scope {
         case global
         case user(User)
@@ -67,12 +58,15 @@ final class MapTalkViewModel: ObservableObject {
     @Published private(set) var isLoadingNearbyPlaces = true
 
     let scope: Scope
-    let friendFootprints: [MapTalkFriendFootprint]
+    @Published private(set) var friendFootprints: [MapTalkFriendFootprint] = []
+    private let previewFootprints: [MapTalkFriendFootprint]
     private let environment: AppEnvironment
     private let mapSearchRegion = PassthroughSubject<MKCoordinateRegion, Never>()
+    private let nearbyPlaceRefresh = PassthroughSubject<CLLocationCoordinate2D, Never>()
     private var backendMapSearch: Task<Void, Never>?
     private var lastBackendMapRegion: MKCoordinateRegion?
-    private var withdrawnPublicMemoryIDs: Set<UUID> = []
+    @Published private(set) var withdrawnPublicMemoryIDs: Set<UUID> = []
+    private var freshnessDate = Date.now
     private var repositoryPOIs: [RatedPOI] = []
     private var nearbySocialPOIs: [RatedPOI] = []
     private var repositoryActivePOIs: [RatedPOI] = []
@@ -90,6 +84,8 @@ final class MapTalkViewModel: ObservableObject {
     init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
         self.scope = scope
+        previewFootprints = environment.backend == nil && environment.build.featureFlags.contains(.mock)
+            ? MapTalkFriendFootprint.previewData : []
         locationAuthorization = environment.location.authorization.value
         if !environment.build.featureFlags.contains(.mock) {
             region = MapStartupLocation.worldRegion
@@ -103,7 +99,7 @@ final class MapTalkViewModel: ObservableObject {
         }
         switch scope {
         case .global:
-            friendFootprints = environment.backend == nil ? MapTalkFriendFootprint.previewData : []
+            friendFootprints = previewFootprints
             bind()
         case let .user(user):
             friendFootprints = []
@@ -147,13 +143,36 @@ final class MapTalkViewModel: ObservableObject {
         if case .global = scope {
             environment.location.requestWhenInUse()
             searchMap(in: lastVisibleRegion ?? region)
-            rebuildActiveFeed(asOf: .now)
+            refreshFreshness()
             if let backend = environment.backend {
                 Task { do { try await backend.refreshIfNeeded() } catch {
                     if backend.isActive && !(error is CancellationError) { backend.issue = error.localizedDescription }
                 } }
             }
         }
+    }
+
+    /// Refresh both map layers together, including after a long background stay.
+    /// Keeping one clock for the snapshot avoids a marker changing mid-tap.
+    func refreshFreshness(asOf now: Date = .now) {
+        guard case .global = scope else { return }
+        // Retention only bridges an expiry while someone is reading the card.
+        // Reopening the app after a long background stay must not carry that
+        // temporary exception into a new browsing session.
+        if let retainedActiveFeedItemID,
+           let retained = activeFeedItems.first(where: { $0.id == retainedActiveFeedItemID }) {
+            let remainsActive: Bool
+            switch retained.source {
+            case let .real(real):
+                remainsActive = StoryReadKeys.isActive(real, asOf: now)
+            case let .poi(group):
+                remainsActive = hasRecentVisit(group.ratedPOI, asOf: now)
+            case .journey:
+                remainsActive = StoryReadKeys.isFresh(retained.timestamp, asOf: now)
+            }
+            if !remainsActive { self.retainedActiveFeedItemID = nil }
+        }
+        rebuildActiveFeed(asOf: now)
     }
 
     /// Search-render input follows the map camera. It is intentionally
@@ -194,14 +213,19 @@ final class MapTalkViewModel: ObservableObject {
     ) -> [RatedPOI] {
         var result = mergePOIs(
             preferred: activeFeedPOIs,
-            fallback: ratedPOIs
+            fallback: ratedPOIs.filter { isUserScope || hasRecentVisit($0, asOf: freshnessDate) }
         )
         if let selectedID,
            let selectedMapPOI,
-           selectedMapPOI.id == selectedID {
-            result = mergePOIs(preferred: [selectedMapPOI], fallback: result)
+           selectedMapPOI.id == selectedID,
+           isUserScope || hasRecentVisit(selectedMapPOI, asOf: freshnessDate) {
+            let remaining = removingWithdrawnVisits(from: selectedMapPOI)
+            if let remaining {
+                result = mergePOIs(preferred: [remaining], fallback: result)
+            }
         }
-        return result
+        return result.compactMap { removingUnavailableMapVisits(from: $0) }
+            .filter { isUserScope || hasRecentVisit($0, asOf: freshnessDate) }
     }
 
     func mapRenderReels(
@@ -211,10 +235,31 @@ final class MapTalkViewModel: ObservableObject {
         var result = merge(activeFeedReels, with: reals)
         if let selectedID,
            let selectedMapReel,
-           selectedMapReel.id == selectedID {
+           selectedMapReel.id == selectedID,
+           !withdrawnPublicMemoryIDs.contains(selectedMapReel.id) {
             result = merge([selectedMapReel], with: result)
         }
-        return result
+        return result.filter { !unavailableMapMemoryIDs.contains($0.id) }
+    }
+
+    private var unavailableMapMemoryIDs: Set<UUID> {
+        guard case .global = scope else { return withdrawnPublicMemoryIDs }
+        return withdrawnPublicMemoryIDs.union(environment.backend?.excludedMapMemoryIDs ?? [])
+    }
+
+    private func removingUnavailableMapVisits(from place: RatedPOI) -> RatedPOI? {
+        let ids = unavailableMapMemoryIDs
+        guard place.checkIns.contains(where: { ids.contains($0.id) }) else { return place }
+        return BackendStore.removingMemories(ids, from: [place]).first
+    }
+
+    func removingWithdrawnVisits(from place: RatedPOI) -> RatedPOI? {
+        guard place.checkIns.contains(where: { withdrawnPublicMemoryIDs.contains($0.id) }) else { return place }
+        return BackendStore.removingMemories(withdrawnPublicMemoryIDs, from: [place]).first
+    }
+
+    private func hasRecentVisit(_ place: RatedPOI, asOf now: Date) -> Bool {
+        place.checkIns.contains { StoryReadKeys.isFresh($0.activityDate, asOf: now) }
     }
 
     /// Keep the currently opened feed item stable if its TTL crosses while
@@ -317,6 +362,13 @@ final class MapTalkViewModel: ObservableObject {
         publishableLiveLocation
     }
 
+    /// Opening the composer retries Maps even if the person has not moved
+    /// since an earlier network failure. It never changes the map or GPS fix.
+    func refreshNearbyPlaces() {
+        guard let location = publishableLiveLocation else { return }
+        nearbyPlaceRefresh.send(location.coordinate)
+    }
+
     func region(for real: RealPost) -> MKCoordinateRegion {
         regionAround(
             coordinate: real.center,
@@ -384,7 +436,7 @@ final class MapTalkViewModel: ObservableObject {
             // A person can select a sparse-list fallback, so submission uses
             // the same hard ceiling as the picker rather than its usual
             // tighter radius.
-            guard landmarkLocation.distance(from: location) <= Self.fallbackPlaceSelectionRadius else {
+            guard landmarkLocation.distance(from: location) <= POISelectionPolicy.radius(for: existing.poi.directoryKind) else {
                 return nil
             }
 
@@ -477,7 +529,7 @@ final class MapTalkViewModel: ObservableObject {
             comments: [],
             visibility: audience == .livePublic ? .publicAll : .privateOnly,
             createdAt: now,
-            expiresAt: now.addingTimeInterval(24 * 60 * 60)
+            expiresAt: now.addingTimeInterval(StoryReadKeys.freshWindow)
         )
 
         if let bubble {
@@ -676,6 +728,7 @@ final class MapTalkViewModel: ObservableObject {
             .removeDuplicates { previous, next in
                 previous.distance(to: next) < 10
             }
+            .merge(with: nearbyPlaceRefresh)
             .handleEvents(receiveOutput: { [weak self] _ in
                 self?.isLoadingNearbyPlaces = true
             })
@@ -793,16 +846,34 @@ final class MapTalkViewModel: ObservableObject {
         region = snapshot.mapRegion
     }
 
-    private func rebuildMapRenderContent() {
+    private func rebuildMapRenderContent(asOf now: Date = .now) {
+        freshnessDate = now
         let places = mergePOIs(
             preferred: publishedPOIOverlays,
             fallback: repositoryPOIs
         )
         // receive(on:) may still deliver a pre-withdrawal publisher snapshot.
         // Never let that queued snapshot put a withdrawn record back on screen.
-        ratedPOIs = withdrawnPublicMemoryIDs.isEmpty ? places : BackendStore.removingMemories(withdrawnPublicMemoryIDs, from: places)
+        ratedPOIs = places.compactMap { removingUnavailableMapVisits(from: $0) }
         reals = merge(publishedReelOverlays, with: repositoryMapReels)
-            .filter { !withdrawnPublicMemoryIDs.contains($0.id) }
+            .filter { !unavailableMapMemoryIDs.contains($0.id) }
+            .filter { isUserScope || StoryReadKeys.isActive($0, asOf: now) }
+
+        guard case .global = scope else { return }
+        // A place is either active or quiet, never both. Keep full public visit
+        // history in the card; only its presentation changes when it ages out.
+        let historySources = mergePOIs(preferred: ratedPOIs, fallback: repositoryActivePOIs)
+        let publicHistory = BackendStore.removingMemories(unavailableMapMemoryIDs, from: historySources)
+        let retainedIDs = Set(activeFeedPOIs.filter { hasRecentVisit($0, asOf: now) }.map(\.id))
+        let canonicalFootprints = publicHistory.compactMap { place -> MapTalkFriendFootprint? in
+            guard !retainedIDs.contains(place.id) else { return nil }
+            return MapTalkFriendFootprint.history(for: place, asOf: now)
+        }
+        let sourceIDs = Set(publicHistory.map(\.id))
+        friendFootprints = canonicalFootprints + previewFootprints.filter {
+            !sourceIDs.contains($0.ratedPOI.id) && !retainedIDs.contains($0.ratedPOI.id)
+        }
+        scheduleNextActiveFeedExpiry(from: activeFeedItems, asOf: now)
     }
 
     /// Builds one feed snapshot for a deliberate source/lifecycle event.
@@ -823,7 +894,7 @@ final class MapTalkViewModel: ObservableObject {
         activityPOIs = feedPOIs
         activityReels = allFeedReels
         let feedReels = allFeedReels
-            .filter { $0.expiresAt >= now }
+            .filter { StoryReadKeys.isActive($0, asOf: now) }
         var items = MapStoryFeed.items(
             reals: feedReels,
             ratedPOIs: feedPOIs,
@@ -848,26 +919,31 @@ final class MapTalkViewModel: ObservableObject {
             return group.ratedPOI
         }
 
-        scheduleNextActiveFeedExpiry(from: items, asOf: now)
+        rebuildMapRenderContent(asOf: now)
     }
 
     private func scheduleNextActiveFeedExpiry(
         from items: [RealStoriesRow.StoryItem],
         asOf now: Date
     ) {
-        let expiryDates = items.flatMap { item -> [Date] in
+        activeFeedExpiryWorkItem?.cancel()
+        // Map-only content also needs to age out without another camera move
+        // or network request. Include every visit, not just each person's latest.
+        let mapExpiryDates = (repositoryMapReels + publishedReelOverlays).map { StoryReadKeys.expiresAt(for: $0) }
+            + ratedPOIs.flatMap { $0.checkIns.map { StoryReadKeys.expiresAt(forActivityAt: $0.activityDate) } }
+        let expiryDates = (items.flatMap { item -> [Date] in
             switch item.source {
             case let .real(real):
-                return [real.expiresAt]
+                return [StoryReadKeys.expiresAt(for: real)]
             case let .poi(group):
                 return group.sharers.map {
-                    $0.timestamp.addingTimeInterval(StoryReadKeys.freshWindow)
+                    StoryReadKeys.expiresAt(forActivityAt: $0.timestamp)
                 }
             case .journey:
                 return []
             }
-        }
-        .filter { $0 >= now }
+        } + mapExpiryDates)
+        .filter { $0 > now }
 
         guard let nextExpiry = expiryDates.min() else { return }
         let delay = max(0.05, nextExpiry.timeIntervalSince(now) + 0.01)
@@ -888,15 +964,15 @@ final class MapTalkViewModel: ObservableObject {
     /// useful social context without duplicating one POI into several lists.
     func nearbyPlaceOptions(
         near location: CLLocation,
-        withinMeters radius: CLLocationDistance? = nil
+        withinMeters radius: CLLocationDistance? = nil,
+        matching additionalDirectoryPlaces: [RatedPOI] = []
     ) -> [MapTalkNearbyPlaceOption] {
-        let primaryRadius = radius ?? Self.primaryPlaceSelectionRadius(for: location)
-        let fallbackRadius = radius ?? Self.fallbackPlaceSelectionRadius
-        let directoryPlaces = nearbyDirectoryPOIs.map { place -> RatedPOI in
-            guard let canonicalID = environment.backend?.canonicalPlaceID(for: place.id) else { return place }
+        // A named search adds candidates to the same provenance-aware path;
+        // it never bypasses distance checks or promotes private history.
+        let directoryPlaces = (additionalDirectoryPlaces + nearbyDirectoryPOIs).map { place -> RatedPOI in
+            guard let canonical = environment.backend?.canonicalPlaceForSelection(place.poi, fromDirectory: true) else { return place }
             return RatedPOI(
-                poi: POI(id: canonicalID, name: place.poi.name,
-                         coordinate: place.poi.coordinate, category: place.poi.category),
+                poi: canonical,
                 highlight: place.highlight, secondary: place.secondary, media: place.media,
                 checkIns: place.checkIns, comments: place.comments, endorsements: place.endorsements,
                 tags: place.tags, isFavoritedByCurrentUser: place.isFavoritedByCurrentUser,
@@ -973,13 +1049,22 @@ final class MapTalkViewModel: ObservableObject {
         }
 
         let sorted = candidates.values
+            .map { place -> RatedPOI in
+                guard let canonical = environment.backend?.canonicalPlaceForSelection(place.poi) else { return place }
+                return RatedPOI(poi: canonical,
+                    highlight: place.highlight, secondary: place.secondary, media: place.media,
+                    checkIns: place.checkIns, comments: place.comments, endorsements: place.endorsements,
+                    tags: place.tags, isFavoritedByCurrentUser: place.isFavoritedByCurrentUser,
+                    favoritesCount: place.favoritesCount)
+            }
             .compactMap { rated -> MapTalkNearbyPlaceOption? in
                 let candidate = CLLocation(
                     latitude: rated.poi.coordinate.latitude,
                     longitude: rated.poi.coordinate.longitude
                 )
                 let distance = candidate.distance(from: location)
-                guard distance <= fallbackRadius else { return nil }
+                let allowedRadius = radius ?? POISelectionPolicy.radius(for: rated.poi.directoryKind)
+                guard distance <= allowedRadius else { return nil }
 
                 // Social proof is derived only from publicly visible source
                 // data. Never infer it from the merged private MyMap copy.
@@ -1018,59 +1103,11 @@ final class MapTalkViewModel: ObservableObject {
                 return lhs.place.poi.name.localizedCaseInsensitiveCompare(rhs.place.poi.name) == .orderedAscending
             }
 
-        return Self.curatedNearbyPlaces(
-            from: sorted,
-            primaryRadius: primaryRadius
-        )
-    }
-
-    /// Good GPS usually resolves to 90-100 m here; poorer readings can widen
-    /// the primary list a little, but never beyond 120 m.
-    private static func primaryPlaceSelectionRadius(for location: CLLocation) -> CLLocationDistance {
-        let accuracy = location.horizontalAccuracy.isFinite && location.horizontalAccuracy >= 0
-            ? location.horizontalAccuracy
-            : 10
-        return min(
-            maximumPrimaryPlaceSelectionRadius,
-            max(minimumPlaceSelectionRadius, 80 + accuracy)
-        )
-    }
-
-    /// Preserve the four physically closest choices, then reserve up to two
-    /// slots for nearby places with friend or MyMap context. This keeps the
-    /// selector accurate without letting six anonymous directory results hide
-    /// the one place that already means something to the person.
-    private static func curatedNearbyPlaces(
-        from sorted: [MapTalkNearbyPlaceOption],
-        primaryRadius: CLLocationDistance
-    ) -> [MapTalkNearbyPlaceOption] {
-        let primary = sorted.filter { $0.distanceMeters <= primaryRadius }
-        var selected = Array(primary.prefix(4))
-        var selectedIDs = Set(selected.map(\.id))
-
-        for option in sorted where selected.count < maximumNearbyPlaceCount {
-            guard selectedIDs.contains(option.id) == false,
-                  option.friendUsers.isEmpty == false || option.isInMyMap else {
-                continue
-            }
-            selected.append(option)
-            selectedIDs.insert(option.id)
-        }
-
-        let minimumCount = min(minimumNearbyPlaceCount, sorted.count)
-        for option in sorted where selected.count < maximumNearbyPlaceCount {
-            guard selectedIDs.contains(option.id) == false,
-                  option.distanceMeters <= primaryRadius || selected.count < minimumCount else { continue }
-            selected.append(option)
-            selectedIDs.insert(option.id)
-        }
-
-        return selected.sorted { lhs, rhs in
-            if abs(lhs.distanceMeters - rhs.distanceMeters) > 0.5 {
-                return lhs.distanceMeters < rhs.distanceMeters
-            }
-            return lhs.place.poi.name.localizedCaseInsensitiveCompare(rhs.place.poi.name) == .orderedAscending
-        }
+        // The directory already bounds its work. A six-row shortlist used to
+        // hide valid neighboring venues (especially the seventh or eighth)
+        // and discard places 120–150 m away even though publication allows
+        // them. Let the list scroll instead of silently removing choices.
+        return sorted
     }
 
     /// The world map carries other people's history; MyMap carries the

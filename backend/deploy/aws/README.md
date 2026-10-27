@@ -4,9 +4,27 @@
 
 用户已明确批准非敏感代码经自己的私有 S3 部署，并将现有 Apple 登录私钥、Apple token 加密 key 和备份加密 key 分别存入 `us-east-2` 的三个 Secrets Manager secret；不更换密钥，不把 `secrets.tar` 上传到 S3。实际资源和验证记录见 [deployed-resources.json](deployed-resources.json)。主机及相关资源已开始计费，当前仍为 Free Plan；正常基础估算约 $20.05/月，按已确认的 $25/月预算规划，不依赖赠送额度，也不是硬封顶。不要重复创建另一台主机。升级 Paid Plan 或扩大资源范围仍须单独确认。
 
-当前范围：10–20 位受邀用户、Apple 登录、照片、短视频、POI／Reel、MyMap。2026-10-21 已将现有主机升级到包含 FFmpeg 的 schema 9，未新增服务、扩容或提高每用户 50 MiB 媒体额度。真实聊天／好友／通知及 Collection 云同步仍不在上线范围内。完整边界和两台真机验收见 [部署说明](../../DEPLOYMENT.md)。
+当前范围：小规模受邀用户、Apple 登录、照片、短视频、POI／Reel、MyMap。真实聊天／好友／通知及 Collection 云同步仍不在上线范围内。完整边界和两台真机验收见 [部署说明](../../DEPLOYMENT.md)。
 
-最新视频发布验证：210 项本机测试、87 项目标 ARM64 隔离测试通过；60 秒 / 720p / 60fps 合成视频在 1 CPU / 768 MiB / 64 MiB tmpfs 限制下处理用时 9.4 秒。网关等待调整为 120 秒以覆盖有限时的视频校验。实际加密备份取回恢复、完整表内容迁移校验和 HTTPS 健康检查通过，现有用户及帖子未改变。视频真机发布由用户验收；详细结果见 [deployed-resources.json](deployed-resources.json) 的 `videoRelease`，下文早期部署记录保留作为历史。
+**最新配置：2026-10-26 每账号媒体总额度已由 50 MiB 提高到 1 GiB。** 用户明确批准后，仅更新 `MAPTALK_USER_MEDIA_LIMIT_BYTES=1073741824` 并使用原镜像重建 API；schema 12、密钥、资源规格及现有数据保持原部署，不需要安装客户端。生产配置读取、数据库 quick check、容器健康、HTTPS 200 和未认证 feed 401 均通过；配置／存储／断点上传本机测试 24 项通过。单视频 20 MiB 限制没有改变，弱网／后台重试问题未由此次额度调整一并解决。证据见 `mediaQuotaUpdate`。
+
+**最新发布：2026-10-23 已部署纯文字评论，schema 12。** 资源和费用方案不变；加密 S3 备份恢复、24 张旧表／媒体／未完成上传完整校验通过，公网 HTTPS 正常。266 项本机后端、117 项 ARM64 隔离测试通过；兼容客户端包含 POI 名称搜索／分类及 72 小时过期修复，266 项单元、7 项 UI 回归及 2 项视觉复测通过。开发签名恢复后，客户端已于 11:27（Pacific/Honolulu）按用户要求覆盖安装到 iPhone 15 Pro，未卸载或操作手机界面，真机体验待用户验收。详见 [部署说明](../../DEPLOYMENT.md) 及 `commentsPOIRelease`。此前 schema 11 的发布和手机安装证据保留在 `captionAirportRelease`。
+
+**历史发布：2026-10-22 00:05（America/Los_Angeles）已部署 72 小时动态规则，schema 10 不变。** 公开 Reel 过期后不再进入主地图和动态；POI 过期后退出动态，但保留历史足迹数据，MyMap 不因到期删除记录。226 项本机后端测试、79 项目标 Linux ARM64 隔离测试通过。客户端 216 项单元测试、最终地图控件 UI 连续 3 次回归通过；最终 iPhone Release 构建与签名校验通过，已于当日 13:36 覆盖安装到用户的 iPhone 15 Pro，真机体验待用户验收。详细证据见下方最新记录及资源清单的 `freshness72HourRelease`。
+
+历史续传发布（2026-10-21）：222 项本机后端测试、159 项目标 ARM64 隔离测试通过；现有资源限制下验证分段中断、重启恢复、真实视频解码、取消和私密媒体权限。升级前加密备份实际上传 S3、取回认证恢复，副本与正式迁移均逐列校验全部 22 张原有表，旧数据不变。该版本 HTTPS 健康、未认证上传拦截和手机覆盖安装已确认；iOS 190 项单元测试、6 项界面回归通过，但锁屏/蜂窝切换及旧视频重试由用户亲自验收。详见 `deployed-resources.json` 的 `resumableVideoRelease`。
+
+历史视频发布验证（2026-10-21）：210 项本机测试、87 项目标 ARM64 隔离测试通过；60 秒 / 720p / 60fps 合成视频在 1 CPU / 768 MiB / 64 MiB tmpfs 限制下处理用时 9.4 秒。网关等待调整为 120 秒以覆盖有限时的视频校验。实际加密备份取回恢复、完整表内容迁移校验和 HTTPS 健康检查通过，现有用户及帖子未改变。视频真机发布由用户验收；详细结果见 [deployed-resources.json](deployed-resources.json) 的 `videoRelease`。
+
+## 最新部署验证记录（2026-10-22）
+
+- `2026-10-22T07:05:23Z` 原地切换成功（SSM `c129b58f-e903-4a9e-b2bf-ff6d1d2101ed`）。镜像为 `maptalk-backend:freshness-72h-20261021`，运行别名 `maptalk-backend:local`，image ID 为 `sha256:fbe1e6bd01ed6fe5c2ada71e1f4a00dc1249e41d627fa45677deb37564109de1`；服务器源码 SHA-256 为 `ee77c35c824f4e4f245af3c53c61202f3c36135c66e8a2fe6d61cdce6e570b6e`。
+- 非敏感源码包 S3 key 为 `maptalk/deploy/freshness-72h-20261021/source.tgz`，125,560 字节，SHA-256 `798d3213a8d2813173615b71e4896ca32994225c6047e8558af6f360842e8de1`；不含密钥。226 项本机后端测试及 79 项 Linux ARM64 隔离测试通过。
+- 切换前备份与恢复验证成功（SSM `cf0a0246-29a5-48c2-8309-ec982c0ca615`）：S3 `maptalk/backups/pre-freshness-20261022T0700.mtbak` 为 19,431,460 字节，SSE-S3 `AES256`；实际取回的密文逐字节一致，认证恢复的 schema 10 全部 24 张表与快照一致。计数为 1 用户、15 记录、13 媒体、1 上传会话、0 分段。没有用恢复副本覆盖在线库。
+- 容器 `healthy`，OOM 为 false，重启次数为 0；资源限制仍为 805,306,368 字节（768 MiB）内存和 1,000,000,000 NanoCPUs（1 CPU）。公开 HTTPS `/health` 为 200，未认证 feed／map 均为 401。schema、资源、每用户额度和密钥不变，没有新增云服务。
+- 回退镜像 `maptalk-backend:pre-freshness-20261022` 与正式加密备份继续保留。schema 10 不变，必要时回退代码／镜像，不用发布前快照覆盖后续写入。
+- **临时文件尚未清理。** 自动清理被审批拒绝，已请求用户明确批准但尚未收到回复。上述 S3 源码对象以及 `/srv/maptalk/backups/freshness-verify-20261022` 中的明文恢复库／快照仍保留；目录为 0700、文件为 0600。获准后只清理这些临时副本，不删除正式加密备份、在线库或回退镜像。
+- 客户端 216 项单元测试通过；最终地图控件 UI 在原模拟器连续通过 3 次（0 失败），包含历史足迹标记不遮挡定位／发布按钮的断言，结果为 `/private/tmp/maptalk-controls-final-repeat.xcresult`。没有新建模拟器。最终 iPhone Release 构建与签名校验通过，日志为 `/private/tmp/maptalk-history-final-release-build.log`；产物连接 `https://api.maptalkapp.com`。2026-10-22 13:36（America/Los_Angeles）devicectl 确认新版覆盖安装到用户 iPhone 15 Pro（bundle ID `com.chengsi.maptalk`，安装序号 7332）。没有卸载、启动 App 或操作手机界面，真机验收仍待用户完成。
 
 ## 预算
 
@@ -25,7 +43,7 @@
 
 用户已接受 **约 $25/月的规划预算**，不是硬封顶；不含税、域名及超额流出。批准范围为下述单台服务器、30 GiB 加密 gp3、一个公网 IPv4、私有 S3 加密备份和三个 Secrets Manager secret。超出该范围或报价明显变化时重新确认，不默认升级计划。
 
-- 每用户照片额度 50 MiB；20 位用户合计不足 1 GiB。1.25 GiB 数据库是假设，包含一定余量，不是数据库硬限制。本地数据库、7 份备份、WAL 和创建备份的明文／密文临时文件都占数据盘。
+- 上表为原来每用户 50 MiB、20 位用户合计不足 1 GiB 时的规划，不是当前用满额度的报价。2026-10-26 每用户总媒体额度已提高到 1 GiB，未扩容 20 GiB 数据盘，也不预分配空间。本地数据库、7 份完整备份、WAL、Docker 和创建备份的明文／密文临时文件共同占用数据盘，不能按 20 GiB 推算可以容纳 20 个满额账号。邀请更多用户前按实际增长复核容量和备份用量；S3 与流量费用随实际使用增加，扩容仍需用户确认。
 - S3 PUT 类请求 $0.005/千次、GET $0.0004/千次；备份分为多个 8 MiB 分片，不是每天一个请求。同 Region EC2↔S3 传输免费。
 - 互联网流出前 100 GB/月是 AWS 多服务共享额度。若全部可用，总流出 200 GB 时额外约 $9，500 GB 时额外约 $36，不是无限流量。
 - `t4g` 使用 **Standard** CPU credits，避免 Unlimited 积分附加费；积分耗尽会降速，需实测照片处理。gp3 只用基线性能，S3 用 SSE-S3。
@@ -106,7 +124,7 @@ AWS 模式要求 S3 配置，缺失时拒绝启动，不悄悄退回本机备份
 
 不再测试时先问用户资源保留／清理选择并解释残余费用，再执行；不自动删库、删 bucket 或销毁密钥。
 
-## 最新部署验证记录（2026-10-20）
+## 首次部署验证记录（2026-10-20，历史）
 
 - 已使用现有 Apple Development 身份签名并安装到用户连接的 iPhone 15 Pro（iOS 26.6.2），`devicectl` 确认安装与启动成功。系统签名验证通过，签名中保留 `com.apple.developer.applesignin = Default`，Team / Bundle 与后端配置一致，安装包内 API 为 `https://api.maptalkapp.com`。没有卸载 App、清除数据、修改 UI 或启动模拟器；真实 Apple 授权及后续功能验收仍需用户在手机上操作。
 - 本机完整测试：**177 项通过**。早先 v2 包完整性验证为 macOS ARM64 / Node 24.10 下 147 项通过；不能用本机结果代替目标平台验证。

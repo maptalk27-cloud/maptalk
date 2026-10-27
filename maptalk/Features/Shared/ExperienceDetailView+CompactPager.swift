@@ -20,6 +20,7 @@ struct CompactRealCard: View {
     let hideHeader: Bool
     let hideMedia: Bool
     let useTallLayout: Bool
+    let isPlaybackActive: Bool
     let onUserSelected: ((User) -> Void)?
     let onCapsuleTap: ((JourneyPost) -> Void)?
 
@@ -39,6 +40,7 @@ struct CompactRealCard: View {
         hideHeader: Bool = false,
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
+        isPlaybackActive: Bool = true,
         onUserSelected: ((User) -> Void)? = nil,
         onCapsuleTap: ((JourneyPost) -> Void)? = nil
     ) {
@@ -53,12 +55,33 @@ struct CompactRealCard: View {
         self.hideHeader = hideHeader
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.isPlaybackActive = isPlaybackActive
         self.onUserSelected = onUserSelected
         self.onCapsuleTap = onCapsuleTap
         _lightboxSelection = State(initialValue: real.attachments.first?.id ?? UUID())
     }
 
     var body: some View {
+        Group {
+            if isSingleVideoDetail {
+                singleVideoRow
+            } else {
+                regularCardContent
+            }
+        }
+        .fullScreenCover(isPresented: $isLightboxPresented) {
+            if lightboxItems.isEmpty == false {
+                ExperienceDetailView.MediaLightbox(
+                    items: lightboxItems,
+                    selection: $lightboxSelection,
+                    accentColor: lightboxAccentColor,
+                    isPresented: $isLightboxPresented
+                )
+            }
+        }
+    }
+
+    private var regularCardContent: some View {
         HStack(alignment: .top, spacing: 0) {
             if showHeader && isSingleVideoDetail == false {
                 profileButton {
@@ -127,16 +150,6 @@ struct CompactRealCard: View {
             maxHeight: useSplitLayout ? .infinity : nil,
             alignment: .topLeading
         )
-        .fullScreenCover(isPresented: $isLightboxPresented) {
-            if lightboxItems.isEmpty == false {
-                ExperienceDetailView.MediaLightbox(
-                    items: lightboxItems,
-                    selection: $lightboxSelection,
-                    accentColor: lightboxAccentColor,
-                    isPresented: $isLightboxPresented
-                )
-            }
-        }
     }
 
     private var horizontalPadding: CGFloat {
@@ -275,6 +288,7 @@ struct CompactRealCard: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("experience.real.author.\(real.id.uuidString)")
         }
     }
 
@@ -304,6 +318,9 @@ struct CompactRealCard: View {
         }
         .frame(width: avatarSize, height: avatarSize)
         .clipShape(Circle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(displayName) avatar")
+        .accessibilityIdentifier("experience.real.avatar.\(real.id.uuidString)")
     }
 
     private var displayName: String {
@@ -330,24 +347,18 @@ struct CompactRealCard: View {
         }
     }
 
+    @ViewBuilder
     private var contentText: some View {
-        Text(trimmedMessage ?? fallbackDescription)
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.white)
-            .lineLimit(textLineLimit)
-    }
-
-    private var trimmedMessage: String? {
-        let text = real.message?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (text?.isEmpty == false) ? text : nil
-    }
-
-    private var fallbackDescription: String {
-        if let descriptor = ExperienceDetailView.mediaDescriptor(for: real) {
-            return descriptor
+        if let caption = PostCaption.visibleText(real.message) {
+            Text(caption)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.white)
+                .lineLimit(textLineLimit)
+                .accessibilityIdentifier("experience.real.caption.\(real.id.uuidString)")
         }
-        return "\(real.visibility.displayName) drop"
     }
+
+    private var trimmedMessage: String? { PostCaption.visibleText(real.message) }
 
     private var hasMedia: Bool {
         real.attachments.isEmpty == false
@@ -430,27 +441,27 @@ struct CompactRealCard: View {
             if let attachment = real.attachments.first,
                case let .video(url, poster) = attachment.kind {
                 let containerAspectRatio: CGFloat = 3.0 / 4.0
-                let ratioValue = CGFloat(attachment.videoMetadata?.aspectRatio ?? 0)
-                let videoAspectRatio = ratioValue > 0 ? ratioValue : (16.0 / 9.0)
-                let shouldFit = videoAspectRatio > containerAspectRatio
                 ExperienceDetailView.AutoPlayVideoView(
                     url: url,
                     poster: poster,
                     accentColor: lightboxAccentColor,
                     mode: ExperienceDetailView.MediaCardView.Mode.card,
-                    usesAspectFit: shouldFit,
-                    isMuted: false
+                    usesAspectFit: false,
+                    isMuted: false,
+                    isPlaybackActive: isPlaybackActive && !isLightboxPresented
                 )
                 .frame(maxWidth: .infinity)
                 .aspectRatio(containerAspectRatio, contentMode: .fit)
-                .background(Color.white)
+                .background(Color.black)
                 .clipped()
-                .padding(.leading, -singleVideoLeadingInset)
-                .padding(.trailing, -singleVideoTrailingInset)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     handleMediaTap(for: attachment)
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Play video")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityIdentifier("experience.real.video.\(real.id.uuidString)")
                 // The text/footer are visual-only. Leaving their full-size
                 // overlay hit-testable blocks the pager's horizontal drag.
                 .overlay(singleVideoOverlay)
@@ -468,13 +479,13 @@ struct CompactRealCard: View {
             HStack(alignment: .top, spacing: 10) {
                 if showHeader {
                     avatarView
-                        .padding(.leading, -singleVideoLeadingInset)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(displayName)
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
+                        .accessibilityIdentifier("experience.real.author.\(real.id.uuidString)")
                     if suppressContent == false {
                         contentText
                     }
@@ -557,7 +568,7 @@ struct CompactRealCard: View {
 
     private var footerRow: some View {
         HStack {
-            Text(real.createdAt.formatted(.relative(presentation: .named)))
+            Text(real.cardDisplayDate.formatted(.relative(presentation: .named)))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
 
@@ -568,9 +579,13 @@ struct CompactRealCard: View {
                     symbol: "heart.fill",
                     text: ExperienceDetailView.formatCount(real.metrics.likeCount)
                 )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(real.metrics.likeCount) likes")
+                .accessibilityIdentifier("experience.real.likes.\(real.id.uuidString)")
                 metricsPill(
                     symbol: "bubble.right.fill",
-                    text: ExperienceDetailView.formatCount(real.metrics.commentCount)
+                    text: ExperienceDetailView.formatCount(real.metrics.commentCount),
+                    commentTarget: real.visibility == .privateOnly ? nil : .memory(real.id)
                 )
             }
         }
@@ -661,11 +676,11 @@ struct CompactRealCard: View {
         }
     }
 
-    private func metricsPill(symbol: String, text: String) -> some View {
+    private func metricsPill(symbol: String, text: String, commentTarget: BackendCommentTarget? = nil) -> some View {
         HStack(spacing: 4) {
             Image(systemName: symbol)
                 .font(.caption.weight(.semibold))
-            Text(text)
+            ExperienceCommentCount(target: commentTarget, fallback: text)
                 .font(.caption.weight(.semibold))
         }
         .foregroundStyle(.white.opacity(0.85))

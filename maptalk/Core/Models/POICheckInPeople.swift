@@ -14,7 +14,7 @@ extension RatedPOI {
     func checkInPeople(since cutoff: Date? = nil) -> [CheckInPerson] {
         let eligible = checkIns.filter { checkIn in
             guard let cutoff else { return true }
-            return checkIn.activityDate >= cutoff
+            return checkIn.activityDate > cutoff
         }
         return Dictionary(grouping: eligible, by: \.userId).compactMap { userID, entries in
             let ordered = entries.sorted {

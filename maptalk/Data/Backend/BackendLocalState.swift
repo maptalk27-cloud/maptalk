@@ -3,6 +3,7 @@ import Foundation
 enum PendingPublicationStatus: Equatable {
     case waiting
     case uploading
+    case processing
     case failed(String)
 }
 
@@ -36,6 +37,9 @@ nonisolated struct BackendLocalState: Codable, Sendable {
     var deleted: Set<UUID> = []
     var privateOverrides: [BackendMemory] = []
     var blocked: Set<UUID> = []
+    // Missing in older caches. These are map-only negative lookups, not post
+    // tombstones: a successful fresh public read can make an ID eligible again.
+    var mapExcludedMemoryIDs: Set<UUID>? = nil
 }
 
 /// Account- and server-scoped durable metadata. No tokens are stored here.

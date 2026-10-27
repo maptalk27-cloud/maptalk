@@ -261,6 +261,18 @@ final class maptalkUITests: XCTestCase {
         )
         XCTAssertEqual(refreshedCompactMarker.frame.width, 16, accuracy: 1)
         XCTAssertEqual(refreshedCompactMarker.frame.height, 16, accuracy: 1)
+        let controlFrames = [
+            app.buttons["location.circle.fill"],
+            app.buttons["maptalk.add-place"],
+            app.buttons["maptalk.share-reel"]
+        ].map(\.frame)
+        for marker in refreshedCompactMarkers.allElementsBoundByIndex
+            + refreshedExpandedMarkers.allElementsBoundByIndex {
+            XCTAssertFalse(
+                controlFrames.contains { $0.intersects(marker.frame) },
+                "A visible place must not be hidden beneath a map control: \(marker.identifier)"
+            )
+        }
         refreshedCompactMarker.tap()
         XCTAssertTrue(
             preview.waitForExistence(timeout: 5),
@@ -352,8 +364,34 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(app.textFields["Search memories"].exists)
         XCTAssertTrue(app.buttons["Filter records"].exists)
 
-        app.buttons["Cancel"].tap()
+        let addSelected = app.buttons["mymap.add-selected-memories"]
+        XCTAssertTrue(addSelected.waitForExistence(timeout: 3))
+        XCTAssertFalse(addSelected.isEnabled)
+
+        let alreadyAdded = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000009118"
+        ]
+        XCTAssertTrue(alreadyAdded.waitForExistence(timeout: 3))
+        XCTAssertFalse(alreadyAdded.isEnabled)
+        XCTAssertEqual(alreadyAdded.value as? String, "Already in collection")
+
+        app.buttons["mymap.cancel-selection"].tap()
         XCTAssertTrue(collectionList.waitForExistence(timeout: 5))
+
+        addMemories.tap()
+        let newMemory = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000009122"
+        ]
+        XCTAssertTrue(newMemory.waitForExistence(timeout: 3))
+        newMemory.tap()
+        XCTAssertEqual(addSelected.value as? String, "1 selected")
+        addSelected.tap()
+        XCTAssertTrue(collectionList.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["4 memories"].exists)
+        XCTAssertTrue(app.buttons[
+            "mymap.collection-memory.00000000-0000-0000-0000-000000009122"
+        ].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.collection-picker"].exists)
     }
 
     @MainActor
@@ -391,12 +429,14 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
-    func testMyMapListLeadingSwipeOpensCollectionPicker() throws {
+    func testMyMapListLeadingSwipeDoesNotOfferCollectionAction() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--mock-data"]
         app.launch()
 
         openMyMapList(app)
+        let select = app.buttons["mymap.select-memories"]
+        XCTAssertTrue(select.waitForExistence(timeout: 5))
 
         let record = app.buttons[
             "mymap.list-record.00000000-0000-0000-0000-000000009118"
@@ -404,13 +444,249 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(record.waitForExistence(timeout: 5))
         record.swipeRight()
 
-        let add = app.buttons["Add to collection"]
-        XCTAssertTrue(add.waitForExistence(timeout: 3))
-        add.tap()
+        XCTAssertFalse(app.buttons["Add to collection"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.collection-picker"].exists)
+        XCTAssertTrue(select.exists)
+        XCTAssertTrue(app.textFields["Search memories"].exists)
+        XCTAssertFalse(app.buttons["Return to list"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.compact-capsule"].exists)
+    }
 
-        XCTAssertTrue(app.navigationBars["Add to collection"].waitForExistence(timeout: 3))
-        app.buttons["Cancel"].tap()
-        XCTAssertTrue(record.waitForExistence(timeout: 3))
+    @MainActor
+    func testMyMapMultipleSelectionCanToggleAndCancelWithoutOpeningMap() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
+        app.launch()
+        openMyMapList(app)
+
+        let select = app.buttons["mymap.select-memories"]
+        XCTAssertTrue(select.waitForExistence(timeout: 5))
+        let collections = app.buttons["mymap.collections-entry"]
+        XCTAssertTrue(collections.exists)
+        let title = app.navigationBars["MyMap"].staticTexts["MyMap"]
+        XCTAssertTrue(title.exists)
+        XCTAssertLessThan(select.frame.maxX, title.frame.minX)
+        XCTAssertGreaterThan(collections.frame.minX, title.frame.maxX)
+        select.tap()
+
+        let addSelected = app.buttons["mymap.add-selected-memories"]
+        XCTAssertTrue(addSelected.waitForExistence(timeout: 3))
+        XCTAssertFalse(addSelected.isEnabled)
+        XCTAssertEqual(addSelected.value as? String, "0 selected")
+        XCTAssertFalse(app.buttons["Show map"].exists)
+
+        let record = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000009118"
+        ]
+        XCTAssertEqual(record.value as? String, "Not selected")
+        record.tap()
+        XCTAssertEqual(record.value as? String, "Selected")
+        XCTAssertEqual(addSelected.value as? String, "1 selected")
+        XCTAssertTrue(addSelected.isEnabled)
+        XCTAssertTrue(app.navigationBars["Select memories"].exists)
+        XCTAssertTrue(app.buttons["mymap.cancel-selection"].exists)
+        XCTAssertFalse(app.buttons["Return to list"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.compact-capsule"].exists)
+
+        // Organizing taps and swipes must not become browsing or deletion.
+        record.swipeLeft()
+        XCTAssertFalse(app.buttons["Remove from MyMap"].exists)
+        XCTAssertFalse(app.buttons["Delete from MyMap and feed"].exists)
+        XCTAssertEqual(addSelected.value as? String, "1 selected")
+        XCTAssertEqual(record.value as? String, "Selected")
+        record.swipeRight()
+        XCTAssertEqual(addSelected.value as? String, "1 selected")
+        XCTAssertEqual(record.value as? String, "Selected")
+        XCTAssertFalse(app.buttons["Return to list"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.compact-capsule"].exists)
+        record.tap()
+        XCTAssertEqual(record.value as? String, "Not selected")
+        XCTAssertFalse(addSelected.isEnabled)
+
+        record.tap()
+        app.buttons["mymap.cancel-selection"].tap()
+        XCTAssertTrue(select.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Show map"].exists)
+        XCTAssertFalse(addSelected.exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.collections-screen"].exists)
+
+        let browsingScreenshot = XCTAttachment(screenshot: app.screenshot())
+        browsingScreenshot.name = "MyMap list after cancelling selection"
+        browsingScreenshot.lifetime = .keepAlways
+        add(browsingScreenshot)
+
+        select.tap()
+        XCTAssertEqual(addSelected.value as? String, "0 selected")
+        XCTAssertEqual(record.value as? String, "Not selected")
+        app.buttons["mymap.cancel-selection"].tap()
+    }
+
+    @MainActor
+    func testMyMapMultipleSelectionSurvivesSearchAndPickerCancellation() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
+        app.launch()
+        openMyMapList(app)
+        app.buttons["mymap.select-memories"].tap()
+
+        let kyoto = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000009118"
+        ]
+        kyoto.tap()
+
+        let search = app.textFields["Search memories"]
+        search.tap()
+        search.typeText("Nairobi")
+        let nairobi = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000009122"
+        ]
+        XCTAssertTrue(nairobi.waitForExistence(timeout: 3))
+        nairobi.tap()
+
+        let addSelected = app.buttons["mymap.add-selected-memories"]
+        XCTAssertEqual(addSelected.value as? String, "2 selected")
+        addSelected.tap()
+        let picker = app.descendants(matching: .any)["mymap.collection-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 3))
+        app.navigationBars["Add to collection"].buttons["Cancel"].tap()
+
+        XCTAssertTrue(addSelected.waitForExistence(timeout: 3))
+        XCTAssertEqual(addSelected.value as? String, "2 selected")
+        XCTAssertEqual(nairobi.value as? String, "Selected")
+        XCTAssertEqual(search.value as? String, "Nairobi")
+
+        search.tap()
+        search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Nairobi".count))
+        XCTAssertTrue(kyoto.waitForExistence(timeout: 3))
+        XCTAssertEqual(kyoto.value as? String, "Selected")
+        XCTAssertEqual(nairobi.value as? String, "Selected")
+        XCTAssertTrue(app.navigationBars["Select memories"].exists)
+        XCTAssertTrue(app.buttons["mymap.cancel-selection"].exists)
+        XCTAssertFalse(app.buttons["Return to list"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["mymap.compact-capsule"].exists)
+        app.buttons["mymap.cancel-selection"].tap()
+    }
+
+    @MainActor
+    func testMyMapMultipleSelectionCreatesFolderWithOnlySelectedMemories() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
+        app.launch()
+        openMyMapList(app)
+        app.buttons["mymap.select-memories"].tap()
+
+        let selectedIDs = [
+            "00000000-0000-0000-0000-000000009118",
+            "00000000-0000-0000-0000-000000009120"
+        ]
+        for id in selectedIDs {
+            app.buttons["mymap.list-record.\(id)"].tap()
+        }
+
+        let selectionScreenshot = XCTAttachment(screenshot: app.screenshot())
+        selectionScreenshot.name = "MyMap list with two selected memories"
+        selectionScreenshot.lifetime = .keepAlways
+        add(selectionScreenshot)
+
+        app.buttons["mymap.add-selected-memories"].tap()
+
+        let picker = app.descendants(matching: .any)["mymap.collection-picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 3))
+        let newFolder = app.buttons["mymap.picker-new-collection"]
+        newFolder.tap()
+        let naming = app.alerts["New collection"]
+        XCTAssertTrue(naming.waitForExistence(timeout: 3))
+        naming.buttons["Cancel"].tap()
+        XCTAssertTrue(picker.waitForExistence(timeout: 3))
+
+        newFolder.tap()
+        let name = naming.textFields["Collection name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 3))
+        name.tap()
+        name.typeText("Selected weekend")
+        naming.buttons["Create"].tap()
+
+        XCTAssertTrue(app.buttons["mymap.select-memories"].waitForExistence(timeout: 5))
+        XCTAssertFalse(picker.exists)
+        XCTAssertFalse(app.buttons["mymap.add-selected-memories"].exists)
+        app.buttons["mymap.collections-entry"].tap()
+        let folder = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@",
+            "mymap.collection-folder.", "Open Selected weekend"
+        )).firstMatch
+        XCTAssertTrue(folder.waitForExistence(timeout: 3))
+        XCTAssertEqual(folder.value as? String, "2 memories")
+        folder.tap()
+        XCTAssertTrue(app.navigationBars["Selected weekend"].waitForExistence(timeout: 3))
+
+        let memberRows = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "mymap.collection-memory."
+        ))
+        XCTAssertEqual(memberRows.count, 2)
+        for id in selectedIDs {
+            XCTAssertTrue(app.buttons["mymap.collection-memory.\(id)"].exists)
+        }
+        XCTAssertFalse(app.buttons[
+            "mymap.collection-memory.00000000-0000-0000-0000-000000009122"
+        ].exists)
+    }
+
+    @MainActor
+    func testMyMapMultipleSelectionAddsToExistingFolderWithoutDuplicates() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
+        app.launch()
+        openMyMapList(app)
+        app.buttons["mymap.select-memories"].tap()
+
+        // Kyoto is already in After dark; Nairobi is not. Both can be selected
+        // before a destination is chosen, but only Nairobi should be appended.
+        app.buttons["mymap.list-record.00000000-0000-0000-0000-000000009118"].tap()
+        app.buttons["mymap.add-selected-memories"].tap()
+        let destination = app.buttons[
+            "mymap.collection-destination.00000000-0000-0000-0000-000000008101"
+        ]
+        XCTAssertTrue(destination.waitForExistence(timeout: 3))
+        XCTAssertFalse(destination.isEnabled, "A destination containing all selected memories is a no-op")
+        app.navigationBars["Add to collection"].buttons["Cancel"].tap()
+
+        let newMemory = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000009122"
+        ]
+        XCTAssertTrue(newMemory.waitForExistence(timeout: 3))
+        newMemory.tap()
+        app.buttons["mymap.add-selected-memories"].tap()
+        XCTAssertTrue(destination.waitForExistence(timeout: 3))
+        XCTAssertTrue(destination.isEnabled)
+        destination.tap()
+
+        XCTAssertTrue(app.buttons["mymap.select-memories"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["mymap.add-selected-memories"].exists)
+        app.buttons["mymap.collections-entry"].tap()
+        let folder = app.buttons[
+            "mymap.collection-folder.00000000-0000-0000-0000-000000008101"
+        ]
+        XCTAssertTrue(folder.waitForExistence(timeout: 3))
+        XCTAssertEqual(folder.value as? String, "4 memories")
+        folder.tap()
+        XCTAssertTrue(app.navigationBars["After dark"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["4 memories"].exists)
+        XCTAssertEqual(app.buttons.matching(identifier:
+            "mymap.collection-memory.00000000-0000-0000-0000-000000009118"
+        ).count, 1)
+        XCTAssertTrue(app.buttons[
+            "mymap.collection-memory.00000000-0000-0000-0000-000000009122"
+        ].exists)
+
+        app.buttons["Add memories"].tap()
+        let added = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000009122"
+        ]
+        XCTAssertTrue(added.waitForExistence(timeout: 3))
+        XCTAssertFalse(added.isEnabled)
+        XCTAssertEqual(added.value as? String, "Already in collection")
+        app.buttons["mymap.cancel-selection"].tap()
+        XCTAssertTrue(app.navigationBars["After dark"].waitForExistence(timeout: 3))
     }
 
     @MainActor
@@ -443,6 +719,143 @@ final class maptalkUITests: XCTestCase {
 
         XCTAssertTrue(record.waitForExistence(timeout: 5))
         XCTAssertTrue(app.textFields["Search memories"].exists)
+    }
+
+    @MainActor
+    func testMyMapPortraitVideoCardKeepsSharedChromeAndExpandsFullWidth() throws {
+        // This existing memory contains the bundled portrait MP4, three likes,
+        // and an attached Journey. It exercises the actual shared card without
+        // Photos access, a new fixture launch path, or a physical device.
+        continueAfterFailure = true
+        defer { continueAfterFailure = false }
+        let app = XCUIApplication()
+        app.launchArguments = ["--mock-data", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        defer { app.terminate() }
+
+        openMyMapList(app)
+        let record = app.buttons["mymap.list-record.00000000-0000-0000-0000-000000009118"]
+        guard record.waitForExistence(timeout: 5) else {
+            XCTFail("The existing bundled portrait-video memory must be available")
+            return
+        }
+        record.tap()
+
+        // The parent's identifier can propagate to its background images.
+        // Select the pager explicitly, then find shared chrome globally by ID;
+        // compact content may be exposed as Buttons instead of StaticTexts.
+        let pager = app.collectionViews["mymap.compact-capsule"].firstMatch
+        guard pager.waitForExistence(timeout: 5) else {
+            XCTFail("Selecting the memory must open its ordinary compact card")
+            return
+        }
+        waitForVideoCardDetent(in: app, expanded: false)
+        let compactFrame = pager.frame
+        attachVideoCardEvidence(app, name: "Portrait video — compact shared card")
+
+        assertPortraitVideoChrome(in: app, inside: compactFrame)
+
+        // Use the open area of the card, avoiding the interactive author and
+        // Journey capsule, so this is the same tap-to-expand used by people.
+        pager.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.45)).tap()
+        waitForVideoCardDetent(in: app, expanded: true)
+        attachVideoCardEvidence(app, name: "Portrait video — expanded shared card")
+        XCTAssertGreaterThan(pager.frame.height, compactFrame.height + 80)
+
+        let video = app.descendants(matching: .any)[
+            "experience.real.video.00000000-0000-0000-0000-000000009118"
+        ].firstMatch
+        guard video.waitForExistence(timeout: 5) else {
+            XCTFail("The expanded card must expose its ordinary video playback target")
+            return
+        }
+        XCTAssertEqual(video.frame.minX, app.frame.minX, accuracy: 1,
+                       "Expanded video must reach the sheet's left edge")
+        XCTAssertEqual(video.frame.maxX, app.frame.maxX, accuracy: 1,
+                       "Expanded video must reach the sheet's right edge")
+        XCTAssertEqual(video.label, "Play video")
+        video.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.45)).tap()
+
+        let close = app.buttons["experience.media-lightbox.close"]
+        guard close.waitForExistence(timeout: 5) else {
+            XCTFail("Tapping video must open the existing lightbox with its Close control")
+            return
+        }
+        attachVideoCardEvidence(app, name: "Portrait video — playback lightbox")
+        close.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+        XCTAssertTrue(video.waitForExistence(timeout: 5))
+        waitForVideoCardDetent(in: app, expanded: true)
+        attachVideoCardEvidence(app, name: "Portrait video — returned to expanded card")
+
+        // Drag the native grabber toward the compact detent rather than
+        // swiping the video, whose gestures belong to playback and paging.
+        let grabber = app.buttons["Sheet Grabber"]
+        XCTAssertTrue(grabber.waitForExistence(timeout: 5))
+        let collapseTarget = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.58))
+        grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: collapseTarget)
+        waitForVideoCardDetent(in: app, expanded: false)
+        attachVideoCardEvidence(app, name: "Portrait video — collapsed after playback")
+        XCTAssertLessThan(pager.frame.height, app.frame.height * 0.5)
+        assertPortraitVideoChrome(in: app, inside: pager.frame)
+
+        let journey = app.buttons["Journey memories"].firstMatch
+        XCTAssertTrue(journey.waitForExistence(timeout: 5))
+        XCTAssertTrue(journey.isHittable, "The compact Journey capsule must remain interactive after playback")
+        journey.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["mymap.journey-header"].firstMatch
+            .waitForExistence(timeout: 5))
+        let map = app.descendants(matching: .any)["mymap.map-canvas"].firstMatch
+        XCTAssertEqual(map.value as? String, "Journey: Kyoto lantern run",
+                       "The existing Journey capsule must open its own memories")
+        attachVideoCardEvidence(app, name: "Portrait video — Journey capsule remains interactive")
+    }
+
+    @MainActor
+    private func assertPortraitVideoChrome(in app: XCUIApplication, inside frame: CGRect) {
+        let postID = "00000000-0000-0000-0000-000000009118"
+        for (suffix, label) in [("author", "chengsi"), ("avatar", "chengsi avatar"), ("likes", "3 likes")] {
+            let element = app.descendants(matching: .any)["experience.real.\(suffix).\(postID)"].firstMatch
+            XCTAssertTrue(element.waitForExistence(timeout: 5), "The compact card must retain \(suffix)")
+            if element.exists {
+                XCTAssertEqual(element.label, label)
+                assertVideoCardElement(element, isInside: frame, name: suffix)
+            }
+        }
+    }
+
+    @MainActor
+    private func waitForVideoCardDetent(in app: XCUIApplication, expanded: Bool) {
+        let grabber = app.buttons["Sheet Grabber"]
+        let expectedValue = expanded ? "Expanded" : "Half screen"
+        let reachedDetent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND value == %@", expectedValue), object: grabber
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [reachedDetent], timeout: 5), .completed,
+                       "The native sheet must settle at its \(expectedValue) detent")
+    }
+
+    @MainActor
+    private func assertVideoCardElement(_ element: XCUIElement, isInside frame: CGRect, name: String,
+                                        file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(element.frame.isEmpty, "\(name) must have visible bounds", file: file, line: line)
+        XCTAssertTrue(frame.insetBy(dx: -1, dy: -1).contains(element.frame),
+                      "\(name) must remain within the visible card: \(element.frame) in \(frame)",
+                      file: file, line: line)
+    }
+
+    @MainActor
+    private func attachVideoCardEvidence(_ app: XCUIApplication, name: String) {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "\(name) — accessibility hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
     }
 
     @MainActor

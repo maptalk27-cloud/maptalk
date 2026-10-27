@@ -371,8 +371,8 @@ struct JourneyCollectionsSheet: View {
     }
 }
 
-/// A compact destination picker used by MyMap's swipe action. It behaves like
-/// moving a file: choose a folder, or make one, with no extra configuration.
+/// A compact destination picker for MyMap's selected memories. Adding stores
+/// references only: choose a folder, or make one, without moving originals.
 @MainActor
 struct JourneyFolderPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -415,6 +415,7 @@ struct JourneyFolderPickerSheet: View {
                         Image(systemName: "folder.badge.plus")
                     }
                     .accessibilityLabel("New collection")
+                    .accessibilityIdentifier("mymap.picker-new-collection")
                 }
             }
             .alert("New collection", isPresented: $isCreatingCollection) {
@@ -422,6 +423,7 @@ struct JourneyFolderPickerSheet: View {
                 Button("Cancel", role: .cancel) {}
                 Button("Create", action: createCollection)
             }
+            .accessibilityIdentifier("mymap.collection-picker")
         }
     }
 
@@ -455,6 +457,7 @@ struct JourneyFolderPickerSheet: View {
         .buttonStyle(.plain)
         .disabled(additions == 0)
         .opacity(additions == 0 ? 0.45 : 1)
+        .accessibilityIdentifier("mymap.collection-destination.\(folder.id.uuidString)")
     }
 
     private func createCollection() {

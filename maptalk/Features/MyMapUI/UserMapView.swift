@@ -25,7 +25,7 @@ struct UserMapView: View {
                 canEditJourneyFolders: viewModel.canEditJourneyFolders,
                 deletesPublishedPosts: viewModel.deletesPublishedPosts,
                 pendingPublications: viewModel.pendingPublications,
-                onRetryPublication: { viewModel.retryPendingPublications() },
+                onRetryPublication: { viewModel.retryPendingPublications(id: $0) },
                 onCreateJourneyFolder: { title, references in
                     viewModel.createJourneyFolder(
                         title: title,
@@ -92,6 +92,7 @@ private struct ConnectedPostActions: ViewModifier {
     let reference: JourneyFolder.MemberReference
     @State private var pendingAction: PostAction?
     @State private var errorMessage: String?
+    @State private var editingMemory: BackendMemory?
 
     private struct PostAction {
         let memory: BackendMemory
@@ -124,6 +125,11 @@ private struct ConnectedPostActions: ViewModifier {
                     }
                 }
             }
+            .sheet(isPresented: Binding(get: { editingMemory != nil }, set: { if !$0 { editingMemory = nil } })) {
+                if let memory = editingMemory {
+                    BackendCaptionEditor(store: store, memory: memory, onSaved: { _ in })
+                }
+            }
             .confirmationDialog(pendingAction?.title ?? "Post", isPresented: Binding(
                 get: { pendingAction != nil }, set: { if !$0 { pendingAction = nil } }
             ), titleVisibility: .visible, presenting: pendingAction) { action in
@@ -152,6 +158,10 @@ private struct ConnectedPostActions: ViewModifier {
 
     @ViewBuilder
     private func actions(for memory: BackendMemory) -> some View {
+        if memory.kind == "reel" {
+            Button("Edit caption", systemImage: "pencil") { editingMemory = memory }
+                .disabled(store.pendingPublications[memory.id] != nil || store.pendingMemoryMutations.contains(memory.id))
+        }
         if memory.moderationStatus == "pending" {
             Text("Pending review")
         } else if memory.moderationStatus == "rejected" {

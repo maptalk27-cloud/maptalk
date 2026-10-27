@@ -14,15 +14,23 @@ final class PublishComposerUITests: XCTestCase {
         defer { app.terminate() }
         openPlace(in: app)
 
-        let capture = app.buttons["Take a photo or video"]
+        let capture = app.buttons["maptalk.place.add-media"]
         let library = app.buttons["Choose from library"]
         let cancel = app.buttons["Cancel publishing"]
-        waitUntilHittable(capture)
+        XCTAssertTrue(capture.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["maptalk.place.camera-photo"].exists)
+        XCTAssertFalse(app.buttons["maptalk.place.camera-video"].exists,
+                       "One shutter must offer tap-to-photo and hold-to-video without a mode switch")
         XCTAssertTrue(library.isHittable)
         XCTAssertTrue(cancel.isHittable)
         XCTAssertFalse(app.buttons["Cancel"].exists,
                        "Opening Place must not immediately present the system library or camera")
         XCTAssertFalse(app.navigationBars["Photos"].exists)
+
+        let preview = XCTAttachment(screenshot: app.screenshot())
+        preview.name = "Embedded POI camera stays inside the publishing panel"
+        preview.lifetime = .keepAlways
+        add(preview)
 
         // A person can choose the destination without first dismissing an
         // unrelated camera or permission screen.
@@ -30,7 +38,7 @@ final class PublishComposerUITests: XCTestCase {
         let back = app.buttons["Back to place"]
         waitUntilHittable(back)
         back.tap()
-        waitUntilHittable(capture)
+        XCTAssertTrue(capture.waitForExistence(timeout: 5))
         XCTAssertTrue(library.isHittable)
         cancel.tap()
         waitUntilHittable(app.buttons["Add a place"])
@@ -73,7 +81,8 @@ final class PublishComposerUITests: XCTestCase {
         XCTAssertEqual(landmark.value as? String, draft)
         waitUntilGone(app.staticTexts["New place"])
         waitUntilGone(keyboard)
-        XCTAssertTrue(app.buttons["Take a photo or video"].isHittable)
+        XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
+        XCTAssertTrue(app.buttons["Choose from library"].isHittable)
     }
 
     @MainActor
@@ -90,6 +99,7 @@ final class PublishComposerUITests: XCTestCase {
 
         let landmark = app.buttons["maptalk.place.choose-landmark"]
         waitUntilHittable(landmark)
+        waitUntilGone(app.keyboards.firstMatch)
         let library = app.buttons["Choose from library"]
         waitUntilHittable(library)
         library.tap()
@@ -97,7 +107,7 @@ final class PublishComposerUITests: XCTestCase {
 
         waitUntilHittable(landmark)
         XCTAssertEqual(landmark.value as? String, "Quiet garden corner")
-        XCTAssertTrue(app.buttons["Take a photo or video"].isHittable)
+        XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
         XCTAssertTrue(library.isHittable)
         XCTAssertTrue(app.buttons["Add to MyMap"].isEnabled,
                       "A selected place can still be checked in without a photo or video")
@@ -139,6 +149,63 @@ final class PublishComposerUITests: XCTestCase {
     }
 
     @MainActor
+    func testNearbyPlaceSearchStaysInPickerAndPreservesCaptureDraft() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        openPlace(in: app)
+        openPlaceChoices(in: app)
+        let search = app.textFields["maptalk.place.search"]
+        waitUntilHittable(search)
+        search.tap()
+        search.typeText("Airport")
+        XCTAssertEqual(search.value as? String, "Airport")
+        XCTAssertTrue(app.staticTexts["Choose a place"].exists)
+        XCTAssertFalse(app.staticTexts["New place"].exists)
+        XCTAssertFalse(app.navigationBars["Photos"].exists)
+        attachScreenshot(app, name: "POI search stays in the existing place picker")
+        let clear = app.buttons["Clear place search"]
+        waitUntilHittable(clear)
+        clear.tap()
+        XCTAssertEqual(search.value as? String, "Search nearby places")
+        app.buttons["Back to place"].tap()
+        waitUntilHittable(app.buttons["maptalk.place.add-media"])
+        waitUntilGone(app.keyboards.firstMatch)
+        XCTAssertTrue(app.buttons["Choose from library"].isHittable)
+        XCTAssertFalse(app.staticTexts["New place"].exists)
+    }
+
+    @MainActor
+    func testCreatePlaceRemainsReachableWhileSearchingWithKeyboard() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        openPlace(in: app)
+        openPlaceChoices(in: app)
+        let search = app.textFields["maptalk.place.search"]
+        waitUntilHittable(search)
+        search.tap()
+        search.typeText("A quiet place that is not listed")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        let create = app.buttons["maptalk.place.create-new"]
+        waitUntilHittable(create)
+        XCTAssertLessThanOrEqual(create.frame.maxY, keyboard.frame.minY + 1,
+                                 "Creating a missing place stays reachable above the keyboard without scrolling")
+        attachScreenshot(app, name: "Place search keeps creation visible above keyboard")
+        create.tap()
+        let name = app.textFields["maptalk.place.new-name"]
+        waitUntilHittable(name)
+        name.tap()
+        name.typeText("A quiet garden")
+        let confirm = app.buttons["Use this place"]
+        waitUntilHittable(confirm)
+        confirm.tap()
+        let landmark = app.buttons["maptalk.place.choose-landmark"]
+        waitUntilHittable(landmark)
+        XCTAssertEqual(landmark.value as? String, "A quiet garden")
+        waitUntilGone(keyboard)
+    }
+
+    @MainActor
     private func launchDemo() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--mock-data"]
@@ -154,7 +221,9 @@ final class PublishComposerUITests: XCTestCase {
         let entry = app.buttons["Add a place"]
         waitUntilHittable(entry)
         entry.tap()
-        waitUntilHittable(app.buttons["Take a photo or video"])
+        waitUntilHittable(app.buttons["Choose from library"])
+        XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
+        XCTAssertTrue(app.buttons["maptalk.place.flip-camera"].exists)
     }
 
     @MainActor
@@ -189,18 +258,42 @@ final class PublishComposerUITests: XCTestCase {
 
     @MainActor
     private func cancelSystemLibrary(in app: XCUIApplication) {
-        // PhotosPicker uses Cancel on some iOS versions and Close on others.
-        // Both are distinct from our own "Cancel publishing" action.
-        let controls = [app.buttons["Cancel"], app.buttons["Close"]]
-        let available = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in controls.contains { $0.exists && $0.isHittable } },
+        // The first cold PhotosPicker launch exposes its remote AX tree while
+        // the visible sheet still says Loading. At that point its Cancel frame
+        // is service-local (y=14), and asking isHittable can throw rather than
+        // return false. Wait for a stable, screen-positioned navigation bar
+        // before testing hittability. This still taps the real system control.
+        let navigationBar = app.navigationBars["Photos"]
+        let cancel = navigationBar.buttons.matching(
+            NSPredicate(format: "label IN %@", ["Cancel", "Close"])
+        ).firstMatch
+        var lastNavigationFrame = CGRect.null
+        var lastCancelFrame = CGRect.null
+        let laidOut = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard navigationBar.exists, cancel.exists else { return false }
+                let navigationFrame = navigationBar.frame
+                let cancelFrame = cancel.frame
+                // In this portrait iPhone sheet the real bar is below the
+                // status area, not at the remote service's zero-based origin.
+                guard cancelFrame.height > 0,
+                      navigationFrame.minY >= cancelFrame.height,
+                      navigationFrame.contains(cancelFrame) else { return false }
+                defer {
+                    lastNavigationFrame = navigationFrame
+                    lastCancelFrame = cancelFrame
+                }
+                return navigationFrame == lastNavigationFrame && cancelFrame == lastCancelFrame
+            },
             object: app
         )
-        XCTAssertEqual(XCTWaiter.wait(for: [available], timeout: 8), .completed,
-                       "An explicitly opened system library should offer cancellation")
-        guard let cancel = controls.first(where: { $0.exists && $0.isHittable }) else { return }
+        XCTAssertEqual(XCTWaiter.wait(for: [laidOut], timeout: 15), .completed,
+                       "The system library must finish positioning its navigation controls")
+        // Scope to navigation: the Photos privacy notice also has a Close
+        // button, but dismissing that notice would not cancel the library.
+        waitUntilHittable(cancel)
         cancel.tap()
-        waitUntilGone(cancel)
+        waitUntilGone(navigationBar)
     }
 
     @MainActor

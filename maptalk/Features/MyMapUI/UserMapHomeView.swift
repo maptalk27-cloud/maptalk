@@ -42,17 +42,22 @@ struct UserMapRecord: Identifiable {
     }
 
     func publicationStatus(in pending: [UUID: PendingPublicationStatus]) -> PendingPublicationStatus? {
-        let statuses: [PendingPublicationStatus]
+        pendingPublication(in: pending)?.status
+    }
+
+    func pendingPublication(in pending: [UUID: PendingPublicationStatus]) -> (id: UUID, status: PendingPublicationStatus)? {
+        let ids: [UUID]
         switch kind {
-        case let .reel(reel): statuses = [pending[reel.id]].compactMap { $0 }
-        case let .poi(rated): statuses = rated.checkIns.compactMap { pending[$0.id] }
-        case .journey: statuses = []
+        case let .reel(reel): ids = [reel.id]
+        case let .poi(rated): ids = rated.checkIns.map(\.id)
+        case .journey: ids = []
         }
+        let entries = ids.compactMap { id in pending[id].map { (id: id, status: $0) } }
         // A grouped place must still expose a failed visit even when another
         // visit is uploading successfully.
-        return statuses.first { if case .failed = $0 { return true }; return false }
-            ?? statuses.first { $0 == .uploading }
-            ?? statuses.first
+        return entries.first { if case .failed = $0.status { return true }; return false }
+            ?? entries.first { $0.status == .uploading || $0.status == .processing }
+            ?? entries.first
     }
 
     var cityName: String {
@@ -394,20 +399,32 @@ private struct MyMapRemovalConfirmation: ViewModifier {
     }
 }
 
+/// Preserve Button accessibility/disabled semantics, but require a real tap.
+/// A plain List Button can otherwise activate on an unsupported-direction swipe.
+private struct ArchiveRecordButtonStyle: PrimitiveButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isEnabled { configuration.trigger() }
+            }
+            .accessibilityAction {
+                if isEnabled { configuration.trigger() }
+            }
+    }
+}
+
 struct UserMapHomeView: View {
     private enum Display: Equatable { case list, map }
 
-    private struct JourneyAddContext: Identifiable {
-        let id = UUID()
-        let references: [JourneyFolder.MemberReference]
-    }
-
-    /// A temporary MyMap list mode used only to add memories to one folder.
+    /// One selection mode, entered from MyMap or from a specific collection.
     /// Search and filtering stay in their familiar home rather than becoming
     /// part of Collection management.
     private struct CollectionMemorySelectionContext: Identifiable {
         let id = UUID()
-        let destinationFolderID: UUID
+        let destinationFolderID: UUID?
     }
 
     fileprivate enum RecordType: String, CaseIterable, Identifiable, Hashable {
@@ -480,7 +497,7 @@ struct UserMapHomeView: View {
     let canEditJourneyFolders: Bool
     let deletesPublishedPosts: Bool
     let pendingPublications: [UUID: PendingPublicationStatus]
-    let onRetryPublication: () -> Void
+    let onRetryPublication: (UUID) -> Void
     let onCreateJourneyFolder: (String, [JourneyFolder.MemberReference]) -> JourneyFolder?
     let onSaveJourneyFolder: (JourneyFolder) -> Void
     let onDeleteJourneyFolder: (UUID) -> Void
@@ -517,7 +534,7 @@ struct UserMapHomeView: View {
     @State private var mapSafeAreaBottom: CGFloat = 0
     @State private var mapOverlayRevision = 0
     @State private var mapReelAlignTrigger = 0
-    @State private var journeyAddContext: JourneyAddContext?
+    @State private var isCollectionPickerPresented = false
     @State private var collectionMemorySelection: CollectionMemorySelectionContext?
     @State private var selectedCollectionMemoryReferences: Set<JourneyFolder.MemberReference> = []
     @State private var journeyFolderRenameRequest: JourneyFolderRenameRequest?
@@ -562,7 +579,7 @@ struct UserMapHomeView: View {
         canEditJourneyFolders: Bool = false,
         deletesPublishedPosts: Bool = false,
         pendingPublications: [UUID: PendingPublicationStatus] = [:],
-        onRetryPublication: @escaping () -> Void = {},
+        onRetryPublication: @escaping (UUID) -> Void = { _ in },
         onCreateJourneyFolder: @escaping (String, [JourneyFolder.MemberReference]) -> JourneyFolder? = { _, _ in nil },
         onSaveJourneyFolder: @escaping (JourneyFolder) -> Void = { _ in },
         onDeleteJourneyFolder: @escaping (UUID) -> Void = { _ in },
@@ -622,6 +639,11 @@ struct UserMapHomeView: View {
                                 && isJourneyOrganizerTransactionActive == false
                         )
                         .accessibilityHidden(isOrganizingMapJourneys == false)
+                }
+
+                if isSelectingCollectionMemories {
+                    collectionSelectionAction
+                        .zIndex(100)
                 }
 
                 if mapJourneyIsActive == false,
@@ -708,12 +730,7 @@ struct UserMapHomeView: View {
             if isSelectingCollectionMemories {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel", action: cancelCollectionMemorySelection)
-                }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(selectionAddTitle, action: completeCollectionMemorySelection)
-                        .fontWeight(.semibold)
-                        .disabled(selectedCollectionMemoryReferences.isEmpty)
+                        .accessibilityIdentifier("mymap.cancel-selection")
                 }
             } else if isListRecordFocusActive {
                 ToolbarItem(placement: .topBarLeading) {
@@ -728,6 +745,14 @@ struct UserMapHomeView: View {
             if isSelectingCollectionMemories == false,
                display == .list,
                canEditJourneyFolders {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Select") {
+                        beginCollectionMemorySelection()
+                    }
+                    .disabled(records.isEmpty)
+                    .accessibilityIdentifier("mymap.select-memories")
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         presentCollectionsDirectory()
@@ -777,17 +802,19 @@ struct UserMapHomeView: View {
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
-        .sheet(item: $journeyAddContext) { context in
+        .sheet(isPresented: $isCollectionPickerPresented) {
             JourneyFolderPickerSheet(
                 folders: journeyFolders,
-                references: context.references,
+                references: selectedCollectionReferencesInListOrder,
                 onSelect: { folderID in
-                    append(context.references, toJourneyFolder: folderID)
-                    journeyAddContext = nil
+                    guard append(selectedCollectionReferencesInListOrder, toJourneyFolder: folderID) != nil else { return }
+                    finishCollectionMemorySelection()
                 },
                 onCreate: { title in
-                    _ = onCreateJourneyFolder(title, context.references)
-                    journeyAddContext = nil
+                    let references = selectedCollectionReferencesInListOrder
+                    guard references.isEmpty == false,
+                          onCreateJourneyFolder(title, references) != nil else { return }
+                    finishCollectionMemorySelection()
                 }
             )
             .presentationDetents([.medium])
@@ -878,6 +905,11 @@ struct UserMapHomeView: View {
             hasUserNavigatedMap = true
             onMapUserNavigation()
         }
+        .onChange(of: records.compactMap(\.journeyMemberReference)) { _, references in
+            // Refresh and pending-upload reconciliation can replace records.
+            // Never keep a count for memories that can no longer be added.
+            selectedCollectionMemoryReferences.formIntersection(references)
+        }
         // Both the map markers and the folder dock participate in one drag.
         // Their hit frames must therefore use exactly the same coordinate
         // space as the UIKit recognizer, rather than each view's screen/global
@@ -947,14 +979,6 @@ struct UserMapHomeView: View {
             }
     }
 
-    private func addRecordToCollection(_ record: UserMapRecord) {
-        guard let reference = record.journeyMemberReference else { return }
-        isSearchFocused = false
-        journeyAddContext = JourneyAddContext(
-            references: [reference]
-        )
-    }
-
     private var isSelectingCollectionMemories: Bool {
         collectionMemorySelection != nil
     }
@@ -963,7 +987,7 @@ struct UserMapHomeView: View {
         if let target = collectionSelectionTarget {
             return "Add to \(target.title)"
         }
-        return "MyMap"
+        return isSelectingCollectionMemories ? "Select memories" : "MyMap"
     }
 
     private var collectionSelectionTarget: JourneyFolder? {
@@ -971,18 +995,43 @@ struct UserMapHomeView: View {
         return journeyFolders.first(where: { $0.id == folderID })
     }
 
-    private var selectionAddTitle: String {
-        let count = selectedCollectionMemoryReferences.count
-        guard count > 0 else { return "Add" }
-        return count == 1 ? "Add 1" : "Add \(count)"
-    }
-
     private var selectedCollectionReferencesInListOrder: [JourneyFolder.MemberReference] {
         records.compactMap(\.journeyMemberReference)
             .filter(selectedCollectionMemoryReferences.contains)
+            .filter { collectionSelectionTarget?.memberReferences.contains($0) != true }
     }
 
-    private func beginCollectionMemorySelection(for folderID: UUID) {
+    private var collectionSelectionAction: some View {
+        let count = selectedCollectionReferencesInListOrder.count
+        let title = collectionMemorySelection?.destinationFolderID == nil ? "Add to collection" : "Add memories"
+        return Button(action: completeCollectionMemorySelection) {
+            HStack(spacing: 10) {
+                Image(systemName: "folder.badge.plus")
+                Text(title)
+                Text("\(count)")
+                    .monospacedDigit()
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.white.opacity(0.16), in: Capsule())
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 17)
+            .padding(.vertical, 12)
+            .background(count == 0 ? Color(.systemGray3) : Color.black.opacity(0.88), in: Capsule())
+            .shadow(color: .black.opacity(count == 0 ? 0 : 0.18), radius: 10, y: 4)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(count == 0)
+        .accessibilityLabel(title)
+        .accessibilityValue("\(count) selected")
+        .accessibilityIdentifier("mymap.add-selected-memories")
+    }
+
+    private func beginCollectionMemorySelection(for folderID: UUID? = nil) {
+        guard canEditJourneyFolders else { return }
         isSearchFocused = false
         listFocusRecordID = nil
         listReturnRecordID = nil
@@ -1011,25 +1060,36 @@ struct UserMapHomeView: View {
     private func completeCollectionMemorySelection() {
         let references = selectedCollectionReferencesInListOrder
         guard references.isEmpty == false else { return }
+        isSearchFocused = false
+        if collectionMemorySelection?.destinationFolderID == nil {
+            isCollectionPickerPresented = true
+            return
+        }
         guard let target = collectionSelectionTarget,
               let updatedFolder = append(references, toJourneyFolder: target.id) else {
             cancelCollectionMemorySelection()
             return
         }
 
+        finishCollectionMemorySelection()
+        presentCollection(updatedFolder)
+    }
+
+    private func finishCollectionMemorySelection() {
+        isSearchFocused = false
+        isCollectionPickerPresented = false
         collectionMemorySelection = nil
         selectedCollectionMemoryReferences.removeAll()
-        presentCollection(updatedFolder)
     }
 
     private func cancelCollectionMemorySelection() {
         let target = collectionSelectionTarget
-        collectionMemorySelection = nil
-        selectedCollectionMemoryReferences.removeAll()
+        let returnsToCollection = collectionMemorySelection?.destinationFolderID != nil
+        finishCollectionMemorySelection()
 
         if let target {
             presentCollection(target)
-        } else {
+        } else if returnsToCollection {
             presentCollectionsDirectory()
         }
     }
@@ -2227,24 +2287,33 @@ struct UserMapHomeView: View {
     }
 
     private func archiveBrowsingRow(_ record: UserMapRecord) -> some View {
-        let status = record.publicationStatus(in: pendingPublications)
-        return Button {
-            if case .failed = status { onRetryPublication() }
-            else { openRecordFromList(record) }
-        } label: {
-            UserMapRecordCard(record: record, publicationStatus: status)
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("mymap.list-record.\(record.id.uuidString)")
-        .backendPostActions(for: record.journeyMemberReference, ownerID: user.id)
-        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+        let publication = record.pendingPublication(in: pendingPublications)
+        return HStack(spacing: 0) {
             Button {
-                addRecordToCollection(record)
+                openRecordFromList(record)
             } label: {
-                Label("Add", systemImage: "folder.badge.plus")
+                UserMapRecordCard(record: record)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .tint(.black)
-            .accessibilityLabel("Add to collection")
+            .buttonStyle(ArchiveRecordButtonStyle())
+            .accessibilityIdentifier("mymap.list-record.\(record.id.uuidString)")
+            .backendPostActions(for: record.journeyMemberReference, ownerID: user.id)
+
+            if let publication, case .failed = publication.status {
+                Button {
+                    onRetryPublication(publication.id)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Retry publication")
+                .accessibilityHint("Your memory is saved on this device but has not been published yet.")
+                .accessibilityIdentifier("mymap.retry-publication.\(publication.id.uuidString)")
+            }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button {
@@ -2268,9 +2337,6 @@ struct UserMapHomeView: View {
             toggleCollectionMemorySelection(record)
         } label: {
             HStack(spacing: 10) {
-                UserMapRecordCard(record: record)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
                 Image(systemName: isAlreadyInTarget || isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
                     .foregroundStyle(
@@ -2278,19 +2344,18 @@ struct UserMapHomeView: View {
                             ? Color.secondary
                             : (isSelected ? Color.primary : Color.secondary)
                     )
+
+                UserMapRecordCard(record: record)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, 4)
-            .background(
-                isSelected
-                    ? Color(.secondarySystemFill)
-                    : Color.clear,
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-            )
         }
-        .buttonStyle(.plain)
-        .disabled(isAlreadyInTarget)
+        .buttonStyle(ArchiveRecordButtonStyle())
+        .disabled(isAlreadyInTarget || reference == nil)
         .accessibilityIdentifier("mymap.list-record.\(record.id.uuidString)")
-        .accessibilityLabel(isAlreadyInTarget ? "Already in collection" : record.title)
+        .accessibilityLabel(record.title)
+        .accessibilityValue(isAlreadyInTarget ? "Already in collection" : (isSelected ? "Selected" : "Not selected"))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private var mapContent: some View {
@@ -4343,7 +4408,6 @@ private struct UserMapFilterSheet: View {
 
 struct UserMapRecordCard: View {
     let record: UserMapRecord
-    var publicationStatus: PendingPublicationStatus? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -4357,23 +4421,15 @@ struct UserMapRecordCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(publicationLabel ?? record.timestamp.formatted(.relative(presentation: .named)))
+                Text(record.timestamp.formatted(.relative(presentation: .named)))
                     .font(.caption2.weight(.medium))
-                    .foregroundStyle(publicationStatus == nil ? Color.secondary.opacity(0.65) : Color.secondary)
+                    .foregroundStyle(Color.secondary.opacity(0.65))
+                    .lineLimit(2)
             }
             Spacer(minLength: 6)
         }
         .padding(.vertical, 11)
         .contentShape(Rectangle())
-    }
-
-    private var publicationLabel: String? {
-        switch publicationStatus {
-        case .waiting: "Waiting to upload"
-        case .uploading: "Uploading…"
-        case .failed: "Not uploaded · Tap to retry"
-        case nil: nil
-        }
     }
 
     private var metadata: String {

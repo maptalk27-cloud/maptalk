@@ -5,9 +5,9 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { VIDEO_LIMITS, normalizeVideo, validateVideoContainer, validateVideoMetadata } from '../src/video-processing.mjs';
+import { VIDEO_LIMITS, normalizeVideo, validateVideoContainer, validateVideoMetadata, validateVideoPreservation } from '../src/video-processing.mjs';
 import { mediaByteRange } from '../src/media-range.mjs';
-import { videoFixture } from './helpers/video.mjs';
+import { appleEditListVideoFixture, videoFixture } from './helpers/video.mjs';
 
 const execute = promisify(execFile);
 const rejects = code => error => error.code === code;
@@ -59,6 +59,91 @@ test('video rejects fake MIME, truncation, invalid packets, excessive duration, 
 test('video accepts the 60-second boundary and silent portrait inputs', async () => {
   const silent = await normalizeVideo(await videoFixture({ duration: 60, dimensions: '180x320', fps: 1, audio: false }), 'video/mp4');
   assert.equal(silent.mimeType, 'video/mp4');
+});
+
+test('Apple edit-list video keeps every picture and AAC packet without expanding its presentation timeline', async () => {
+  for (const options of [
+    { duration: 3.137, fps: '30000/1001', audio: true },
+    { duration: 3, fps: 30, audio: false, rotation: 90, variableFrameRate: true },
+    { duration: 60, fps: 30, audio: true, dimensions: '32x32' },
+  ]) {
+    const input = await appleEditListVideoFixture(options);
+    const directory = await mkdtemp(join(tmpdir(), 'maptalk-apple-timing-check-'));
+    try {
+      const source = join(directory, 'source.mp4');
+      const output = join(directory, 'normalized.mp4');
+      await writeFile(source, input);
+      const metadata = async file => JSON.parse((await execute('ffprobe', ['-v', 'error', '-count_packets',
+        '-show_entries', 'format=duration:stream=codec_type,duration,nb_read_packets', '-of', 'json', file])).stdout);
+      const before = await metadata(source);
+      // Different FFmpeg versions expose edit-list padding differently. The
+      // contract is preservation of this valid, sub-millisecond presentation
+      // timeline, not a particular incorrect plain-remux duration.
+      const normalized = await normalizeVideo(input, 'video/mp4');
+      await writeFile(output, normalized.bytes);
+      const after = await metadata(output);
+      for (const stream of before.streams) {
+        const preserved = after.streams.find(item => item.codec_type === stream.codec_type);
+        assert.ok(preserved);
+        assert.equal(preserved.nb_read_packets, stream.nb_read_packets, `every ${stream.codec_type} packet survives`);
+        assert.ok(Math.abs(Number(preserved.duration) - Number(stream.duration)) <= 0.001);
+      }
+      assert.ok(Number(after.format.duration) <= VIDEO_LIMITS.durationSeconds + 0.1);
+      // Compare decoded pixels too: duration repair may not change picture
+      // content, presentation order, or delete the final encoded frame.
+      const pictures = async file => (await execute('ffmpeg', ['-v', 'error', '-i', file,
+        '-map', '0:v:0', '-fps_mode', 'passthrough', '-f', 'framemd5', '-'], { maxBuffer: 1024 * 1024 })).stdout
+        .split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1).trim());
+      assert.deepEqual(await pictures(output), await pictures(source));
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
+test('remux preservation allows one bounded iPhone clock tick, never a missing packet or frame-sized duration change', () => {
+  const original = { streams: [
+    { codec_type: 'video', duration: '5.568333', time_base: '1/600', nb_read_packets: '167' },
+    { codec_type: 'audio', duration: '5.566667', time_base: '1/48000', nb_read_packets: '263' },
+  ] };
+  const normalized = { streams: [
+    { ...original.streams[0], duration: '5.570000', time_base: '1/19200' },
+    { ...original.streams[1] },
+  ] };
+  assert.doesNotThrow(() => validateVideoPreservation(original, normalized));
+  for (const patch of [{ duration: '5.571000' }, { duration: '5.601667' },
+    { duration: 'NaN' }, { nb_read_packets: '166' }, { nb_read_packets: '0' },
+    { side_data_list: [{ rotation: 90 }] }]) {
+    assert.throws(() => validateVideoPreservation(original,
+      { streams: [{ ...normalized.streams[0], ...patch }, normalized.streams[1]] }), rejects('invalid_video'));
+  }
+  assert.throws(() => validateVideoPreservation(original,
+    { streams: [normalized.streams[0]] }), rejects('invalid_video'));
+  assert.throws(() => validateVideoPreservation(original,
+    { streams: [normalized.streams[0], { ...normalized.streams[1], nb_read_packets: '262' }] }), rejects('invalid_video'));
+  // A forged/coarse time base cannot grant a larger tolerance, and a precise
+  // source does not get the iPhone's 1/600 s rounding allowance.
+  for (const time_base of ['1/1', '1/24']) {
+    assert.throws(() => validateVideoPreservation(
+      { streams: [{ ...original.streams[0], time_base }] },
+      { streams: [{ ...normalized.streams[0], duration: '5.571000' }] }), rejects('invalid_video'));
+  }
+  assert.throws(() => validateVideoPreservation(
+    { streams: [{ ...original.streams[0], time_base: '1/19200' }] },
+    { streams: [normalized.streams[0]] }), rejects('invalid_video'));
+});
+
+test('only a validated remux gets source-clock rounding at 60 seconds; input duration limits stay strict', () => {
+  const original = { streams: [{ codec_type: 'video', codec_name: 'h264', pix_fmt: 'yuv420p',
+    width: 1280, height: 720, duration: '60', avg_frame_rate: '30/1',
+    time_base: '1/600', nb_read_packets: '1800' }], format: { duration: '60' } };
+  const normalized = { streams: [{ ...original.streams[0], duration: '60.001667', time_base: '1/19200' }],
+    format: { duration: '60.001667' } };
+  assert.doesNotThrow(() => validateVideoMetadata(original));
+  assert.throws(() => validateVideoMetadata(normalized), rejects('video_duration_exceeded'));
+  assert.doesNotThrow(() => validateVideoPreservation(original, normalized));
+  assert.doesNotThrow(() => validateVideoMetadata(normalized, { normalizationSource: original }));
+  assert.throws(() => validateVideoMetadata({ ...normalized,
+    streams: [{ ...normalized.streams[0], duration: '60.004' }] },
+  { normalizationSource: original }), rejects('video_duration_exceeded'));
 });
 
 test('only one video decoder runs at a time and its slot is released after completion', async () => {

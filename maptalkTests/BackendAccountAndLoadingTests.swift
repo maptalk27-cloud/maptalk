@@ -236,7 +236,7 @@ struct BackendProfileTests {
             try await store.updateProfile(handle: "taken_name", avatarData: Data([1]))
             Issue.record("A username conflict must fail the profile change")
         } catch let error as BackendClientError {
-            guard case .http(status: 409, message: _) = error else { Issue.record("Expected HTTP 409"); return }
+            guard case .http(status: 409, message: _, code: _) = error else { Issue.record("Expected HTTP 409"); return }
         }
         #expect(store.user.handle == "profile_test")
         #expect(store.user.avatarURL == nil)

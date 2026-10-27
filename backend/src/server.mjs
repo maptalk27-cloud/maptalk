@@ -11,8 +11,12 @@ import { normalizeVideo, VIDEO_LIMITS, VideoProcessingError } from './video-proc
 import { mediaByteRange, sendMediaBytes } from './media-range.mjs';
 import { mediaJSON, userJSON } from './user-profile.mjs';
 import { reclaimUnreferencedMedia, userMediaLimitBytes as validateMediaLimit } from './media-storage.mjs';
+import { createResumableUploads, ResumableUploadError, UPLOAD_CHUNK_SIZE } from './resumable-uploads.mjs';
 
-const DAY = 24 * 60 * 60 * 1000;
+const ACTIVE_FEED_WINDOW = 72 * 60 * 60 * 1000;
+// Derive activity from first publication so existing 24-hour rows follow the
+// current policy without rewriting history. Legacy rows fall back to capture.
+const PUBLICATION_TIME_SQL = 'COALESCE(published_at, created_at)';
 const PHOTO_LIMIT = 10 * 1024 * 1024;
 const CATEGORIES = ['viewpoint', 'restaurant', 'coffee', 'nightlife', 'art', 'market', 'other'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -68,6 +72,12 @@ function distanceInMeters(a, b) {
   return 6_371_000 * 2 * Math.asin(Math.sqrt(Math.min(1, haversine)));
 }
 
+function requireNearbyPlace(location, place, directoryKind) {
+  const radius = directoryKind === 'airport' ? 2000 : 150;
+  requireValue(distanceInMeters(location, place) <= radius,
+    `Choose a place within ${radius} meters of the supplied location.`);
+}
+
 function handle(value) {
   requireValue(typeof value === 'string' && value.length >= 3 && value.length <= 32 && !/[^a-zA-Z0-9_]/.test(value),
     'Handle must be 3–32 letters, digits or underscores.');
@@ -112,15 +122,20 @@ function memoryInput(body, time) {
     requireValue(result.caption === '', 'POI check-ins do not have captions.');
     requireValue((body.place !== undefined) !== (body.placeId !== undefined), 'Choose one place or placeId.');
     if (body.place !== undefined) {
-      object(body.place, ['name', 'category', 'coordinate', 'sourceId']);
+      object(body.place, ['name', 'category', 'coordinate', 'sourceId', 'directoryKind']);
       requireValue(typeof body.place.name === 'string' && body.place.name.trim().length > 0
         && body.place.name.length <= 160, 'A place needs a name of at most 160 characters.');
       requireValue(CATEGORIES.includes(body.place.category), 'Invalid place category.');
       result.place = { name: body.place.name.trim(), category: body.place.category };
       if (body.place.coordinate !== undefined) result.place.coordinate = coordinate(body.place.coordinate);
       if (body.place.sourceId !== undefined) result.place.sourceId = id(body.place.sourceId);
-      requireValue(distanceInMeters(result.location, result.place.coordinate ?? result.location) <= 150,
-        'Choose a place within 150 meters of the supplied location.');
+      if (body.place.directoryKind !== undefined) {
+        requireValue(body.place.directoryKind === 'airport', 'Unsupported directory place type.');
+        requireValue(result.place.sourceId !== undefined && result.place.coordinate !== undefined,
+          'An airport needs its directory identity and center coordinate.');
+        // Omit when absent so queued pre-airport request hashes remain valid.
+        result.place.directoryKind = body.place.directoryKind;
+      }
     } else {
       result.placeId = id(body.placeId);
     }
@@ -251,7 +266,18 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
   const acquireUpload = createConcurrentGate(2);
   const acquireDownload = createConcurrentGate(8);
   const mutationWindows = new Map();
+  const transferWindows = new Map();
   const deletionTasks = new Map();
+  let mediaErrorWindow = { since: now(), count: 0 };
+  function assertUploadOwner(ownerID) {
+    requireBetaAccess(db, ownerID, isBeta);
+    const current = db.prepare('SELECT deletion_started_at FROM users WHERE id = ?').get(ownerID);
+    if (!current || current.deletion_started_at !== null) throw new APIError(409, 'account_deleting', 'This account is being deleted.');
+  }
+  const resumable = createResumableUploads({ db, now, storageLimit, assertOwner: assertUploadOwner });
+  resumable.expire();
+  const uploadCleanup = setInterval(() => resumable.expire(), 60 * 60 * 1000);
+  uploadCleanup.unref();
 
   function deleteAccount(userID) {
     if (deletionTasks.has(userID)) return deletionTasks.get(userID);
@@ -284,6 +310,21 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     if (++window.count > 60) {
       response.setHeader('Retry-After', '60');
       throw new APIError(429, 'rate_limited', 'Too many changes; try again shortly.');
+    }
+  }
+
+  function transferLimit(userID, response) {
+    if (!isBeta) return;
+    const time = now();
+    for (const [key, value] of transferWindows) if (time - value.since >= 60_000) transferWindows.delete(key);
+    const window = transferWindows.get(userID) ?? { since: time, count: 0 };
+    transferWindows.set(userID, window);
+    // A maximum-size video has 40 chunks. Transfer traffic must not consume
+    // the separate budget for cancel/delete/profile changes. This still bounds
+    // accepted payload to <=60 MiB/min/user, in addition to storage/concurrency caps.
+    if (++window.count > 120) {
+      response.setHeader('Retry-After', String(Math.max(1, Math.ceil((60_000 - (time - window.since)) / 1000))));
+      throw new APIError(429, 'upload_rate_limited', 'Upload paused briefly. Continue after the indicated delay.');
     }
   }
 
@@ -345,11 +386,33 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       moderationStatus: row.moderation_status,
       location: { latitude: row.latitude, longitude: row.longitude }, caption: row.caption,
       place: place ? { id: place.id, name: place.name, category: place.category, sourceId: place.source_id,
+        ...(place.directory_kind ? { directoryKind: place.directory_kind } : {}),
         coordinate: { latitude: place.latitude, longitude: place.longitude } } : null,
       media: media.map(mediaJSON), createdAt: new Date(row.created_at).toISOString(),
       publishedAt: row.published_at === null ? null : new Date(row.published_at).toISOString(),
-      expiresAt: new Date(row.expires_at).toISOString(),
+      expiresAt: new Date((row.published_at ?? row.created_at) + ACTIVE_FEED_WINDOW).toISOString(),
     };
+  }
+
+  function publicCommentTarget(kind, targetID, viewerID) {
+    if (kind === 'memories') {
+      const memory = memoryFor(targetID, viewerID);
+      // A private archive is not a public discussion, even for its owner.
+      if (memory.visibility !== 'public' || memory.moderation_status !== 'approved'
+        || !visibleOwner(viewerID, memory.owner_id)) throw notFound();
+    } else {
+      // A directory ID alone never grants access to private check-ins.
+      const visible = db.prepare(`SELECT 1 FROM memories WHERE place_id = ?
+        AND visibility = 'public' AND moderation_status = 'approved' AND ${visibilitySQL()} LIMIT 1`)
+        .get(targetID, viewerID, viewerID);
+      if (!visible) throw notFound();
+    }
+  }
+
+  function serializeComment(row) {
+    const author = db.prepare('SELECT id, handle FROM users WHERE id = ?').get(row.user_id);
+    return { id: row.id, userId: row.user_id, text: row.text,
+      createdAt: new Date(row.created_at).toISOString(), author: userJSON(db, author) };
   }
 
   function listMemories(where, args, { limit, cursor }, orderBy = 'created_at') {
@@ -358,13 +421,13 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       where += ` AND (${orderBy} < ? OR (${orderBy} = ? AND id < ?))`;
       args.push(cursor.createdAt, cursor.createdAt, cursor.id);
     }
-    const rows = db.prepare(`SELECT * FROM memories WHERE ${where} ORDER BY ${orderBy} DESC, id DESC LIMIT ?`)
+    const rows = db.prepare(`SELECT *, ${orderBy} AS list_order FROM memories WHERE ${where} ORDER BY ${orderBy} DESC, id DESC LIMIT ?`)
       .all(...args, limit + 1);
     const items = rows.slice(0, limit);
     const last = items.at(-1);
     return {
       items: items.map(serializeMemory),
-      nextCursor: rows.length > limit ? Buffer.from(JSON.stringify({ createdAt: last[orderBy], id: last.id })).toString('base64url') : null,
+      nextCursor: rows.length > limit ? Buffer.from(JSON.stringify({ createdAt: last.list_order, id: last.id })).toString('base64url') : null,
     };
   }
 
@@ -474,7 +537,11 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     }
 
     const user = userFor(request);
-    if (method !== 'GET') mutationLimit(user.id, response);
+    const resumableMatch = /^\/v1\/media\/uploads\/([^/]+)(\/complete)?$/.exec(path);
+    const isTransfer = resumableMatch && ((!resumableMatch[2] && ['PUT', 'PATCH'].includes(method))
+      || (resumableMatch[2] && method === 'POST'));
+    if (isTransfer) transferLimit(user.id, response);
+    else if (method !== 'GET') mutationLimit(user.id, response);
     if (method === 'DELETE' && path === '/v1/me') {
       await deleteAccount(user.id);
       return json(response, 204);
@@ -494,6 +561,53 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       return json(response, 204);
     }
     requireBetaAccess(db, user.id, isBeta);
+
+    const commentMatch = /^\/v1\/(memories|places)\/([^/]+)\/comments$/.exec(path);
+    if (commentMatch && (method === 'GET' || method === 'POST')) {
+      const kind = commentMatch[1];
+      const targetID = id(commentMatch[2]);
+      const column = kind === 'memories' ? 'memory_id' : 'place_id';
+      const body = method === 'POST' ? await authorizedJSON(request, user.id) : null;
+      publicCommentTarget(kind, targetID, user.id);
+      if (method === 'GET') {
+        const { limit, cursor } = pageInput(url.searchParams);
+        const after = cursor ? 'AND (created_at < ? OR (created_at = ? AND id < ?))' : '';
+        const args = [targetID, user.id, user.id];
+        if (cursor) args.push(cursor.createdAt, cursor.createdAt, cursor.id);
+        const rows = db.prepare(`SELECT * FROM comments WHERE ${column} = ?
+          AND ${visibilitySQL('comments.user_id')} ${after}
+          ORDER BY created_at DESC, id DESC LIMIT ?`).all(...args, limit + 1);
+        const items = rows.slice(0, limit);
+        const last = items.at(-1);
+        return json(response, 200, { items: items.map(serializeComment),
+          nextCursor: rows.length > limit ? Buffer.from(JSON.stringify({
+            createdAt: last.created_at, id: last.id,
+          })).toString('base64url') : null });
+      }
+      object(body, ['id', 'text']);
+      const commentID = id(body.id);
+      requireValue(typeof body.text === 'string' && body.text.trim().length > 0 && body.text.length <= 1000,
+        'Write a comment of up to 1000 characters.');
+      const text = body.text.trim();
+      const existing = db.prepare('SELECT * FROM comments WHERE id = ?').get(commentID);
+      if (existing) {
+        if (existing.user_id !== user.id || existing[column] !== targetID || existing.text !== text) {
+          throw new APIError(409, 'id_conflict', 'Use a new ID for a different comment.');
+        }
+        return json(response, 200, serializeComment(existing));
+      }
+      const recent = db.prepare('SELECT COUNT(*) AS count FROM comments WHERE user_id = ? AND created_at > ?')
+        .get(user.id, now() - 60_000).count;
+      if (recent >= 12) {
+        response.setHeader('Retry-After', '60');
+        throw new APIError(429, 'rate_limited', 'Please wait a moment before commenting again.');
+      }
+      db.prepare('INSERT INTO comments(id, user_id, memory_id, place_id, text, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(commentID, user.id, kind === 'memories' ? targetID : null, kind === 'places' ? targetID : null, text, now());
+      // Discussion is not a new visit/publication: do not mutate memory time,
+      // feed membership, media, or the user's current location.
+      return json(response, 201, serializeComment(db.prepare('SELECT * FROM comments WHERE id = ?').get(commentID)));
+    }
 
     if (method === 'PATCH' && path === '/v1/me') {
       const body = object(await authorizedJSON(request, user.id), ['handle', 'avatarMediaId']);
@@ -566,6 +680,36 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       return json(response, 204);
     }
 
+    if (resumableMatch) {
+      const requestID = id(resumableMatch[1]);
+      if (resumableMatch[2]) {
+        if (method !== 'POST') throw notFound();
+        object(await authorizedJSON(request, user.id), []);
+        return json(response, 200, await resumable.complete(user.id, requestID));
+      }
+      if (method === 'PUT') {
+        const input = object(await authorizedJSON(request, user.id), ['mimeType', 'byteCount', 'sha256']);
+        return json(response, 200, resumable.begin(user.id, requestID, input));
+      }
+      if (method === 'GET') return json(response, 200, resumable.status(user.id, requestID));
+      if (method === 'PATCH') {
+        if (request.headers['content-type']?.split(';')[0].trim().toLowerCase() !== 'application/octet-stream') {
+          throw new APIError(415, 'unsupported_type', 'Send an application/octet-stream video chunk.');
+        }
+        const rawOffset = request.headers['upload-offset'];
+        requireValue(typeof rawOffset === 'string' && /^(0|[1-9][0-9]{0,9})$/.test(rawOffset), 'Provide a decimal Upload-Offset.');
+        // Reject missing/cancelled sessions before reading an expensive body.
+        resumable.status(user.id, requestID);
+        const release = acquireUpload();
+        if (!release) throw new APIError(429, 'upload_busy', 'Another upload is in progress. Try again shortly.');
+        try {
+          const bytes = await readBytes(request, UPLOAD_CHUNK_SIZE, 60_000);
+          return json(response, 200, resumable.append(user.id, requestID, Number(rawOffset), bytes));
+        } finally { release(); }
+      }
+      throw notFound();
+    }
+
     if (method === 'POST' && path === '/v1/media') {
       const requestID = request.headers['idempotency-key'] === undefined ? null : id(request.headers['idempotency-key']);
       const releaseUpload = isBeta ? acquireUpload() : () => {};
@@ -577,6 +721,8 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
           throw new APIError(415, 'unsupported_media', 'Use JPEG, PNG, WebP or an H.264 MP4 video.');
         }
         let bytes = await readBytes(request, isVideo ? VIDEO_LIMITS.inputBytes : PHOTO_LIMIT, isVideo ? 180_000 : 15_000);
+        resumable.expire();
+        resumable.checkLegacy(user.id, requestID, mimeType, bytes);
         if (!isVideo && imageType(bytes) !== mimeType) throw new APIError(415, 'invalid_photo', 'Photo signature does not match its type.');
         const requestHash = requestID ? digest(`${mimeType}:${digest(bytes)}`) : null;
         const currentUpload = () => {
@@ -599,14 +745,13 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
         const saved = transaction(db, () => {
           const existing = currentUpload();
           if (existing) return { status: 200, media: existing };
-          const used = db.prepare('SELECT COALESCE(SUM(byte_count), 0) AS total FROM media WHERE owner_id = ?').get(user.id).total;
-          if (used + bytes.length > storageLimit) throw new APIError(413, 'media_quota',
-            `Your media storage is full (${Math.round(storageLimit / 1024 / 1024)} MiB). Delete photos, videos or posts you no longer need, then retry. Media still in another post or your avatar keeps using storage.`);
+          resumable.checkQuota(user.id, bytes.length, requestID ?? '');
           const mediaID = randomUUID();
           db.prepare('INSERT INTO media(id, owner_id, mime_type, byte_count, bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)')
             .run(mediaID, user.id, mimeType, bytes.length, bytes, now());
           if (requestID) db.prepare('INSERT INTO media_upload_requests(owner_id, request_id, request_hash, media_id, created_at) VALUES (?, ?, ?, ?, ?)')
             .run(user.id, requestID, requestHash, mediaID, now());
+          if (requestID) resumable.clearChunks(user.id, requestID);
           return { status: 201, media: { id: mediaID, mime_type: mimeType, byte_count: bytes.length } };
         });
         return json(response, saved.status, mediaJSON(saved.media));
@@ -633,6 +778,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
           // the original accepted hash while making cancellation irreversible.
           db.prepare('DELETE FROM media WHERE id = ? AND owner_id = ?').run(previous.media_id, user.id);
         }
+        resumable.remove(user.id, requestID);
       });
       return json(response, 204);
     }
@@ -700,9 +846,8 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
             AND (owner_id = ? OR (visibility = 'public' AND moderation_status = 'approved' AND ${visibilitySQL()})) LIMIT 1`)
             .get(placeID, user.id, user.id, user.id);
           if (!visible) throw notFound();
-          const place = db.prepare('SELECT latitude, longitude FROM places WHERE id = ?').get(placeID);
-          requireValue(distanceInMeters(input.location, place) <= 150,
-            'Choose a place within 150 meters of the supplied location.');
+          const place = db.prepare('SELECT latitude, longitude, directory_kind FROM places WHERE id = ?').get(placeID);
+          requireNearbyPlace(input.location, place, place.directory_kind);
         }
         if (input.place) {
           const source = input.place.sourceId
@@ -712,14 +857,16 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
           if (source) {
             // A recognized source identifies only the landmark, never another user's check-ins.
             // Later clients cannot relocate or rename this canonical place by publishing to it.
-            requireValue(distanceInMeters(input.location, source) <= 150,
-              'Choose a place within 150 meters of the supplied location.');
+            requireValue(input.place.directoryKind === undefined || input.place.directoryKind === source.directory_kind,
+              'A check-in cannot change this place type.');
+            requireNearbyPlace(input.location, source, source.directory_kind);
             placeID = source.id;
           } else {
             placeID = randomUUID();
             const location = input.place.coordinate ?? input.location;
-            db.prepare('INSERT INTO places(id, name, category, latitude, longitude) VALUES (?, ?, ?, ?, ?)')
-              .run(placeID, input.place.name, input.place.category, location.latitude, location.longitude);
+            requireNearbyPlace(input.location, location, input.place.directoryKind);
+            db.prepare('INSERT INTO places(id, name, category, latitude, longitude, directory_kind) VALUES (?, ?, ?, ?, ?, ?)')
+              .run(placeID, input.place.name, input.place.category, location.latitude, location.longitude, input.place.directoryKind ?? null);
             if (input.place.sourceId) {
               db.prepare('INSERT INTO place_sources(source_id, place_id) VALUES (?, ?)').run(input.place.sourceId, placeID);
             }
@@ -730,7 +877,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
           caption, place_id, created_at, expires_at, request_hash, published_at, moderation_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(input.id, user.id, input.kind, input.visibility, input.location.latitude, input.location.longitude,
             input.caption, placeID, input.capturedAt ? Math.min(Date.parse(input.capturedAt), created) : created,
-            created + DAY, requestHash, input.visibility === 'public' ? created : null,
+            created + ACTIVE_FEED_WINDOW, requestHash, input.visibility === 'public' ? created : null,
             'approved');
         const attach = db.prepare('INSERT INTO memory_media(memory_id, media_id, position) VALUES (?, ?, ?)');
         input.mediaIds.forEach((mediaID, position) => attach.run(input.id, mediaID, position));
@@ -751,15 +898,17 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       )`, [user.id], pageInput(url.searchParams)));
     }
     if (method === 'GET' && path === '/v1/feed') {
-      return json(response, 200, listMemories(`visibility = 'public' AND moderation_status = 'approved' AND expires_at > ? AND ${visibilitySQL()}`,
-        [now(), user.id, user.id], pageInput(url.searchParams), 'published_at'));
+      return json(response, 200, listMemories(`visibility = 'public' AND moderation_status = 'approved' AND ${PUBLICATION_TIME_SQL} > ? AND ${visibilitySQL()}`,
+        [now() - ACTIVE_FEED_WINDOW, user.id, user.id], pageInput(url.searchParams), PUBLICATION_TIME_SQL));
     }
     if (method === 'GET' && path === '/v1/map/memories') {
       const page = pageInput(url.searchParams, ['west', 'east', 'south', 'north']);
       const { west, east, south, north } = bounds(url.searchParams);
       const longitudeClause = west <= east ? 'longitude BETWEEN ? AND ?' : '(longitude >= ? OR longitude <= ?)';
-      return json(response, 200, listMemories(`visibility = 'public' AND moderation_status = 'approved' AND latitude BETWEEN ? AND ? AND ${longitudeClause} AND ${visibilitySQL()}`,
-        [south, north, west, east, user.id, user.id], page));
+      return json(response, 200, listMemories(`visibility = 'public' AND moderation_status = 'approved'
+        AND (kind = 'poi' OR ${PUBLICATION_TIME_SQL} > ?)
+        AND latitude BETWEEN ? AND ? AND ${longitudeClause} AND ${visibilitySQL()}`,
+        [now() - ACTIVE_FEED_WINDOW, south, north, west, east, user.id, user.id], page));
     }
 
     const memoryMatch = /^\/v1\/memories\/([^/]+)$/.exec(path);
@@ -785,13 +934,22 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       memoryFor(memoryID, user.id, method !== 'GET');
       if (method === 'GET') return json(response, 200, serializeMemory(memoryFor(memoryID, user.id)));
       if (method === 'PATCH') {
-        const body = object(await authorizedJSON(request, user.id), ['visibility']);
-        const audience = visibility(body.visibility);
+        const body = object(await authorizedJSON(request, user.id), ['visibility', 'caption']);
+        requireValue(Object.keys(body).length > 0, 'Choose what to update.');
         const current = memoryFor(memoryID, user.id, true);
-        const firstPublication = audience === 'public' && current.published_at === null;
+        const audience = body.visibility === undefined ? current.visibility : visibility(body.visibility);
+        let caption = current.caption;
+        if (body.caption !== undefined) {
+          requireValue(current.kind === 'reel', 'POI check-ins do not have captions.');
+          requireValue(typeof body.caption === 'string' && body.caption.length <= 2200, 'Caption is too long.');
+          caption = body.caption.trim();
+          const hasMedia = db.prepare('SELECT 1 FROM memory_media WHERE memory_id = ? LIMIT 1').get(memoryID);
+          requireValue(caption.length > 0 || hasMedia, 'Add a caption or photo.');
+        }
+        const firstPublication = body.visibility === 'public' && current.published_at === null;
         const published = firstPublication ? now() : current.published_at;
-        db.prepare('UPDATE memories SET visibility = ?, published_at = ?, expires_at = ? WHERE id = ? AND owner_id = ?')
-          .run(audience, published, firstPublication ? published + DAY : current.expires_at, memoryID, user.id);
+        db.prepare('UPDATE memories SET visibility = ?, caption = ?, published_at = ?, expires_at = ? WHERE id = ? AND owner_id = ?')
+          .run(audience, caption, published, firstPublication ? published + ACTIVE_FEED_WINDOW : current.expires_at, memoryID, user.id);
         return json(response, 200, serializeMemory(memoryFor(memoryID, user.id)));
       }
       // Permanent deletion withdraws the same record from every public surface.
@@ -812,10 +970,21 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
   const server = createServer({ requestTimeout: 180_000, headersTimeout: 10_000, maxHeaderSize: 8192 }, (request, response) => {
     route(request, response).catch(error => {
       request.resume();
+      const knownError = error instanceof APIError || error instanceof AppleAuthError || error instanceof SocialAuthError
+        || error instanceof AppleLifecycleError || error instanceof BetaError || error instanceof PhotoProcessingError || error instanceof VideoProcessingError
+        || error instanceof ResumableUploadError;
+      if (knownError && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)
+        && /^\/v1\/media(?:\/|$)/.test(request.url?.split('?')[0] ?? '')) {
+        if (now() - mediaErrorWindow.since >= 60_000) mediaErrorWindow = { since: now(), count: 0 };
+        // Diagnose upload failures without recording identities, URLs, content,
+        // tokens or decoder output. Bound logs even during abusive retry storms.
+        if (mediaErrorWindow.count++ < 20) console.warn(JSON.stringify({
+          event: 'media_request_failed', code: error.code, status: error.status,
+        }));
+        else if (mediaErrorWindow.count === 21) console.warn(JSON.stringify({ event: 'media_errors_rate_limited' }));
+      }
       if (response.destroyed || response.writableEnded) return;
       if (response.headersSent) return response.destroy();
-      const knownError = error instanceof APIError || error instanceof AppleAuthError || error instanceof SocialAuthError
-        || error instanceof AppleLifecycleError || error instanceof BetaError || error instanceof PhotoProcessingError || error instanceof VideoProcessingError;
       if (knownError && error.status === 429 && !response.hasHeader('Retry-After')) response.setHeader('Retry-After', '2');
       if (!knownError) {
         // Never log passwords, bearer tokens, request bodies, coordinates or DB paths.
@@ -849,6 +1018,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     },
     async close() {
       if (closed) return;
+      clearInterval(uploadCleanup);
       // Wait for in-flight requests before closing SQLite.
       if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       db.exec('PRAGMA wal_checkpoint(TRUNCATE)');

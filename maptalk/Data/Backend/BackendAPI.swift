@@ -1,16 +1,17 @@
 import Foundation
+import CryptoKit
 
 enum BackendClientError: LocalizedError {
     case message(String)
     case unauthorized
-    case http(status: Int, message: String)
+    case http(status: Int, message: String, code: String? = nil)
     case publishPending(String)
 
     var errorDescription: String? {
         switch self {
         case let .message(text): return text
         case .unauthorized: return "Your session has expired. Sign out and sign in again."
-        case let .http(_, message): return message
+        case let .http(_, message, _): return message
         case let .publishPending(message):
             return "\(message) Your draft is locked because this save isn't confirmed. Retry the same save, or close and check MyMap."
         }
@@ -21,7 +22,7 @@ enum BackendClientError: LocalizedError {
     var confirmsPublishRejection: Bool {
         switch self {
         case .unauthorized: return true
-        case let .http(status, _): return [400, 403, 404, 410, 413, 415, 422, 429].contains(status)
+        case let .http(status, _, _): return [400, 403, 404, 410, 413, 415, 422, 429].contains(status)
         default: return false
         }
     }
@@ -79,12 +80,22 @@ nonisolated struct BackendMedia: Codable, Sendable {
     let path: String
 }
 
+nonisolated struct BackendUploadStatus: Codable, Sendable {
+    let uploadID: UUID
+    let mimeType: String
+    let byteCount: Int
+    let receivedBytes: Int
+    let chunkSize: Int
+    let media: BackendMedia?
+}
+
 nonisolated struct BackendPlace: Codable, Sendable {
     let id: UUID
     let sourceId: UUID?
     let name: String
     let category: String
     let coordinate: BackendCoordinate
+    var directoryKind: String? = nil
 }
 
 nonisolated struct BackendMemory: Codable, Sendable {
@@ -108,6 +119,7 @@ nonisolated struct BackendPlaceInput: Codable, Sendable {
     let category: String
     var coordinate: BackendCoordinate? = nil
     var sourceId: UUID? = nil
+    var directoryKind: String? = nil
 }
 
 nonisolated struct BackendMemoryInput: Codable, Sendable {
@@ -120,6 +132,26 @@ nonisolated struct BackendMemoryInput: Codable, Sendable {
     var place: BackendPlaceInput? = nil
     var placeId: UUID? = nil
     var capturedAt: String? = nil
+}
+
+nonisolated enum BackendCommentTarget: Hashable, Sendable {
+    case memory(UUID)
+    case place(UUID)
+
+    var path: String {
+        switch self {
+        case let .memory(id): return "/v1/memories/\(id.uuidString)/comments"
+        case let .place(id): return "/v1/places/\(id.uuidString)/comments"
+        }
+    }
+}
+
+nonisolated struct BackendComment: Codable, Identifiable, Sendable {
+    let id: UUID
+    let userId: UUID
+    let text: String
+    let createdAt: Date
+    let author: BackendUser
 }
 
 /// HTTPS-only outside explicit Debug loopback development. Never follows redirects.
@@ -273,6 +305,105 @@ final class BackendAPI {
         return try Self.decoder.decode(BackendMedia.self, from: bytes)
     }
 
+    /// The server's acknowledged offset is authoritative after every retry or
+    /// process restart. A lost PATCH response never makes us resend the clip.
+    /// Keep the ordinary no-redirect session: background URLSession ignores
+    /// redirect delegates and must not receive our bearer token/private media.
+    func uploadVideo(at file: URL, idempotencyKey: UUID,
+                     checkActive: @MainActor () throws -> Void = {},
+                     onProgress: @MainActor (Double) -> Void = { _ in },
+                     onProcessing: @MainActor () -> Void = {}) async throws -> BackendMedia {
+        let source = try await Self.videoUploadMetadata(at: file)
+        try Task.checkCancellation()
+        try checkActive()
+        let path = "/v1/media/uploads/\(idempotencyKey.uuidString.lowercased())"
+        struct Input: Encodable { let mimeType: String; let byteCount: Int; let sha256: String }
+        var status: BackendUploadStatus
+        do {
+            status = try await json(path, method: "PUT", body: JSONEncoder().encode(
+                Input(mimeType: "video/mp4", byteCount: source.bytes, sha256: source.hash)))
+        } catch let error as BackendClientError {
+            if case .http(status: 404, message: _, code: _) = error {
+                // An older server cannot resume. Preserve the local clip until
+                // the compatible server is deployed, rather than uploading it
+                // all over again through the legacy endpoint.
+                throw BackendClientError.message("Video upload is waiting for a server update. Your video is saved on this phone.")
+            }
+            throw error
+        }
+        try validateUpload(status, id: idempotencyKey, bytes: source.bytes)
+        onProgress(Double(status.receivedBytes) / Double(source.bytes))
+        if let media = status.media { return media }
+        while status.receivedBytes < source.bytes {
+            try Task.checkCancellation()
+            try checkActive()
+            let offset = status.receivedBytes
+            let count = min(status.chunkSize, source.bytes - offset)
+            let chunk = try await Self.videoUploadChunk(at: file, offset: offset, count: count)
+            try Task.checkCancellation()
+            try checkActive()
+            let response = try await request(path, method: "PATCH", body: chunk,
+                contentType: "application/octet-stream", timeout: 90,
+                additionalHeaders: ["Upload-Offset": String(offset)])
+            let acknowledged: BackendUploadStatus = try await Self.decode(response)
+            try validateUpload(acknowledged, id: idempotencyKey, bytes: source.bytes)
+            guard acknowledged.receivedBytes >= offset + count else {
+                throw BackendClientError.message("Video upload paused before the server confirmed this part. It will retry automatically.")
+            }
+            status = acknowledged
+            onProgress(Double(status.receivedBytes) / Double(source.bytes))
+            if let media = status.media { return media }
+        }
+        try Task.checkCancellation()
+        try checkActive()
+        onProcessing()
+        let completedBytes = try await request(path + "/complete", method: "POST", body: Data("{}".utf8), timeout: 240)
+        let completed: BackendUploadStatus = try await Self.decode(completedBytes)
+        try validateUpload(completed, id: idempotencyKey, bytes: source.bytes)
+        guard let media = completed.media else {
+            throw BackendClientError.message("Your video is still being prepared. It will retry automatically.")
+        }
+        return media
+    }
+
+    private func validateUpload(_ value: BackendUploadStatus, id: UUID, bytes: Int) throws {
+        guard value.uploadID == id, value.mimeType == "video/mp4", value.byteCount == bytes,
+              value.receivedBytes >= 0, value.receivedBytes <= bytes,
+              value.chunkSize > 0, value.chunkSize <= 512 * 1_024,
+              value.media == nil || (value.receivedBytes == bytes && value.media?.mimeType == "video/mp4") else {
+            throw BackendClientError.message("The server returned an invalid video upload status. Your video is still saved on this phone.")
+        }
+    }
+
+    @concurrent
+    private static func videoUploadMetadata(at file: URL) async throws -> (bytes: Int, hash: String) {
+        guard file.isFileURL else { throw CocoaError(.fileReadUnsupportedScheme) }
+        let bytes = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard bytes > 0, bytes <= PublishVideoNormalizer.maximumFileBytes else { throw CocoaError(.fileReadTooLarge) }
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        var read = 0
+        while let chunk = try handle.read(upToCount: 512 * 1_024), !chunk.isEmpty {
+            try Task.checkCancellation()
+            read += chunk.count
+            guard read <= bytes else { throw CocoaError(.fileReadCorruptFile) }
+            hash.update(data: chunk)
+        }
+        guard read == bytes else { throw CocoaError(.fileReadCorruptFile) }
+        return (bytes, hash.finalize().map { String(format: "%02x", $0) }.joined())
+    }
+
+    @concurrent
+    private static func videoUploadChunk(at file: URL, offset: Int, count: Int) async throws -> Data {
+        try Task.checkCancellation()
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(offset))
+        guard let data = try handle.read(upToCount: count), data.count == count else { throw CocoaError(.fileReadCorruptFile) }
+        return data
+    }
+
     func downloadMedia(_ media: BackendMedia) async throws -> Data {
         guard media.path == "/v1/media/\(media.id.uuidString.lowercased())" else {
             throw BackendClientError.message("The media address is invalid.")
@@ -289,6 +420,27 @@ final class BackendAPI {
     func makeMemoryPrivate(id: UUID) async throws -> BackendMemory {
         try await json("/v1/memories/\(id.uuidString)", method: "PATCH",
                        body: Data("{\"visibility\":\"private\"}".utf8))
+    }
+
+    func updateMemoryCaption(id: UUID, caption: String) async throws -> BackendMemory {
+        struct Input: Encodable { let caption: String }
+        return try await json("/v1/memories/\(id.uuidString)", method: "PATCH",
+                              body: JSONEncoder().encode(Input(caption: caption)))
+    }
+
+    func comments(for target: BackendCommentTarget) async throws -> [BackendComment] {
+        nonisolated struct Page: Decodable, Sendable {
+            let items: [BackendComment]
+            let nextCursor: String?
+        }
+        let page: Page = try await json("\(target.path)?limit=100")
+        return page.items
+    }
+
+    func addComment(to target: BackendCommentTarget, text: String, requestID: UUID) async throws -> BackendComment {
+        struct Input: Encodable { let id: UUID; let text: String }
+        return try await json(target.path, method: "POST",
+            body: JSONEncoder().encode(Input(id: requestID, text: text)))
     }
 
     func deleteMemory(id: UUID, cancelPending: Bool = false) async throws {
@@ -316,7 +468,7 @@ final class BackendAPI {
 
     private func request(_ path: String, method: String = "GET", body: Data? = nil,
                          contentType: String = "application/json", idempotencyKey: UUID? = nil,
-                         timeout: TimeInterval = 30) async throws -> Data {
+                         timeout: TimeInterval = 30, additionalHeaders: [String: String] = [:]) async throws -> Data {
         guard path.hasPrefix("/v1/"), !path.hasPrefix("//"),
               let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
               url.host == baseURL.host, url.port == baseURL.port, url.scheme == baseURL.scheme else {
@@ -328,6 +480,7 @@ final class BackendAPI {
         if body != nil { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let idempotencyKey { request.setValue(idempotencyKey.uuidString, forHTTPHeaderField: "Idempotency-Key") }
+        for (name, value) in additionalHeaders { request.setValue(value, forHTTPHeaderField: name) }
         let data: Data
         let response: URLResponse
         do { (data, response) = try await session.data(for: request) }
@@ -351,7 +504,8 @@ final class BackendAPI {
                 onAccessDenied?(code == "beta_access_revoked" ? "revoked" : "pending")
             }
             throw BackendClientError.http(status: http.statusCode,
-                                          message: detail?.error.message ?? "Could not save. Please retry.")
+                                          message: detail?.error.message ?? "Could not save. Please retry.",
+                                          code: detail?.error.code)
         }
         return data
     }

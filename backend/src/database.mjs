@@ -13,7 +13,7 @@ export function openDatabase(databasePath) {
     chmodSync(path, 0o600);
     db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 9) throw new Error('Database is newer than this server; refusing to open it.');
+    if (version > 12) throw new Error('Database is newer than this server; refusing to open it.');
     if (version === 0) {
       transaction(db, () => {
         db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
@@ -207,6 +207,62 @@ export function openDatabase(databasePath) {
           if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('Video migration violated a foreign key.');
         });
       } finally { db.exec('PRAGMA foreign_keys = ON;'); }
+    }
+    if (version < 10) {
+      transaction(db, () => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS media_upload_sessions (
+            owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            request_id TEXT NOT NULL,
+            mime_type TEXT NOT NULL CHECK(mime_type = 'video/mp4'),
+            byte_count INTEGER NOT NULL CHECK(byte_count > 0 AND byte_count <= 20971520),
+            sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+            received_bytes INTEGER NOT NULL DEFAULT 0 CHECK(received_bytes >= 0 AND received_bytes <= byte_count),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(owner_id, request_id)
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS media_upload_sessions_expiry ON media_upload_sessions(updated_at);
+          CREATE TABLE IF NOT EXISTS media_upload_chunks (
+            owner_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            byte_offset INTEGER NOT NULL CHECK(byte_offset >= 0),
+            bytes BLOB NOT NULL CHECK(length(bytes) > 0 AND length(bytes) <= 524288),
+            PRIMARY KEY(owner_id, request_id, byte_offset),
+            FOREIGN KEY(owner_id, request_id) REFERENCES media_upload_sessions(owner_id, request_id) ON DELETE CASCADE
+          ) STRICT;
+          PRAGMA user_version = 10;
+        `);
+      });
+    }
+    if (version < 11) {
+      transaction(db, () => {
+        // Directory metadata is distinct from the app's visual POI category.
+        // Existing places stay ordinary; never infer an airport from its name.
+        if (!db.prepare('PRAGMA table_info(places)').all().some(column => column.name === 'directory_kind')) {
+          db.exec("ALTER TABLE places ADD COLUMN directory_kind TEXT CHECK(directory_kind IS NULL OR directory_kind = 'airport');");
+        }
+        db.exec('PRAGMA user_version = 11;');
+      });
+    }
+    if (version < 12) {
+      transaction(db, () => {
+        db.exec(`
+          CREATE TABLE comments (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            memory_id TEXT REFERENCES memories(id) ON DELETE CASCADE,
+            place_id TEXT REFERENCES places(id) ON DELETE CASCADE,
+            text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 1000),
+            created_at INTEGER NOT NULL,
+            CHECK((memory_id IS NOT NULL) != (place_id IS NOT NULL))
+          ) STRICT;
+          CREATE INDEX comments_memory_time ON comments(memory_id, created_at DESC, id DESC);
+          CREATE INDEX comments_place_time ON comments(place_id, created_at DESC, id DESC);
+          CREATE INDEX comments_author_time ON comments(user_id, created_at DESC);
+          PRAGMA user_version = 12;
+        `);
+      });
     }
     return db;
   } catch (error) {

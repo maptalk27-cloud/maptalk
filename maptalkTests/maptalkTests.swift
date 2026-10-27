@@ -271,7 +271,7 @@ struct maptalkTests {
 
     @Test
     @MainActor
-    func activeFeedUsesAnInclusiveFixedTwentyFourHourCutoff() throws {
+    func activeFeedUsesAnExclusiveSeventyTwoHourCutoff() throws {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let boundary = makeActiveFeedPOI(
             name: "Boundary place",
@@ -281,22 +281,27 @@ struct maptalkTests {
             name: "Expired place",
             checkInDates: [now.addingTimeInterval(-StoryReadKeys.freshWindow - 0.001)]
         )
+        let fresh = makeActiveFeedPOI(
+            name: "Just inside the window",
+            checkInDates: [now.addingTimeInterval(-StoryReadKeys.freshWindow + 0.001)]
+        )
 
         let items = MapStoryFeed.items(
             reals: [],
-            ratedPOIs: [expired, boundary],
+            ratedPOIs: [expired, boundary, fresh],
             onlyRecentPOIStories: true,
             userProvider: { _ in nil },
             now: now
         )
 
-        #expect(items.map(\.id) == [boundary.id])
+        #expect(StoryReadKeys.freshWindow == 72 * 60 * 60)
+        #expect(items.map(\.id) == [fresh.id])
         let item = try #require(items.first)
         guard case let .poi(group) = item.source else {
-            Issue.record("The active boundary item must remain a POI")
+            Issue.record("The fresh item must remain a POI")
             return
         }
-        #expect(group.sharers.map(\.timestamp) == [now.addingTimeInterval(-StoryReadKeys.freshWindow)])
+        #expect(group.sharers.map(\.timestamp) == [now.addingTimeInterval(-StoryReadKeys.freshWindow + 0.001)])
     }
 
     @Test
@@ -390,7 +395,7 @@ struct maptalkTests {
 
     @Test
     @MainActor
-    func activeFeedRefreshKeepsStandaloneSearchOnlyMarkersRenderEligible() async {
+    func activeFeedRefreshKeepsRecentSearchOnlyMarkersWithoutPromotingUnvisitedPlaces() async {
         let now = Date.now
         let initialActivePOI = makeActiveFeedPOI(
             name: "Initial active place",
@@ -402,6 +407,10 @@ struct maptalkTests {
         )
         let selectedSearchPOI = makeActiveFeedPOI(
             name: "Selected search-only place",
+            checkInDates: [now.addingTimeInterval(-10)]
+        )
+        let unvisitedDirectoryPOI = makeActiveFeedPOI(
+            name: "Unvisited directory place",
             checkInDates: []
         )
         let initialActiveReel = makeActiveFeedReel(createdAt: now.addingTimeInterval(-50))
@@ -468,6 +477,11 @@ struct maptalkTests {
         ]))
         #expect(unretainedPOIIDs == Set([replacementActivePOI.id]))
         #expect(retainedPOIIDs == Set([replacementActivePOI.id, selectedSearchPOI.id]))
+        #expect(Set(viewModel.mapRenderPOIs(
+            retaining: unvisitedDirectoryPOI.id,
+            selectedMapPOI: unvisitedDirectoryPOI
+        ).map(\.id)) == Set([replacementActivePOI.id]),
+                "Selecting an unvisited directory result must not fabricate an active check-in")
         #expect(unretainedReelIDs == Set([replacementActiveReel.id]))
         #expect(retainedReelIDs == Set([replacementActiveReel.id, selectedSearchReel.id]))
     }

@@ -94,6 +94,7 @@ struct ExperienceDetailView: View {
         let comments: Int
         let favorites: Int
         let endorsements: RatedPOI.EndorsementSummary
+        var commentTarget: BackendCommentTarget? = nil
     }
 
     struct POIStoryContributor: Identifiable {
@@ -150,6 +151,8 @@ struct ExperienceDetailView: View {
     @Environment(\.backendSafetyMenuTrailingInset) private var safetyMenuTrailingInset
     @State private var storyViewerState: POIStoryViewerState?
     @State private var selectedProfileContext: UserMapViewModel.Context?
+    @State var editedCaptions: [UUID: String] = [:]
+    @State private var isEditingCaption = false
 
     init(
         mode: Mode,
@@ -223,9 +226,7 @@ struct ExperienceDetailView: View {
     var body: some View {
         let currentData = contentData(for: currentMode)
 
-        ZStack(alignment: .top) {
-            background(for: currentData, isExpanded: isExpanded)
-
+        Group {
             if isExpanded {
                 expandedContent(using: currentData)
             } else {
@@ -233,10 +234,19 @@ struct ExperienceDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Media is decoration behind the card, not a layout sibling. In
+        // particular, a full-resolution portrait poster must not enlarge the
+        // sheet and push its author/footer outside the compact detent.
+        .background {
+            background(for: currentData, isExpanded: isExpanded)
+                .accessibilityHidden(true)
+        }
         .background(Color.black.ignoresSafeArea())
         .overlay(alignment: .topTrailing) {
-            if isExpanded, let backend = environment.backend, !reportablePosts.isEmpty {
-                BackendContentSafetyMenu(store: backend, posts: reportablePosts)
+            if isExpanded, let backend = environment.backend, !actionablePosts.isEmpty {
+                BackendContentSafetyMenu(store: backend, posts: actionablePosts,
+                    onCaptionEdited: { editedCaptions[$0.id] = $0.caption },
+                    onEditorVisibilityChanged: { isEditingCaption = $0 })
                     .padding([.top, .leading, .bottom], 16)
                     .padding(.trailing, safetyMenuTrailingInset)
             }
@@ -268,6 +278,10 @@ struct ExperienceDetailView: View {
         }
     }
 
+    var isMediaPlaybackActive: Bool {
+        storyViewerState == nil && selectedProfileContext == nil && !isEditingCaption
+    }
+
     func openRecentSharer(at index: Int, using data: ContentData) {
         guard data.recentSharers.indices.contains(index) else { return }
         storyViewerState = POIStoryViewerState(contributorIndex: index)
@@ -277,15 +291,15 @@ struct ExperienceDetailView: View {
         selectedProfileContext = .profileContext(for: user)
     }
 
-    private var reportablePosts: [BackendContentSafetyMenu.Post] {
+    private var actionablePosts: [BackendContentSafetyMenu.Post] {
         guard let backend = environment.backend else { return [] }
         switch currentMode {
         case let .real(post, _):
-            return post.userId == backend.user.id ? [] : [.init(id: post.id, ownerID: post.userId, title: "Post")]
+            return [.init(id: post.id, ownerID: post.userId, title: "Post")]
         case let .poi(place):
-            return place.checkIns.filter { $0.userId != backend.user.id }.map {
+            return place.checkIns.map {
                 .init(id: $0.id, ownerID: $0.userId,
-                      title: "@\(backend.user(for: $0.userId)?.handle ?? "member") · \($0.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                      title: "\($0.userId == backend.user.id ? "Your check-in" : "@\(backend.user(for: $0.userId)?.handle ?? "member")") · \($0.createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute().second()))")
             }
         case .journey: return []
         }
