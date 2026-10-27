@@ -911,6 +911,28 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
         [now() - ACTIVE_FEED_WINDOW, south, north, west, east, user.id, user.id], page));
     }
 
+    const placeMemoriesMatch = /^\/v1\/places\/([^/]+)\/memories$/.exec(path);
+    if (method === 'GET' && placeMemoriesMatch) {
+      const placeID = id(placeMemoriesMatch[1]);
+      const page = pageInput(url.searchParams);
+      // A place is a durable public history, not the viewer's current viewport
+      // or the 72-hour active Feed. Its ID never grants access to private visits.
+      // Match comments' non-enumerating 404 for unknown/inaccessible places.
+      try {
+        publicCommentTarget('places', placeID, user.id);
+      } catch (error) {
+        if (error instanceof APIError && error.status === 404) {
+          // All missing/private/withdrawn places share this code. Unlike an
+          // older server's unknown-route 404, it forbids a cached fallback.
+          throw new APIError(404, 'place_unavailable', 'This place is not available.');
+        }
+        throw error;
+      }
+      return json(response, 200, listMemories(`kind = 'poi' AND place_id = ?
+        AND visibility = 'public' AND moderation_status = 'approved' AND ${visibilitySQL()}`,
+        [placeID, user.id, user.id], page, PUBLICATION_TIME_SQL));
+    }
+
     const memoryMatch = /^\/v1\/memories\/([^/]+)$/.exec(path);
     if (memoryMatch && ['GET', 'PATCH', 'DELETE'].includes(method)) {
       const memoryID = id(memoryMatch[1]);

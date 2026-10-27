@@ -33,6 +33,7 @@ struct MapTalkView: View {
     @State private var suppressJourneySelectionUpdate: Bool = false
     @State private var didApplyInitialStorySelection: Bool = false
     @StateObject private var storyReadStore = StoryReadStore()
+    @StateObject private var friendStoryNavigation = FriendStoryNavigation()
     @State private var pendingViewedStoryKey: String?
     @State private var publishDestination: MapTalkPublishDestination?
     @State private var queuedPublishDestination: MapTalkPublishDestination?
@@ -61,8 +62,14 @@ struct MapTalkView: View {
             // The rail is a stable public feed snapshot. Map search results
             // live in `ratedPOIs` and never decide membership here.
             let baseStoryItems = viewModel.activeFeedItems
+            let friendGroups = usesFriendStories ? friendStoryGroups : []
 
             let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
+            let nestedStoryJourney: JourneyPost? = {
+                guard case let .bubble(scope)? = friendStoryNavigation.routes.last?.content else { return nil }
+                return scope.journey
+            }()
+            let renderedJourney = focusedJourneyHeader ?? nestedStoryJourney
 
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
             let mapRatedPOIs = viewModel.mapRenderPOIs(
@@ -75,7 +82,8 @@ struct MapTalkView: View {
             )
             let friendFootprintTopExclusion = MapTalkTopChromeLayout.height(
                 safeAreaTop: geometry.safeAreaInsets.top,
-                showsStories: storyItems.isEmpty == false
+                showsStories: usesFriendStories && focusedJourneyHeader == nil
+                    ? !friendGroups.isEmpty : !storyItems.isEmpty
             )
             let friendFootprintLayoutRevision = viewModel.friendFootprints.map { footprint in
                 MapMarkerLayoutRevision(
@@ -146,7 +154,8 @@ struct MapTalkView: View {
                 }
             }
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
-            let previewControlsPadding = ControlsLayout.previewPadding(for: geometry)
+            let previewControlsPadding = ControlsLayout.previewPadding(for: geometry,
+                fraction: activeCompactFraction(for: geometry.size.height))
             let collapseDetent = {
                 experiencePresentation.collapseToCompact()
             }
@@ -402,6 +411,10 @@ struct MapTalkView: View {
             ZStack(alignment: .top) {
                 MapReader { mapProxy in
                     let selectFriendFootprint: (MapTalkFriendFootprint) -> Void = { tapped in
+                        if friendStoryNavigation.isActive {
+                            openFriendMapContent(.poi(tapped.ratedPOI))
+                            return
+                        }
                         viewModel.cancelPendingLocationFocus()
                         let nextID = FriendFootprintTapSelectionPolicy.nextID(
                             tappedID: tapped.id,
@@ -441,7 +454,7 @@ struct MapTalkView: View {
                     }
 
                     Map(position: $cameraPosition, interactionModes: .all) {
-                        if focusedJourneyHeader == nil,
+                        if renderedJourney == nil,
                            viewModel.isUserScope == false,
                            let friendFootprintVisibility {
                             FriendFootprintOverlay(
@@ -456,18 +469,22 @@ struct MapTalkView: View {
                         }
 
                         MapOverlays(
-                            ratedPOIs: focusedJourneyHeader?.pois ?? mapRatedPOIs,
-                            reals: focusedJourneyHeader?.reels ?? mapReels,
+                            ratedPOIs: renderedJourney?.pois ?? mapRatedPOIs,
+                            reals: renderedJourney?.reels ?? mapReels,
                             journeys: [],
-                            userCoordinate: focusedJourneyHeader == nil ? viewModel.userCoordinate : nil,
+                            userCoordinate: renderedJourney == nil ? viewModel.userCoordinate : nil,
                             heroNamespace: journeyNamespace,
-                            useTimelineStyle: focusedJourneyHeader != nil,
+                            useTimelineStyle: renderedJourney != nil,
                             displayMode: viewModel.isUserScope ? .content : .people,
-                            selectedStoryId: selectedStoryId,
+                            selectedStoryId: friendStoryMapSelection ?? selectedStoryId,
                             userProvider: viewModel.user(for:),
                             isRealUnseen: isRealUnseen,
                             isPOIUnseen: isPOIUnseen,
                             onTapReal: { real in
+                                if friendStoryNavigation.isActive {
+                                    openFriendMapContent(.real(real, viewModel.user(for: real.userId)))
+                                    return
+                                }
                                 viewModel.cancelPendingLocationFocus()
                                 if let item = storyItemForReal(real) {
                                     selectStoryItem(item, true, false, nil)
@@ -484,6 +501,10 @@ struct MapTalkView: View {
                                 experiencePresentation.presentNewContent()
                             },
                             onTapPOI: { rated in
+                                if friendStoryNavigation.isActive {
+                                    openFriendMapContent(.poi(rated))
+                                    return
+                                }
                                 viewModel.cancelPendingLocationFocus()
                                 if let item = storyItemForPOI(rated) {
                                     selectStoryItem(item, true, false, nil)
@@ -503,7 +524,10 @@ struct MapTalkView: View {
                                 selectedStoryId = rated.id
                                 activeExperience = .poi(rated: rated, nonce: UUID())
                                 experiencePresentation.presentNewContent()
-                            }
+                            },
+                            compactReelMarkers: usesFriendStories && focusedJourneyHeader == nil,
+                            selectedStoryAuthor: friendStoryNavigation.routes.isEmpty
+                                ? friendStoryNavigation.session?.currentGroup?.user : nil
                         )
                     }
                     .ignoresSafeArea()
@@ -512,6 +536,9 @@ struct MapTalkView: View {
                         friendFootprintInteractionGate.noteCameraMotion()
                         if cameraPosition.positionedByUser {
                             viewModel.cancelPendingLocationFocus()
+                            if friendStoryNavigation.isActive {
+                                flightController.cancelActiveTransition()
+                            }
                         }
                     }
                     .onMapCameraChange(frequency: .onEnd) { context in
@@ -638,7 +665,20 @@ struct MapTalkView: View {
                         .padding(.horizontal, 16)
                     }
 
-                    if storyItems.isEmpty == false {
+                    if usesFriendStories && focusedJourneyHeader == nil {
+                        if !friendGroups.isEmpty {
+                            FriendStoriesRow(
+                                groups: friendStoryNavigation.session?.groups ?? friendGroups,
+                                selectedAuthorID: friendStoryNavigation.session?.currentGroup?.authorID,
+                                userProvider: viewModel.user(for:),
+                                isUnseen: { group in group.readKeys.contains { !storyReadStore.isViewed($0) } },
+                                onSelect: { authorID in
+                                    openFriendStory(authorID: authorID, groups: friendGroups, geometry: geometry)
+                                },
+                                alignTrigger: reelAlignTrigger
+                            )
+                        }
+                    } else if storyItems.isEmpty == false {
                         RealStoriesRow(
                             items: storyItems,
                             selectedId: selectedStoryId,
@@ -695,6 +735,7 @@ struct MapTalkView: View {
                             Spacer()
                             MapTalkControls(
                                 onTapLocate: {
+                                    finishFriendStory(restoreMap: false)
                                     if let region = currentRegion,
                                        let coordinate = viewModel.userCoordinate,
                                        region.center.distance(to: coordinate) < 500 {
@@ -734,6 +775,7 @@ struct MapTalkView: View {
             }
             .sheet(isPresented: $experiencePresentation.isPresented, onDismiss: {
                 guard experiencePresentation.didDismiss() == false else { return }
+                if friendStoryNavigation.isActive { finishFriendStory(restoreMap: true) }
                 flushPendingViewedStory(nil)
                 selectedRealId = nil
                 selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
@@ -746,6 +788,28 @@ struct MapTalkView: View {
                 let shouldAnimateSelection = isExpanded == false
 
                 let content: AnyView = {
+                    if friendStoryNavigation.isActive {
+                        return AnyView(FriendStoryFlow(
+                            navigation: friendStoryNavigation,
+                            detent: $experiencePresentation.detent,
+                            compactDetent: experiencePresentation.compactDetent,
+                            viewedKeys: storyReadStore.viewedKeys,
+                            userProvider: viewModel.user(for:),
+                            journeyProvider: viewModel.journey(for:),
+                            placeProvider: friendStoryPlace,
+                            captureCamera: friendStoryMapSnapshot,
+                            restoreCamera: restoreFriendStoryCamera,
+                            focusPage: { page in focusFriendStoryPage(page, geometry: geometry) },
+                            focusContent: { mode in focusFriendStoryContent(mode, geometry: geometry) },
+                            onRead: { storyReadStore.markViewed($0) },
+                            onClose: {
+                                // Keep the current card mounted throughout the native
+                                // dismissal; onDismiss clears the session and restores the map.
+                                experiencePresentation.dismiss(preservingDetent: true)
+                            },
+                            allowsPlayback: !isActivityOverExperiencePresented
+                        ))
+                    }
                     switch activeExperience {
                     case let .sequence(nonce):
                         if sequenceItems.isEmpty == false {
@@ -871,10 +935,7 @@ struct MapTalkView: View {
 
                 content
                     .id(experiencePresentation.contentRevision)
-                    .mapExperienceSheetChrome(
-                        compactDetent: .fraction(ControlsLayout.previewFraction),
-                        selection: $experiencePresentation.detent
-                    )
+                    .mapExperienceSheetChrome(presentation: experiencePresentation)
                     .fullScreenCover(isPresented: $isActivityOverExperiencePresented) {
                         activityContent
                             .presentationBackground(Color(.systemBackground))
@@ -922,6 +983,10 @@ struct MapTalkView: View {
                 viewedActivityIDs.formUnion(identifiers)
             }
             .onAppear {
+                storyReadStore.configure(
+                    accountID: environment.currentUser.id,
+                    server: environment.backend?.api.baseURL.absoluteString ?? "preview"
+                )
                 WorldBasemapPrefetcher.shared.prefetchGlobalBasemapIfNeeded()
                 if currentRegion == nil {
                     let initialRegion = viewModel.region
@@ -957,6 +1022,7 @@ struct MapTalkView: View {
                 }
             }
             .onChangeCompat(of: storyItemIds) { ids in
+                guard !friendStoryNavigation.isActive else { return }
                 // Feed membership belongs to the sequence pager. A standalone
                 // map-search preview has its own selected snapshot and must not
                 // lose that selection when the public feed refreshes or expires.
@@ -991,7 +1057,21 @@ struct MapTalkView: View {
                 applyInitialStorySelectionIfNeeded()
             }
             .onChangeCompat(of: scenePhase) { phase in
-                if phase == .active { viewModel.refreshFreshness() }
+                if phase == .active {
+                    viewModel.refreshFreshness()
+                    reconcileFriendStories(geometry: geometry)
+                }
+            }
+            .onChange(of: friendStoryRevision(friendGroups)) { _, _ in
+                reconcileFriendStories(geometry: geometry)
+            }
+            .onChange(of: environment.currentUser.id) { _, accountID in
+                if friendStoryNavigation.isActive {
+                    finishFriendStory(restoreMap: false)
+                    experiencePresentation.dismiss()
+                }
+                storyReadStore.configure(accountID: accountID,
+                    server: environment.backend?.api.baseURL.absoluteString ?? "preview")
             }
             .onReceive(viewModel.$ratedPOIs) { places in
                 updateStandalonePlacePreview(from: places)
@@ -1000,6 +1080,9 @@ struct MapTalkView: View {
                 updateStandalonePlacePreview(from: footprints.map(\.ratedPOI))
             }
             .onChangeCompat(of: viewModel.withdrawnPublicMemoryIDs) { ids in
+                if friendStoryNavigation.isActive {
+                    reconcileFriendStories(geometry: geometry)
+                }
                 if case let .reel(parent) = journeyEntry, ids.contains(parent.id) {
                     journeyEntry = nil
                     focusedJourneyHeader = nil
@@ -1082,7 +1165,13 @@ struct MapTalkView: View {
                 }
             }
             .onChangeCompat(of: experiencePresentation.detent) { detent in
-                if detent == .fraction(ControlsLayout.previewFraction), experiencePresentation.isPresented {
+                if friendStoryNavigation.isActive,
+                   detent == experiencePresentation.compactDetent,
+                   let page = friendStoryNavigation.session?.currentPage,
+                   friendStoryNavigation.routes.isEmpty {
+                    focusFriendStoryPage(page, geometry: geometry)
+                }
+                if detent == experiencePresentation.compactDetent, experiencePresentation.isPresented {
                     withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
                         controlsBottomPadding = previewControlsPadding
                     }
@@ -1093,10 +1182,16 @@ struct MapTalkView: View {
                 }
             }
             .onChangeCompat(of: geometry.size) { _ in
+                experiencePresentation.configureCompactDetent(.fraction(activeCompactFraction(for: geometry.size.height)))
                 let recalculatedBase = ControlsLayout.basePadding(for: geometry)
-                let recalculatedPreview = ControlsLayout.previewPadding(for: geometry)
+                let recalculatedPreview = ControlsLayout.previewPadding(for: geometry,
+                    fraction: activeCompactFraction(for: geometry.size.height))
                 let isElevated = controlsBottomPadding > recalculatedBase + 1
                 controlsBottomPadding = isElevated ? recalculatedPreview : recalculatedBase
+                if friendStoryNavigation.isActive, friendStoryNavigation.routes.isEmpty,
+                   let page = friendStoryNavigation.session?.currentPage {
+                    focusFriendStoryPage(page, geometry: geometry)
+                }
             }
             .onChangeCompat(of: baseControlsPadding) { newValue in
                 guard experiencePresentation.isPresented == false else { return }
@@ -1114,6 +1209,232 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    func activeCompactFraction(for availableHeight: CGFloat) -> CGFloat {
+        friendStoryNavigation.isActive
+            ? FriendStoryLayout.compactFraction(base: ControlsLayout.previewFraction, availableHeight: availableHeight)
+            : ControlsLayout.previewFraction
+    }
+
+    var usesFriendStories: Bool {
+        guard !viewModel.isUserScope else { return false }
+#if DEBUG
+        return !ProcessInfo.processInfo.arguments.contains("--legacy-stories")
+#else
+        return true
+#endif
+    }
+
+    var friendStoryGroups: [FriendStoryGroup] {
+        FriendStoryFeed.groups(
+            reals: viewModel.activityReels,
+            ratedPOIs: viewModel.activityPOIs,
+            backendRecords: viewModel.friendStoryRecords,
+            viewedKeys: storyReadStore.viewedKeys,
+            userProvider: viewModel.user(for:)
+        )
+    }
+
+    /// Compare payload changes too: RealPost equality intentionally only compares
+    /// identity, which otherwise hides progressive media and caption updates.
+    func friendStoryRevision(_ groups: [FriendStoryGroup]) -> [String] {
+        groups.flatMap { group in
+            [group.id.uuidString, group.user?.handle ?? "", group.user?.avatarURL?.absoluteString ?? ""] + group.pages.map { page in
+                var hash = Hasher()
+                hash.combine(page.id)
+                hash.combine(page.publishedAt)
+                hash.combine(page.expiresAt)
+                hash.combine(page.readKey)
+                hash.combine(page.locationKey)
+                hash.combine(page.coordinate?.latitude)
+                hash.combine(page.coordinate?.longitude)
+                hash.combine(page.expectedMedia)
+                switch page.content {
+                case let .reel(reel):
+                    hash.combine(reel.message)
+                    hash.combine(reel.attachments)
+                    hash.combine(reel.capsuleId)
+                case let .poi(place, checkIn, media):
+                    hash.combine(place.id)
+                    hash.combine(place.poi.name)
+                    hash.combine(place.poi.category)
+                    hash.combine(checkIn)
+                    hash.combine(media)
+                }
+                return String(hash.finalize())
+            }
+        }
+    }
+
+    func friendStoryMapSnapshot() -> FriendStoryNavigation.MapSnapshot {
+        .init(camera: currentCamera, region: currentRegion)
+    }
+
+    func restoreFriendStoryCamera(_ snapshot: FriendStoryNavigation.MapSnapshot) {
+        flightController.cancelActiveTransition()
+        pendingRegionCause = .other
+        if let camera = snapshot.camera { cameraPosition = .camera(camera) }
+        else if let region = snapshot.region { cameraPosition = .region(region) }
+        currentRegion = snapshot.region
+        currentCamera = snapshot.camera
+    }
+
+    func openFriendStory(authorID: UUID, groups: [FriendStoryGroup], geometry: GeometryProxy) {
+        let alreadyOpen = friendStoryNavigation.isActive
+        viewModel.cancelPendingLocationFocus()
+        pendingViewedStoryKey = nil
+        if let parent = friendStoryNavigation.routes.first {
+            restoreFriendStoryCamera(parent.returnCamera)
+            experiencePresentation.detent = parent.returnDetent == .large ? .large : experiencePresentation.compactDetent
+        }
+        friendStoryNavigation.begin(groups: groups, authorID: authorID,
+            viewedKeys: storyReadStore.viewedKeys, origin: friendStoryMapSnapshot())
+        guard let page = friendStoryNavigation.session?.currentPage else { return }
+        activeExperience = nil
+        focusedJourneyHeader = nil
+        journeyEntry = nil
+        journeyStack = []
+        selectedFriendFootprintID = nil
+        if !alreadyOpen {
+            experiencePresentation.configureCompactDetent(.fraction(activeCompactFraction(for: geometry.size.height)))
+            experiencePresentation.presentNewContent()
+        }
+        focusFriendStoryPage(page, geometry: geometry)
+        reelAlignTrigger &+= 1
+    }
+
+    func finishFriendStory(restoreMap: Bool) {
+        guard friendStoryNavigation.isActive || friendStoryNavigation.origin != nil else { return }
+        if restoreMap, let origin = friendStoryNavigation.origin { restoreFriendStoryCamera(origin) }
+        friendStoryNavigation.clear()
+        experiencePresentation.configureCompactDetent(.fraction(ControlsLayout.previewFraction))
+        selectedStoryId = nil
+        selectedRealId = nil
+        selectedFriendFootprintID = nil
+        activeExperience = nil
+        pendingViewedStoryKey = nil
+        viewModel.releaseRetainedActiveFeedItem()
+    }
+
+    func reconcileFriendStories(geometry: GeometryProxy) {
+        guard friendStoryNavigation.isActive else { return }
+        let previousPage = friendStoryNavigation.session?.currentPage?.id
+        friendStoryNavigation.session?.invalidate(memoryIDs: viewModel.withdrawnPublicMemoryIDs)
+        friendStoryNavigation.session?.reconcile(with: friendStoryGroups)
+        guard let page = friendStoryNavigation.session?.currentPage else {
+            finishFriendStory(restoreMap: true)
+            experiencePresentation.dismiss()
+            return
+        }
+        // A revoked member cannot survive through a previously opened child.
+        let withdrawn = viewModel.withdrawnPublicMemoryIDs
+        if friendStoryNavigation.routes.contains(where: { route in
+            switch route.content {
+            case let .reel(reel): return withdrawn.contains(reel.id)
+            case let .place(place): return place.checkIns.contains { withdrawn.contains($0.id) }
+            case let .bubble(scope):
+                return scope.journey.reels.contains { withdrawn.contains($0.id) }
+                    || scope.journey.pois.contains { $0.checkIns.contains { withdrawn.contains($0.id) } }
+            }
+        }) {
+            if let parent = friendStoryNavigation.routes.first {
+                restoreFriendStoryCamera(parent.returnCamera)
+                experiencePresentation.detent = parent.returnDetent == .large ? .large : experiencePresentation.compactDetent
+            }
+            friendStoryNavigation.routes = []
+        }
+        if previousPage != page.id {
+            // A child may be focused somewhere else. Restore its parent before
+            // applying same-place suppression for the replacement story page.
+            if let parent = friendStoryNavigation.routes.first {
+                restoreFriendStoryCamera(parent.returnCamera)
+                experiencePresentation.detent = parent.returnDetent == .large ? .large : experiencePresentation.compactDetent
+            }
+            friendStoryNavigation.routes = []
+            focusFriendStoryPage(page, geometry: geometry)
+        }
+    }
+
+    func friendStoryPlace(_ id: UUID) -> RatedPOI? {
+        // Prefer the map's richer place projection, not a fabricated personal
+        // POI. The story still references its exact original check-in.
+        viewModel.ratedPOIs.first { $0.id == id }
+            ?? viewModel.friendFootprints.first { $0.ratedPOI.id == id }?.ratedPOI
+            ?? viewModel.activityPOIs.first { $0.id == id }
+            ?? friendStoryNavigation.session?.groups.flatMap(\.pages).compactMap { page in
+                if case let .poi(place, _, _) = page.content, place.id == id { return place }
+                return nil
+            }.first
+    }
+
+    func openFriendMapContent(_ mode: ExperienceDetailView.Mode) {
+        let content: FriendStoryNavigation.Route.Content
+        switch mode {
+        case let .poi(place): content = .place(place)
+        case let .real(reel, _): content = .reel(reel)
+        case let .journey(journey): content = .bubble(.init(journey: journey, userProvider: viewModel.user(for:)))
+        }
+        friendStoryNavigation.routes.append(.init(content: content,
+            returnCamera: friendStoryMapSnapshot(), returnDetent: experiencePresentation.detent))
+    }
+
+    func focusFriendStoryPage(_ page: FriendStoryPage, geometry: GeometryProxy) {
+        switch page.content {
+        case let .reel(reel):
+            selectedStoryId = reel.id
+            selectedRealId = reel.id
+        case let .poi(place, _, _):
+            selectedStoryId = place.id
+            selectedRealId = nil
+        }
+        reelAlignTrigger &+= 1
+        guard let locationKey = page.locationKey,
+              friendStoryNavigation.needsMapFocus(locationKey: locationKey, viewportSize: geometry.size) else { return }
+        // Hidden maps synchronize when the user returns to the compact detent.
+        guard !experiencePresentation.isExpanded else { return }
+        friendStoryNavigation.lastLocationKey = locationKey
+        friendStoryNavigation.lastViewportSize = geometry.size
+        switch page.content {
+        case let .reel(reel): focusFriendStoryContent(.real(reel, viewModel.user(for: reel.userId)), geometry: geometry)
+        case let .poi(place, _, _): focusFriendStoryContent(.poi(place), geometry: geometry)
+        }
+    }
+
+    func focusFriendStoryContent(_ mode: ExperienceDetailView.Mode, geometry: GeometryProxy) {
+        viewModel.cancelPendingLocationFocus()
+        let region: MKCoordinateRegion
+        let cause: RegionChangeCause
+        switch mode {
+        case let .real(reel, _):
+            guard CLLocationCoordinate2DIsValid(reel.center) else { return }
+            region = viewModel.region(for: reel)
+            cause = .real
+        case let .poi(place):
+            guard CLLocationCoordinate2DIsValid(place.poi.coordinate) else { return }
+            region = viewModel.region(for: place)
+            cause = .poi
+        case let .journey(journey):
+            guard let target = MapJourneyCamera.target(for: journey, size: geometry.size,
+                safeAreaBottom: geometry.safeAreaInsets.bottom,
+                compactFraction: activeCompactFraction(for: geometry.size.height)) else { return }
+            flightController.cancelActiveTransition()
+            withAnimation(.easeInOut(duration: 0.28)) { cameraPosition = .region(target.region) }
+            currentRegion = target.region
+            return
+        }
+        let viewport = MapCameraViewport(size: geometry.size,
+            topInset: MapTalkTopChromeLayout.height(safeAreaTop: geometry.safeAreaInsets.top, showsStories: true),
+            bottomInset: geometry.size.height * activeCompactFraction(for: geometry.size.height) + geometry.safeAreaInsets.bottom)
+        if let currentRegion, currentRegion.center.distance(to: region.center) > 80_000 {
+            let target = viewport.framed(region)
+            flightController.cancelActiveTransition()
+            withAnimation(.easeInOut(duration: 0.28)) { cameraPosition = .region(target) }
+            self.currentRegion = target
+        } else {
+            flightController.handleRegionChange(currentRegion: currentRegion, targetRegion: region,
+                cause: cause, viewport: viewport, cameraPosition: $cameraPosition) { currentRegion = $0 }
+        }
+    }
+
     func searchNearbyPlaces(_ query: String) async -> [MapTalkNearbyPlaceOption] {
         guard let location = viewModel.publishableLiveLocation else { return [] }
         let publisher = environment.nearbyPOIRepo.search(query, near: location.coordinate)
@@ -1162,13 +1483,34 @@ private extension MapTalkView {
     }
 
     var selectedStandalonePOI: RatedPOI? {
+        if case let .place(place)? = friendStoryNavigation.routes.last?.content { return place }
+        if friendStoryNavigation.routes.isEmpty,
+           case let .poi(place, _, _)? = friendStoryNavigation.session?.currentPage?.content { return place }
         guard case let .poi(rated, _)? = activeExperience else { return nil }
         return rated
     }
 
     var selectedStandaloneReel: RealPost? {
+        if case let .reel(reel)? = friendStoryNavigation.routes.last?.content { return reel }
+        if friendStoryNavigation.routes.isEmpty,
+           case let .reel(reel)? = friendStoryNavigation.session?.currentPage?.content { return reel }
         guard case let .real(real, _)? = activeExperience else { return nil }
         return real
+    }
+
+    var friendStoryMapSelection: UUID? {
+        if let route = friendStoryNavigation.routes.last {
+            switch route.content {
+            case let .place(place): return place.id
+            case let .reel(reel): return reel.id
+            case .bubble: return route.selectedID
+            }
+        }
+        guard let page = friendStoryNavigation.session?.currentPage else { return nil }
+        switch page.content {
+        case let .reel(reel): return reel.id
+        case let .poi(place, _, _): return place.id
+        }
     }
 
     func refreshFriendFootprintVisibility(
@@ -1250,7 +1592,7 @@ private extension MapTalkView {
             projectedPoint: projectedPoint,
             canvasSize: canvasSize,
             topChromeBottom: topChromeBottom,
-            compactSheetFraction: ControlsLayout.previewFraction
+            compactSheetFraction: activeCompactFraction(for: canvasSize.height)
         ),
               let coordinateAtTarget = mapProxy.convert(targetPoint, from: .local) else {
             return
@@ -1383,6 +1725,7 @@ private extension MapTalkView {
 
     func requestPublish(_ destination: MapTalkPublishDestination) {
         guard publishDestination == nil else { return }
+        finishFriendStory(restoreMap: false)
 
         viewModel.refreshNearbyPlaces()
 
@@ -1758,8 +2101,8 @@ private enum ControlsLayout {
         geometry.safeAreaInsets.bottom * baseSafeAreaMultiplier + baseInset
     }
 
-    static func previewPadding(for geometry: GeometryProxy) -> CGFloat {
-        basePadding(for: geometry) + geometry.size.height * previewFraction + previewGap
+    static func previewPadding(for geometry: GeometryProxy, fraction: CGFloat = previewFraction) -> CGFloat {
+        basePadding(for: geometry) + geometry.size.height * fraction + previewGap
     }
 }
 

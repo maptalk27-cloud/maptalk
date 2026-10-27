@@ -28,6 +28,7 @@ struct BackendBatchDeletionTests {
         #expect(store.archive.privatePOIs.isEmpty)
         #expect(store.ownPublicPOIs.isEmpty)
         #expect(Set(store.feedPOIs.value.flatMap(\.checkIns).map(\.id)) == [fixture.otherVisitID])
+        #expect(Set(store.feedRecords.value.map(\.id)) == [fixture.otherVisitID])
         #expect(store.manageableMemories(for: .poi(fixture.placeID)).isEmpty)
         #expect(fixture.remainingIDs == [fixture.otherVisitID])
         #expect(!fixture.requests.contains("DELETE /v1/memories/\(fixture.otherVisitID.uuidString)"))
@@ -61,6 +62,7 @@ struct BackendBatchDeletionTests {
         #expect(Set(store.archive.privatePOIs.flatMap(\.checkIns).map(\.id)) == [fixture.secondVisitID])
         #expect(Set(store.ownPublicPOIs.flatMap(\.checkIns).map(\.id)) == [fixture.secondVisitID])
         #expect(Set(store.feedPOIs.value.flatMap(\.checkIns).map(\.id)) == [fixture.secondVisitID, fixture.otherVisitID])
+        #expect(Set(store.feedRecords.value.map(\.id)) == [fixture.secondVisitID, fixture.otherVisitID])
         #expect(Set(store.manageableMemories(for: .poi(fixture.placeID)).map(\.id)) == [fixture.secondVisitID])
         #expect(store.pendingMemoryMutations.isEmpty)
 
@@ -68,6 +70,7 @@ struct BackendBatchDeletionTests {
         // either; the failed visit remains available to retry independently.
         try await store.refresh()
         #expect(!store.feedPOIs.value.flatMap(\.checkIns).contains { $0.id == fixture.firstVisitID })
+        #expect(!store.feedRecords.value.contains { $0.id == fixture.firstVisitID })
         #expect(!store.archive.privatePOIs.flatMap(\.checkIns).contains { $0.id == fixture.firstVisitID })
     }
 

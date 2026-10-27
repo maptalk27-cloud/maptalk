@@ -24,9 +24,13 @@ final class BackendStore: ObservableObject {
     @Published var issue: String?
     let feedPOIs = CurrentValueSubject<[RatedPOI], Never>([])
     let feedReels = CurrentValueSubject<[RealPost], Never>([])
+    /// Authoritative Feed metadata, independent of viewport queries and local
+    /// media readiness. A story's pages must not appear/disappear as assets load.
+    let feedRecords = CurrentValueSubject<[BackendMemory], Never>([])
     /// Exact check-in/Reel IDs, never a shared landmark ID.
     let publicContentChanges = PassthroughSubject<Set<UUID>, Never>()
     private(set) var publicContentRevision = 0
+    private let placeHistoryScopeID = UUID()
     @Published private(set) var ownedMemories: [UUID: BackendMemory] = [:]
     @Published private(set) var pendingMemoryMutations: Set<UUID> = []
     @Published private(set) var pendingPublications: [UUID: PendingPublicationStatus] = [:]
@@ -308,6 +312,7 @@ final class BackendStore: ObservableObject {
         ownPublicReels = ownPublicReels.map { $0 }
         feedPOIs.send(feedPOIs.value)
         feedReels.send(feedReels.value)
+        publishFeedRecords()
     }
 
     private func prepareProfileAvatar(_ profile: BackendUser) async throws {
@@ -355,6 +360,7 @@ final class BackendStore: ObservableObject {
         restoreMapEligibility(from: localState.feed + localState.profile, ifRevision: mapRevision)
         let records = localState.mine + localState.profile + localState.feed
         remember(records)
+        publishFeedRecords()
         await loadCachedMedia(records, identity: localState.user)
         try requireActive()
         guard generation == refreshGeneration else { return }
@@ -419,6 +425,92 @@ final class BackendStore: ObservableObject {
         guard contentRevision == publicContentRevision else { throw CancellationError() }
         if userID != user.id || (identityRevision == profileRevision && !isUpdatingProfile) { applyProfile(identity) }
         return project(currentRecords(records, publicOnly: true))
+    }
+
+    struct PlaceHistoryPage {
+        let placeID: UUID
+        let place: RatedPOI?
+        let nextCursor: String?
+        let revision: Int
+        fileprivate let scopeID: UUID
+        fileprivate let records: [BackendMemory]
+        fileprivate let requestedCursors: Set<String>
+    }
+
+    /// Each deliberate request appends at most 12 public visits by place ID.
+    /// Only that page's media is prepared; older pages require another action.
+    /// History never enters the Feed or adopts a partial viewport fallback.
+    func loadPlaceHistory(placeID: UUID, after previous: PlaceHistoryPage? = nil,
+                          onUpdate: ((PlaceHistoryPage) -> Void)? = nil) async throws -> PlaceHistoryPage {
+        try requireActive()
+        let revision = publicContentRevision
+        if let previous {
+            guard previous.placeID == placeID, previous.revision == revision,
+                  previous.scopeID == placeHistoryScopeID else { throw CancellationError() }
+            guard previous.nextCursor != nil else { return previous }
+        }
+        let cursor = previous?.nextCursor
+        let page = try await api.placeMemories(placeID: placeID, cursor: cursor)
+        try requireActive()
+        guard revision == publicContentRevision else { throw CancellationError() }
+        var requestedCursors = previous?.requestedCursors ?? []
+        if let cursor { requestedCursors.insert(cursor) }
+        guard page.nextCursor.map({ !$0.isEmpty && !requestedCursors.contains($0) }) ?? true else {
+            throw BackendClientError.message("The server returned a repeated page. Please retry.")
+        }
+        // Reject malformed cross-place responses rather than showing another
+        // place's visits under the requested place name.
+        guard page.items.allSatisfy({ $0.kind == "poi" && $0.place?.id == placeID }) else {
+            throw BackendClientError.message("Couldn't load this place. Please try again.")
+        }
+        let newRecords = currentRecords(page.items, publicOnly: true)
+        let incomingIDs = Set(page.items.map(\.id))
+        let priorRecords = (previous?.records ?? []).filter { !incomingIDs.contains($0.id) }
+        let visible = currentRecords(priorRecords + newRecords, publicOnly: true)
+        remember(newRecords)
+        await loadCachedMedia(newRecords, identity: localState.user)
+        try requireActive()
+        guard revision == publicContentRevision else { throw CancellationError() }
+        func snapshot() -> PlaceHistoryPage {
+            let records = currentRecords(visible, publicOnly: true)
+            return PlaceHistoryPage(placeID: placeID,
+                place: project(records).pois.first { $0.id == placeID }, nextCursor: page.nextCursor,
+                revision: revision, scopeID: placeHistoryScopeID,
+                records: records, requestedCursors: requestedCursors)
+        }
+        onUpdate?(snapshot())
+        try await prepareMedia(newRecords) { [weak self] in
+            guard let self, isActive, !Task.isCancelled, revision == publicContentRevision else { return }
+            onUpdate?(snapshot())
+        }
+        try requireActive()
+        guard revision == publicContentRevision else { throw CancellationError() }
+        return snapshot()
+    }
+
+    /// An authorized metadata page remains useful when a later photo
+    /// or video cannot download. Permission failures and invalidated reads are
+    /// different: neither may retain an older place under a verified label.
+    static func canRetainVerifiedPlaceHistory(after error: Error, hasVerifiedMetadata: Bool,
+                                               requestRevision: Int, currentRevision: Int,
+                                               isActive: Bool) -> Bool {
+        guard hasVerifiedMetadata, isActive, requestRevision == currentRevision,
+              !(error is CancellationError) else { return false }
+        if let clientError = error as? BackendClientError {
+            switch clientError {
+            case .unauthorized, .publishPending:
+                return false
+            case let .http(status, _, _):
+                return status == 408 || status == 429 || status >= 500
+            case .message:
+                // URLSession transport errors are intentionally wrapped in a
+                // user-safe message. Only allow this after metadata succeeded.
+                return true
+            }
+        }
+        // This stage can also fail while decoding a local video poster or
+        // writing media to the cache. That does not revoke the public records.
+        return true
     }
 
     func loadMap(_ region: MKCoordinateRegion, onUpdate: ((Snapshot) -> Void)? = nil) async throws -> Snapshot {
@@ -632,6 +724,7 @@ final class BackendStore: ObservableObject {
         }
         feedReels.send(feedReels.value.filter { $0.userId != id })
         feedPOIs.send(Self.removingMemories(ids, from: feedPOIs.value))
+        publishFeedRecords()
         publicContentChanges.send(ids)
         try? await persistLocalState()
         await refreshAfterMemoryMutation(confirmation: "This account is blocked.")
@@ -710,6 +803,7 @@ final class BackendStore: ObservableObject {
         ownPublicPOIs = Self.removingMemories(ids, from: ownPublicPOIs)
         feedReels.send(feedReels.value.filter { !ids.contains($0.id) })
         feedPOIs.send(Self.removingMemories(ids, from: feedPOIs.value))
+        publishFeedRecords()
         archive.replaceServerRecords(
             pois: deleted ? Self.removingMemories(ids, from: archive.privatePOIs) : archive.privatePOIs,
             reels: deleted ? archive.privateReels.filter { !ids.contains($0.id) } : archive.privateReels)
@@ -865,6 +959,11 @@ final class BackendStore: ObservableObject {
         }
         let projection = project([saved])
         let visibleAudience: MapPublishAudience = Self.isPubliclyVisible(saved) ? .livePublic : .privateMyMap
+        if visibleAudience == .livePublic {
+            localState.feed.removeAll { $0.id == saved.id }
+            localState.feed.insert(saved, at: 0)
+            publishFeedRecords()
+        }
         // The save has succeeded even if the following refresh is offline.
         // Do not keep the composer open and invite an accidental second post.
         if let reel = projection.reels.first {
@@ -1095,7 +1194,24 @@ final class BackendStore: ObservableObject {
         ownPublicReels = publicProjection.reels
         feedPOIs.send(activeProjection.pois)
         feedReels.send(activeProjection.reels)
+        publishFeedRecords()
         updatePendingStatuses()
+    }
+
+    private func publishFeedRecords() {
+        guard isActive else { return }
+        // Never derive this from knownMemories: that dictionary also contains
+        // private, profile-history and arbitrary map-search records. Pending
+        // publications remain local previews until the server confirms them.
+        let queuedIDs = Set(localState.queued.map(\.id))
+        let records = currentRecords(localState.feed, publicOnly: true)
+            .filter { !queuedIDs.contains($0.id) }
+            .map { record in
+                var current = record
+                if let identity = profileMetadata[record.ownerId] { current.owner = identity }
+                return current
+            }
+        feedRecords.send(records)
     }
 
     func enqueuePublish(_ draft: MapTalkPublishDraft, audience: MapPublishAudience,
@@ -1526,6 +1642,7 @@ final class BackendStore: ObservableObject {
         ownPublicReels = []
         feedPOIs.send([])
         feedReels.send([])
+        feedRecords.send([])
         issue = nil
         mediaDisk.invalidate()
     }

@@ -148,14 +148,20 @@ struct ExperienceDetailView: View {
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
     @Environment(\.appEnv) private var environment
+    @Environment(\.friendStoryPlaybackEnabled) private var parentPlaybackEnabled
+    @Environment(\.friendStoryExpectedMedia) var storyExpectedMedia
+    @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
     @Environment(\.backendSafetyMenuTrailingInset) private var safetyMenuTrailingInset
     @State private var storyViewerState: POIStoryViewerState?
     @State private var selectedProfileContext: UserMapViewModel.Context?
     @State var editedCaptions: [UUID: String] = [:]
     @State private var isEditingCaption = false
+    @State private var childPresentationID = UUID()
 
     init(
         mode: Mode,
+        isExpanded: Bool = true,
+        onCollapsedTap: (() -> Void)? = nil,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         journeyProvider: @escaping (UUID) -> JourneyPost? = { _ in nil },
         userProvider: @escaping (UUID) -> User? = { _ in nil },
@@ -169,8 +175,8 @@ struct ExperienceDetailView: View {
         }
         self.standaloneMode = mode
         self.sequenceContext = nil
-        self.isExpanded = true
-        self.onCollapsedTap = nil
+        self.isExpanded = isExpanded
+        self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.journeyProvider = journeyProvider
         self.userProvider = userProvider
@@ -254,6 +260,12 @@ struct ExperienceDetailView: View {
         .onAppear {
             logPOIDebug(event: "onAppear", data: currentData)
         }
+        .onChangeCompat(of: hasPresentedChildContent) { presented in
+            childPresentationChanged?(childPresentationID, presented)
+        }
+        .onDisappear {
+            if !hasPresentedChildContent { childPresentationChanged?(childPresentationID, false) }
+        }
         .fullScreenCover(item: $storyViewerState) { state in
             let refreshedData = contentData(for: currentMode)
             POIStoryViewer(
@@ -267,6 +279,10 @@ struct ExperienceDetailView: View {
             ) {
                 storyViewerState = nil
             }
+            .environment(\.friendStoryExpectedMedia, [])
+            .environment(\.friendStoryOnMediaReady, nil)
+            .environment(\.friendStoryPlaybackEnabled, true)
+            .environment(\.friendStoryChildPresentationChanged, nil)
         }
         .fullScreenCover(item: $selectedProfileContext) { context in
             NavigationStack {
@@ -275,11 +291,19 @@ struct ExperienceDetailView: View {
                     showsCloseButton: true
                 )
             }
+            .environment(\.friendStoryExpectedMedia, [])
+            .environment(\.friendStoryOnMediaReady, nil)
+            .environment(\.friendStoryPlaybackEnabled, true)
+            .environment(\.friendStoryChildPresentationChanged, nil)
         }
     }
 
     var isMediaPlaybackActive: Bool {
-        storyViewerState == nil && selectedProfileContext == nil && !isEditingCaption
+        parentPlaybackEnabled && storyViewerState == nil && selectedProfileContext == nil && !isEditingCaption
+    }
+
+    private var hasPresentedChildContent: Bool {
+        storyViewerState != nil || selectedProfileContext != nil || isEditingCaption
     }
 
     func openRecentSharer(at index: Int, using data: ContentData) {

@@ -309,6 +309,19 @@ test('public beta posts are immediately visible; rejection, blocking and revocat
   assert.equal((await api.call('/v1/feed', { token: bob.token })).data.items.length, 0);
 });
 
+test('place history excludes revoked beta owners and rejects viewers without active access', async t => {
+  const api = await fixture(t);
+  const alice = await api.account('place-alice'), bob = await api.account('place-bob');
+  const pending = await api.account('place-pending', false);
+  const visit = await api.post(alice, { kind: 'poi', caption: '', place: { name: 'Beta place', category: 'coffee' } });
+  const path = `/v1/places/${visit.place.id}/memories`;
+  assert.deepEqual((await api.call(path, { token: bob.token })).data.items.map(item => item.id), [visit.id]);
+  assert.equal((await api.call(path, { token: pending.token })).status, 403);
+  api.admin(db => revokeBetaAccess(db, { userID: alice.user.id }));
+  assert.equal((await api.call(path, { token: bob.token })).status, 404);
+  assert.equal((await api.call(path, { token: alice.token })).status, 403);
+});
+
 test('private beta posts remain private until shared and rejected posts stay rejected through visibility changes and restart', async t => {
   const api = await fixture(t);
   const alice = await api.account('alice');

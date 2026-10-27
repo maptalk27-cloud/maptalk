@@ -7,6 +7,37 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct BackendProgressiveLoadingTests {
+    @Test(.timeLimit(.minutes(1)))
+    func feedStoryMetadataPrecedesMediaAndNeverChangesPageIdentityAsDownloadsArrive() async throws {
+        let context = try ProgressiveLoadingContext(feedContainsRecord: true)
+        defer { context.finish() }
+        var metadata: [[BackendMemory]] = []
+        let subscription = context.store.feedRecords.sink { metadata.append($0) }
+        defer { subscription.cancel() }
+        let operation = Task { try await context.store.refresh() }
+        defer { operation.cancel() }
+        var requests = context.mediaRequests.makeAsyncIterator()
+        let photo = try #require(await requests.next())
+        let beforeAssets = try #require(context.store.feedRecords.value.first)
+        #expect(beforeAssets.id == context.recordID)
+        #expect(beforeAssets.media.map(\.id) == [context.videoID, context.photoID])
+        #expect(context.store.feedReels.value.first?.attachments.isEmpty == true)
+        photo.respond(context.photo, contentType: "image/png")
+        let video = try #require(await requests.next())
+        #expect(context.store.feedReels.value.first?.attachments.map(\.id) == [context.photoID])
+        #expect(context.store.feedRecords.value.first?.media.map(\.id) == beforeAssets.media.map(\.id))
+        let source = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: source) }
+        video.respond(try Data(contentsOf: source), contentType: "video/mp4")
+        try await operation.value
+        #expect(metadata.filter { !$0.isEmpty }.allSatisfy {
+            $0.map(\.id) == [context.recordID] && $0.first?.media.map(\.id) == [context.videoID, context.photoID]
+        })
+        #expect(context.store.feedReels.value.first?.attachments.map(\.id) == [context.videoID, context.photoID])
+        context.store.clearLocalMedia()
+        #expect(context.store.feedRecords.value.isEmpty, "Sign-out must clear raw metadata as well as cards")
+    }
+
     @Test(.timeLimit(.minutes(1)), arguments: [false, true])
     func mapAndProfileShowMetadataAndPhotosBeforeTheVideoFinishes(isProfile: Bool) async throws {
         let context = try ProgressiveLoadingContext()
@@ -105,7 +136,7 @@ private final class ProgressiveLoadingContext {
     var photoPath: String { "/v1/media/\(photoID.uuidString.lowercased())" }
     var videoPath: String { "/v1/media/\(videoID.uuidString.lowercased())" }
 
-    init(ownPost: Bool = false) throws {
+    init(ownPost: Bool = false, feedContainsRecord: Bool = false) throws {
         authorID = ownPost ? currentUserID : UUID()
         (mediaRequests, continuation) = AsyncStream.makeStream()
         let mediaContinuation = continuation
@@ -132,7 +163,8 @@ private final class ProgressiveLoadingContext {
                 operation.respond(Data("{\"user\":{\"id\":\"\(current)\",\"handle\":\"viewer\"}}".utf8))
             } else if path == "/v1/users/\(author.uuidString)" {
                 operation.respond(Data("{\"user\":{\"id\":\"\(author)\",\"handle\":\"video_person\"}}".utf8))
-            } else if path == "/v1/map/memories" || (author != current && path == "/v1/users/\(author.uuidString)/memories") {
+            } else if path == "/v1/map/memories" || (feedContainsRecord && path == "/v1/feed")
+                || (author != current && path == "/v1/users/\(author.uuidString)/memories") {
                 operation.respond(page)
             } else if method == "POST" || method == "DELETE" { operation.respond(Data("{}".utf8)) }
             else { operation.respond(Data("{\"items\":[],\"nextCursor\":null}".utf8)) }

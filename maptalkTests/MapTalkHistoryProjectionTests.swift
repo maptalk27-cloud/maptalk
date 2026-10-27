@@ -242,6 +242,36 @@ struct MapTalkHistoryProjectionTests {
     }
 
     @Test
+    func offscreenRepeatedVisitsScheduleEachPublicationExpiryNotJustLatestPersonVisit() async {
+        let now = Date.now
+        let author = UUID()
+        let older = RatedPOI.CheckIn(userId: author,
+            createdAt: now.addingTimeInterval(-300 * hour),
+            publishedAt: now.addingTimeInterval(-71 * hour))
+        let newer = visit(userID: author, at: now.addingTimeInterval(-hour))
+        let offscreen = place(visits: [older, newer])
+        let sources = Sources()
+        sources.activePOIs.send([offscreen])
+        sources.mapPOIs.send([])
+        let model = MapTalkViewModel(environment: sources.environment())
+        await deliverRepositoryValues()
+        model.refreshFreshness(asOf: now)
+
+        #expect(model.ratedPOIs.isEmpty, "This regression must not rely on viewport history")
+        #expect(model.activeFeedItems.count == 1)
+        #expect(model.nextActiveFeedExpiryDate == older.activityDate.addingTimeInterval(StoryReadKeys.freshWindow),
+                "The older slice expires before the person's latest visit at this offscreen place")
+
+        let afterOlderExpiry = now.addingTimeInterval(2 * hour)
+        model.refreshFreshness(asOf: afterOlderExpiry)
+        let remaining = FriendStoryFeed.groups(reals: model.activityReels, ratedPOIs: model.activityPOIs,
+            userProvider: { _ in nil }, now: afterOlderExpiry)
+        #expect(remaining.flatMap(\.pages).map(\.memoryID) == [newer.id])
+        #expect(model.nextActiveFeedExpiryDate == newer.activityDate.addingTimeInterval(StoryReadKeys.freshWindow))
+        #expect(model.activityPOIs.first?.checkIns.count == 2, "Expiry removes presentation, not saved visits")
+    }
+
+    @Test
     func resumingAfterExpiryReleasesTheRetainedPlaceIntoQuietHistory() async {
         let now = Date.now
         let nearlyExpired = place(visits: [visit(at: now.addingTimeInterval(-71 * hour))])

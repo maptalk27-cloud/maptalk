@@ -47,6 +47,9 @@ final class MapTalkViewModel: ObservableObject {
     @Published private(set) var activeFeedItems: [RealStoriesRow.StoryItem] = []
     @Published private(set) var activeFeedPOIs: [RatedPOI] = []
     @Published private(set) var activeFeedReels: [RealPost] = []
+    /// nil identifies preview/repository mode. A connected global feed always
+    /// has a metadata array, even when empty or its media is still downloading.
+    @Published private(set) var friendStoryRecords: [BackendMemory]?
     @Published private(set) var activityPOIs: [RatedPOI] = []
     @Published private(set) var activityReels: [RealPost] = []
     @Published var userCoordinate: CLLocationCoordinate2D?
@@ -73,6 +76,7 @@ final class MapTalkViewModel: ObservableObject {
     @Published private var nearbyDirectoryPOIs: [RatedPOI] = []
     private var repositoryMapReels: [RealPost] = []
     private var repositoryActiveReels: [RealPost] = []
+    private var repositoryStoryRecords: [BackendMemory]?
     private var publishedPOIOverlays: [RatedPOI] = []
     private var publishedReelOverlays: [RealPost] = []
     private var shouldCenterWhenLocationArrives = false
@@ -80,6 +84,7 @@ final class MapTalkViewModel: ObservableObject {
     private var lastVisibleRegion: MKCoordinateRegion?
     private var retainedActiveFeedItemID: UUID?
     private var activeFeedExpiryWorkItem: DispatchWorkItem?
+    private(set) var nextActiveFeedExpiryDate: Date?
     private var cancellables = Set<AnyCancellable>()
     init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
@@ -100,6 +105,15 @@ final class MapTalkViewModel: ObservableObject {
         switch scope {
         case .global:
             friendFootprints = previewFootprints
+            if let backend = environment.backend {
+                // BackendStore and this subscriber are main-actor owned. Do not
+                // enqueue an older snapshot behind a synchronous withdrawal.
+                backend.feedRecords.sink { [weak self] records in
+                    guard let self else { return }
+                    repositoryStoryRecords = records
+                    rebuildFriendStoryRecords(asOf: .now)
+                }.store(in: &cancellables)
+            }
             bind()
         case let .user(user):
             friendFootprints = []
@@ -114,6 +128,8 @@ final class MapTalkViewModel: ObservableObject {
         // Search-render records are separate from the feed. Remove the exact
         // withdrawn visits immediately, before fetching the current viewport.
         withdrawnPublicMemoryIDs.formUnion(ids)
+        repositoryStoryRecords?.removeAll { ids.contains($0.id) }
+        rebuildFriendStoryRecords(asOf: .now)
         backendMapSearch?.cancel()
         repositoryPOIs = BackendStore.removingMemories(ids, from: repositoryPOIs)
         nearbySocialPOIs = BackendStore.removingMemories(ids, from: nearbySocialPOIs)
@@ -883,6 +899,7 @@ final class MapTalkViewModel: ObservableObject {
         guard case .global = scope else { return }
 
         activeFeedExpiryWorkItem?.cancel()
+        rebuildFriendStoryRecords(asOf: now)
 
         let mergedPlaces = mergePOIs(
             preferred: publishedPOIOverlays,
@@ -922,15 +939,35 @@ final class MapTalkViewModel: ObservableObject {
         rebuildMapRenderContent(asOf: now)
     }
 
+    private func rebuildFriendStoryRecords(asOf now: Date) {
+        guard case .global = scope, let records = repositoryStoryRecords else { return }
+        friendStoryRecords = records.filter { record in
+            let publishedAt = record.publishedAt ?? record.createdAt
+            return !withdrawnPublicMemoryIDs.contains(record.id)
+                && record.visibility == "public"
+                && (record.moderationStatus == nil || record.moderationStatus == "approved")
+                && publishedAt.addingTimeInterval(StoryReadKeys.freshWindow) > now
+        }
+    }
+
     private func scheduleNextActiveFeedExpiry(
         from items: [RealStoriesRow.StoryItem],
         asOf now: Date
     ) {
         activeFeedExpiryWorkItem?.cancel()
+        nextActiveFeedExpiryDate = nil
         // Map-only content also needs to age out without another camera move
         // or network request. Include every visit, not just each person's latest.
         let mapExpiryDates = (repositoryMapReels + publishedReelOverlays).map { StoryReadKeys.expiresAt(for: $0) }
             + ratedPOIs.flatMap { $0.checkIns.map { StoryReadKeys.expiresAt(forActivityAt: $0.activityDate) } }
+        // A place/person rail group only carries its latest visit timestamp.
+        // Every individual story slice must still expire on time, including
+        // older visits at a place outside the currently loaded map viewport.
+        let storyExpiryDates = activityPOIs.flatMap { place in
+            place.checkIns.map { StoryReadKeys.expiresAt(forActivityAt: $0.activityDate) }
+        } + (friendStoryRecords ?? []).map {
+            StoryReadKeys.expiresAt(forActivityAt: $0.publishedAt ?? $0.createdAt)
+        }
         let expiryDates = (items.flatMap { item -> [Date] in
             switch item.source {
             case let .real(real):
@@ -942,10 +979,11 @@ final class MapTalkViewModel: ObservableObject {
             case .journey:
                 return []
             }
-        } + mapExpiryDates)
+        } + mapExpiryDates + storyExpiryDates)
         .filter { $0 > now }
 
         guard let nextExpiry = expiryDates.min() else { return }
+        nextActiveFeedExpiryDate = nextExpiry
         let delay = max(0.05, nextExpiry.timeIntervalSince(now) + 0.01)
         let workItem = DispatchWorkItem { [weak self] in
             self?.rebuildActiveFeed(asOf: .now)

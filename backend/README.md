@@ -115,6 +115,7 @@ Debug 默认连接 `http://127.0.0.1:8787`，可用 App 环境变量 `MAPTALK_BA
 | `GET /v1/memories/:id/comments` | 公开 Reel 的文字讨论，支持 `limit` / `cursor` |
 | `POST /v1/memories/:id/comments` | `{ id, text }`；UUID 用于幂等重试，不需要媒体、定位或新打卡 |
 | `GET /v1/places/:id/comments` | 公开地点的共同讨论，不因单人重复打卡拆成多个讨论串 |
+| `GET /v1/places/:id/memories` | 指定地点全部有权查看的公开打卡，按首次公开时间分页；不受当前地图范围或 72 小时 Feed 期限限制，不返回私有、被屏蔽或未批准内容 |
 | `POST /v1/places/:id/comments` | `{ id, text }`；同地点访问共用，至少有一条对当前用户可见的公开打卡 |
 | `PATCH /v1/memories/:id` | 修改自己的 `visibility`；Reel 也可修改 `caption`，不改变发布时间或续期 |
 | `DELETE /v1/memories/:id` | 永久删除自己的记录 |

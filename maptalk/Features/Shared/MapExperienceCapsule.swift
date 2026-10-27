@@ -8,7 +8,7 @@ import SwiftUI
 /// always shown as a compact sheet, and changing selection from the expanded
 /// sheet gets a clean native-sheet reset instead of inheriting the large detent.
 final class MapExperiencePresentation: ObservableObject {
-    let compactDetent: PresentationDetent
+    @Published private(set) var compactDetent: PresentationDetent
 
     @Published var isPresented = false
     @Published var detent: PresentationDetent
@@ -27,6 +27,15 @@ final class MapExperiencePresentation: ObservableObject {
         detent == .large
     }
 
+    /// A scoped navigation header needs room in addition to the unchanged
+    /// card. Changing that allowance must not collapse an expanded story.
+    func configureCompactDetent(_ compactDetent: PresentationDetent) {
+        guard self.compactDetent != compactDetent else { return }
+        let wasCompact = !isExpanded
+        self.compactDetent = compactDetent
+        if wasCompact { detent = compactDetent }
+    }
+
     /// Use when a pin, list entry, or pager changes the selected content.
     func presentNewContent() {
         resetToCompact(presentIfNeeded: true)
@@ -38,11 +47,11 @@ final class MapExperiencePresentation: ObservableObject {
         resetToCompact(presentIfNeeded: false)
     }
 
-    func dismiss() {
+    func dismiss(preservingDetent: Bool = false) {
         resetToken = UUID()
         shouldReopenAfterDismiss = false
         isResettingPresentation = false
-        detent = compactDetent
+        if !preservingDetent { detent = compactDetent }
         isPresented = false
     }
 
@@ -193,6 +202,12 @@ struct MapJourneyEmptyCapsule: View {
 }
 
 extension View {
+    /// Keep the native detent modifier subscribed to its owner even when the
+    /// sheet's type-erased child updates independently (for example a story).
+    func mapExperienceSheetChrome(presentation: MapExperiencePresentation) -> some View {
+        modifier(ObservedMapExperienceSheetChrome(presentation: presentation))
+    }
+
     /// Keeps the public and private map capsule chrome in lockstep.
     func mapExperienceSheetChrome(
         compactDetent: PresentationDetent,
@@ -203,5 +218,16 @@ extension View {
             .presentationBackground(.thinMaterial)
             .presentationCompactAdaptation(.none)
             .applyBackgroundInteractionIfAvailable()
+    }
+}
+
+private struct ObservedMapExperienceSheetChrome: ViewModifier {
+    @ObservedObject var presentation: MapExperiencePresentation
+
+    func body(content: Content) -> some View {
+        content.mapExperienceSheetChrome(
+            compactDetent: presentation.compactDetent,
+            selection: $presentation.detent
+        )
     }
 }

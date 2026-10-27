@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 
 /// Produces the map's horizontally browsable story items without depending on a view.
@@ -82,10 +83,21 @@ enum MapStoryFeed {
 
 @MainActor
 final class StoryReadStore: ObservableObject {
-    @Published private(set) var viewedKeys: Set<String>
+    @Published private(set) var viewedKeys: Set<String> = []
 
     private let defaults: UserDefaults
     private let storageKey: String
+    private var scopedStorageKey: String?
+    private var viewedAt: [String: Date] = [:]
+    /// The small grace period retains reads across offline refreshes. It does
+    /// not extend the publication's eligibility in the 72-hour feed.
+    static let retentionInterval: TimeInterval = 7 * 24 * 60 * 60
+    static let maximumEntryCount = 4_096
+
+    private struct PersistedReads: Codable {
+        let version: Int
+        let viewedAt: [String: Date]
+    }
 
     init(
         defaults: UserDefaults = .standard,
@@ -93,22 +105,86 @@ final class StoryReadStore: ObservableObject {
     ) {
         self.defaults = defaults
         self.storageKey = storageKey
-        viewedKeys = Set(defaults.stringArray(forKey: storageKey) ?? [])
+        // The legacy global string array has no owner. Never assume it belongs
+        // to this account; callers configure the authenticated scope first.
+    }
+
+    func configure(accountID: UUID, server: String, now: Date = .now) {
+        let namespace = Self.namespace(accountID: accountID, server: server)
+        let key = "\(storageKey).v2.\(namespace)"
+        guard scopedStorageKey != key else {
+            prune(asOf: now)
+            return
+        }
+        scopedStorageKey = key
+        if let data = defaults.data(forKey: key),
+           let saved = try? PropertyListDecoder().decode(PersistedReads.self, from: data), saved.version == 2 {
+            viewedAt = saved.viewedAt
+        } else {
+            viewedAt = [:]
+        }
+        prune(asOf: now)
+    }
+
+    /// Discards the active identity, without erasing another account's bounded
+    /// cache. Reads before the next configure are intentionally memory-only.
+    func clearScope() {
+        scopedStorageKey = nil
+        viewedAt = [:]
+        viewedKeys = []
     }
 
     func isViewed(_ key: String) -> Bool {
         viewedKeys.contains(key)
     }
 
-    func markViewed(_ key: String) {
-        markViewed([key])
+    func markViewed(_ key: String, now: Date = .now) {
+        markViewed([key], now: now)
     }
 
-    func markViewed(_ keys: [String]) {
-        let newKeys = keys.filter { viewedKeys.contains($0) == false }
-        guard newKeys.isEmpty == false else { return }
-        viewedKeys.formUnion(newKeys)
-        defaults.set(Array(viewedKeys), forKey: storageKey)
+    func markViewed(_ keys: [String], now: Date = .now) {
+        for key in keys where !key.isEmpty { viewedAt[key] = now }
+        prune(asOf: now)
+    }
+
+    func prune(asOf now: Date = .now, retaining retainedKeys: Set<String> = []) {
+        let cutoff = now.addingTimeInterval(-Self.retentionInterval)
+        viewedAt = viewedAt.filter { key, date in
+            date <= now.addingTimeInterval(60) && (date > cutoff || retainedKeys.contains(key))
+        }
+        if viewedAt.count > Self.maximumEntryCount {
+            let ordered = viewedAt.sorted { left, right in
+                let leftRetained = retainedKeys.contains(left.key)
+                let rightRetained = retainedKeys.contains(right.key)
+                if leftRetained != rightRetained { return leftRetained }
+                if left.value != right.value { return left.value > right.value }
+                return left.key < right.key
+            }
+            viewedAt = Dictionary(uniqueKeysWithValues: ordered.prefix(Self.maximumEntryCount).map { ($0.key, $0.value) })
+        }
+        let keys = Set(viewedAt.keys)
+        if viewedKeys != keys { viewedKeys = keys }
+        guard let scopedStorageKey,
+              let data = try? PropertyListEncoder().encode(PersistedReads(version: 2, viewedAt: viewedAt)) else { return }
+        defaults.set(data, forKey: scopedStorageKey)
+    }
+
+    private static func namespace(accountID: UUID, server: String) -> String {
+        // Normalize only URL components that are case-insensitive. Distinct
+        // deployment paths stay distinct, and equivalent trailing slashes do
+        // not unexpectedly reset the user's reading history.
+        var components = URLComponents(string: server)
+        let scheme = components?.scheme?.lowercased()
+        let host = components?.host?.lowercased()
+        components?.scheme = scheme
+        components?.host = host
+        if var path = components?.path {
+            while path.hasSuffix("/") { path.removeLast() }
+            components?.path = path
+        }
+        let serverIdentity = components?.string ?? server
+        let identity = "\(accountID.uuidString.lowercased())\n\(serverIdentity)"
+        return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
 

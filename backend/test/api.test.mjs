@@ -1434,6 +1434,67 @@ test('archive hiding is private, persistent, and separate from public record del
   }
 });
 
+test('place history is complete across time and authors, paginated and independent of publication GPS', async t => {
+  let time = Date.parse('2026-10-17T12:00:00Z');
+  const api = await fixture(t, { now: () => time });
+  const alice = await register(api, 'place_alice'), bob = await register(api, 'place_bob');
+  const first = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Shared airport', category: 'other', sourceId: randomUUID(),
+      coordinate: { latitude: LOCATION.latitude + 0.01, longitude: LOCATION.longitude }, directoryKind: 'airport' } });
+  time += 4 * 24 * 60 * 60 * 1000;
+  const second = await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public',
+    location: LOCATION, placeId: first.place.id });
+  const third = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public',
+    location: LOCATION, placeId: first.place.id });
+  const privateVisit = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'private',
+    location: LOCATION, placeId: first.place.id });
+  await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Different place', category: 'coffee' } });
+  const path = `/v1/places/${first.place.id}/memories`;
+  const visits = await listAll(api, bob, path, 1);
+  assert.deepEqual(visits.map(item => item.id),
+    [second, third].sort((a, b) => b.id.localeCompare(a.id)).map(item => item.id).concat(first.id));
+  assert.ok(visits.every(item => item.place.id === first.place.id && item.kind === 'poi'));
+  assert.equal(visits.at(-1).location.latitude, LOCATION.latitude, 'original GPS is not rewritten to place center');
+  assert.notEqual(visits.at(-1).place.coordinate.latitude, LOCATION.latitude);
+  assert.ok(!(await listAll(api, bob, '/v1/feed')).some(item => item.id === first.id), 'history outlives the Feed');
+  assert.ok(!(await listAll(api, alice, path)).some(item => item.id === privateVisit.id), 'even owner sees only public visits here');
+  expectStatus(await api.call(path), 401);
+  for (const query of ['?limit=0', '?cursor=invalid', '?limit=1&limit=2', '?west=-180']) {
+    expectStatus(await api.call(path + query, { token: bob.token }), 422);
+  }
+  expectStatus(await api.call('/v1/places/not-a-uuid/memories', { token: bob.token }), 422);
+});
+
+test('place history respects moderation, bilateral blocks, deletion and non-enumerating visibility', async t => {
+  const api = await fixture(t);
+  const alice = await register(api, 'place_owner'), bob = await register(api, 'place_other'), viewer = await register(api, 'place_viewer');
+  const first = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Public place', category: 'coffee' } });
+  const second = await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public',
+    location: LOCATION, placeId: first.place.id });
+  const path = `/v1/places/${first.place.id}/memories`;
+  expectStatus(await api.call('/v1/blocks', { method: 'POST', token: viewer.token, json: { userId: alice.user.id } }), 204);
+  assert.deepEqual((await listAll(api, viewer, path)).map(item => item.id), [second.id]);
+  expectStatus(await api.call('/v1/blocks', { method: 'POST', token: bob.token, json: { userId: viewer.user.id } }), 204);
+  expectStatus(await api.call(path, { token: viewer.token }), 404, 'reverse blocks also hide visits');
+  expectStatus(await api.call(`/v1/blocks/${viewer.user.id}`, { method: 'DELETE', token: bob.token }), 204);
+  const db = new DatabaseSync(api.databasePath);
+  try { db.prepare("UPDATE memories SET moderation_status = 'rejected' WHERE id = ?").run(second.id); }
+  finally { db.close(); }
+  expectStatus(await api.call(path, { token: viewer.token }), 404);
+  expectStatus(await api.call(`/v1/memories/${first.id}`, { method: 'DELETE', token: alice.token }), 204);
+  expectStatus(await api.call(path, { token: alice.token }), 404, 'rejected-only place is not public even for an author');
+  const privatePlace = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'private', location: LOCATION,
+    place: { name: 'Private place', category: 'other' } });
+  for (const who of [alice, viewer]) {
+    const hidden = expectStatus(await api.call(`/v1/places/${privatePlace.place.id}/memories`, { token: who.token }), 404);
+    const missing = expectStatus(await api.call(`/v1/places/${randomUUID()}/memories`, { token: who.token }), 404);
+    assert.equal(hidden.error.code, 'place_unavailable');
+    assert.deepEqual(hidden, missing, 'private and nonexistent places remain indistinguishable');
+  }
+});
+
 test('public profiles expose only public historical memories with stable owner identities', async (t) => {
   let time = Date.parse('2026-10-17T12:00:00Z');
   const api = await fixture(t, { now: () => time });

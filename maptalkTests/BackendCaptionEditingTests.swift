@@ -58,6 +58,7 @@ struct BackendCaptionEditingTests {
         #expect(saved.expiresAt == original.expiresAt)
         #expect(store.archive.privateReels.first?.message == "New caption")
         #expect(store.feedReels.value.first?.message == "New caption")
+        #expect(store.feedRecords.value.first?.caption == "New caption")
         #expect(store.ownPublicReels.first?.message == "New caption")
         #expect(store.pendingMemoryMutations.isEmpty)
         #expect(fixture.patchBody == ["caption": "New caption"])

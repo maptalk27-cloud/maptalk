@@ -161,6 +161,7 @@ extension ExperienceDetailView {
 
     private func backgroundVideo(for data: ContentData) -> (url: URL, poster: URL?, metadata: RealPost.Attachment.VideoMetadata?)? {
         guard let hero = data.hero else { return nil }
+        guard storyExpectedMedia.isEmpty || storyExpectedMedia.count == 1 else { return nil }
         guard hero.real.attachments.count == 1,
               let attachment = hero.real.attachments.first,
               case let .video(url, poster) = attachment.kind else {

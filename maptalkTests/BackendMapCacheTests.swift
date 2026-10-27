@@ -9,6 +9,198 @@ import Testing
 @Suite(.serialized)
 struct BackendMapCacheTests {
     @Test(.timeLimit(.minutes(1)))
+    func placeHistoryReadsOnePageThenExplicitlyAppendsWithoutChangingActiveFeedOrApplyingItsExpiry() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let active = fixture.poiMemory()
+        var historical = fixture.poiMemory(publishedAt: .now.addingTimeInterval(-30 * 86_400))
+        historical.place = active.place
+        try await fixture.seed(mine: [active], feed: [active])
+        let firstPage = fixture.page([active], nextCursor: "older-visits")
+        let secondPage = fixture.page([historical])
+        let expectedPath = "/v1/places/\(active.place!.id.uuidString)/memories"
+        MapCacheProtocol.install { operation in
+            #expect(operation.request.url?.path == expectedPath)
+            let query = URLComponents(url: operation.request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            #expect(query?.first { $0.name == "limit" }?.value == "12")
+            let cursor = query?.first { $0.name == "cursor" }?.value
+            operation.respond(cursor == nil ? firstPage : secondPage)
+        }
+        var snapshots: [BackendStore.PlaceHistoryPage] = []
+        let first = try await fixture.store.loadPlaceHistory(placeID: active.place!.id) { snapshots.append($0) }
+        #expect(first.place?.checkIns.map(\.id) == [active.id])
+        #expect(first.nextCursor == "older-visits")
+        #expect(snapshots.count == 1)
+        let result = try await fixture.store.loadPlaceHistory(placeID: active.place!.id, after: first)
+        #expect(Set(result.place?.checkIns.map(\.id) ?? []) == [active.id, historical.id])
+        #expect(result.nextCursor == nil)
+        #expect(first.place?.checkIns.map(\.id) == [active.id], "Appending must not mutate the verified prior page")
+        MapCacheProtocol.install { _ in Issue.record("Exhausted history must not fetch again") }
+        let exhausted = try await fixture.store.loadPlaceHistory(placeID: active.place!.id, after: result)
+        #expect(exhausted.place?.checkIns.count == 2)
+        #expect(fixture.store.feedRecords.value.map(\.id) == [active.id])
+        #expect(fixture.store.feedPOIs.value.first?.checkIns.map(\.id) == [active.id])
+        #expect(fixture.store.excludedMapMemoryIDs.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func earlierVisitFailureRetainsPriorPageAndRetryUsesTheSameCursor() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let active = fixture.poiMemory()
+        var older = fixture.poiMemory(publishedAt: .now.addingTimeInterval(-30 * 86_400))
+        older.place = active.place
+        let initial = fixture.page([active], nextCursor: "older-visits")
+        MapCacheProtocol.install { $0.respond(initial) }
+        let first = try await fixture.store.loadPlaceHistory(placeID: active.place!.id)
+        MapCacheProtocol.install { operation in
+            let cursor = URLComponents(url: operation.request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "cursor" }?.value
+            #expect(cursor == "older-visits")
+            operation.respond(Data(), status: 503)
+        }
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id, after: first) { _ in
+                Issue.record("Failed metadata cannot replace a verified page")
+            }
+            Issue.record("Expected a failed next page")
+        } catch {
+            #expect(BackendStore.canRetainVerifiedPlaceHistory(after: error, hasVerifiedMetadata: true,
+                requestRevision: first.revision, currentRevision: fixture.store.publicContentRevision, isActive: true))
+        }
+        #expect(first.place?.checkIns.map(\.id) == [active.id])
+        let retry = fixture.page([active, older]) // Deduplicate a record that straddles pages.
+        MapCacheProtocol.install { operation in
+            let cursor = URLComponents(url: operation.request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "cursor" }?.value
+            #expect(cursor == "older-visits")
+            operation.respond(retry)
+        }
+        let loaded = try await fixture.store.loadPlaceHistory(placeID: active.place!.id, after: first)
+        #expect(Set(loaded.place?.checkIns.map(\.id) ?? []) == [active.id, older.id])
+        #expect(loaded.place?.checkIns.count == 2)
+        #expect(loaded.nextCursor == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func placeHistoryRejectsUnboundedPagesAndRepeatedCursorsBeforeProjection() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let active = fixture.poiMemory()
+        let initial = fixture.page([active], nextCursor: "older-visits")
+        MapCacheProtocol.install { $0.respond(initial) }
+        let first = try await fixture.store.loadPlaceHistory(placeID: active.place!.id)
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id, after: first) { _ in
+                Issue.record("Repeated cursors must not replace verified history")
+            }
+            Issue.record("Repeated cursor should fail without fetching infinitely")
+        } catch {}
+        let oversized = fixture.page(Array(repeating: active, count: 13))
+        MapCacheProtocol.install { $0.respond(oversized) }
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id) { _ in
+                Issue.record("Oversized metadata response must fail before preparing media")
+            }
+            Issue.record("Expected the 12-record bound to be enforced")
+        } catch {}
+        #expect(first.place?.checkIns.map(\.id) == [active.id])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func placeHistoryDownloadsOnlyTheRequestedPageAndKeepsItsVerifiedMetadataOnMediaFailure() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let firstMediaID = UUID()
+        let secondMediaID = UUID()
+        let firstMedia = BackendMedia(id: firstMediaID, mimeType: "video/mp4", byteCount: 20_000_000,
+            path: "/v1/media/\(firstMediaID.uuidString.lowercased())")
+        let secondMedia = BackendMedia(id: secondMediaID, mimeType: "video/mp4", byteCount: 20_000_000,
+            path: "/v1/media/\(secondMediaID.uuidString.lowercased())")
+        let active = fixture.poiMemory(media: [firstMedia])
+        var older = fixture.poiMemory(publishedAt: .now.addingTimeInterval(-30 * 86_400), media: [secondMedia])
+        older.place = active.place
+        let firstData = fixture.page([active], nextCursor: "older-visits")
+        MapCacheProtocol.install { operation in
+            if operation.request.url?.path == firstMedia.path { operation.respond(Data(), status: 503) }
+            else {
+                let query = URLComponents(url: operation.request.url!, resolvingAgainstBaseURL: false)?.queryItems
+                #expect(query?.contains { $0.name == "cursor" } == false, "Initial load must not follow older cursors")
+                operation.respond(firstData)
+            }
+        }
+        var first: BackendStore.PlaceHistoryPage?
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id) { first = $0 }
+            Issue.record("Expected simulated video download failure")
+        } catch {}
+        let verified = try #require(first)
+        #expect(verified.place?.checkIns.map(\.id) == [active.id])
+        #expect(verified.nextCursor == "older-visits")
+        let secondData = fixture.page([older])
+        MapCacheProtocol.install { operation in
+            let path = operation.request.url?.path
+            #expect(path != firstMedia.path, "Appending may prepare only the new page's media")
+            if path == secondMedia.path || path == firstMedia.path { operation.respond(Data(), status: 503) }
+            else { operation.respond(secondData) }
+        }
+        var appended: BackendStore.PlaceHistoryPage?
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id, after: verified) { appended = $0 }
+            Issue.record("Expected simulated video download failure")
+        } catch {}
+        #expect(Set(appended?.place?.checkIns.map(\.id) ?? []) == [active.id, older.id])
+        #expect(appended?.nextCursor == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func placeHistoryCannotAppendAcrossStoreScopesOrWithdrawalRevisions() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let active = fixture.poiMemory()
+        try await fixture.seed(mine: [active], feed: [active])
+        let initial = fixture.page([active], nextCursor: "older-visits")
+        MapCacheProtocol.install { $0.respond(initial) }
+        let first = try await fixture.store.loadPlaceHistory(placeID: active.place!.id)
+        let otherStore = fixture.makeStore()
+        defer { otherStore.clearLocalMedia() }
+        MapCacheProtocol.install { _ in Issue.record("A page from another login/store must not fetch") }
+        do {
+            _ = try await otherStore.loadPlaceHistory(placeID: active.place!.id, after: first)
+            Issue.record("Expected scope invalidation")
+        } catch { #expect(error is CancellationError) }
+        MapCacheProtocol.install { $0.respond(Data()) }
+        try await fixture.store.deletePost(memoryID: active.id, refreshAfterward: false)
+        MapCacheProtocol.install { _ in Issue.record("An invalidated history page must not fetch") }
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id, after: first)
+            Issue.record("Expected withdrawal revision invalidation")
+        } catch { #expect(error is CancellationError) }
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func unavailableOrMalformedPlaceHistoryNeverClaimsAnEmptyCompleteResult() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let active = fixture.poiMemory()
+        try await fixture.seed(mine: [active], feed: [active])
+        MapCacheProtocol.install { $0.respond(Data("{\"error\":{\"code\":\"not_found\",\"message\":\"Not found\"}}".utf8), status: 404) }
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id)
+            Issue.record("An older backend must not be represented as complete empty place history")
+        } catch let error as BackendClientError {
+            guard case let .http(status, _, _) = error else { Issue.record("Expected original HTTP error"); return }
+            #expect(status == 404)
+        }
+        fixture.replyMap([fixture.poiMemory()])
+        do {
+            _ = try await fixture.store.loadPlaceHistory(placeID: active.place!.id)
+            Issue.record("Wrong-place records must be rejected")
+        } catch {}
+        #expect(fixture.store.feedRecords.value.map(\.id) == [active.id])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
     func cachedFeedAndSelectedSnapshotsCannotRestoreExcludedMapContent() async throws {
         let fixture = try MapCacheFixture()
         defer { fixture.finish() }
@@ -46,8 +238,37 @@ struct BackendMapCacheTests {
         #expect(model.friendFootprints.isEmpty)
         #expect(fixture.store.feedReels.value.map(\.id) == [reel.id],
                 "Map absence must not destructively rewrite the independent feed cache")
+        #expect(Set(fixture.store.feedRecords.value.map(\.id)) == Set(records.map(\.id)))
+        #expect(Set(model.friendStoryRecords?.map(\.id) ?? []) == [reel.id, poi.id],
+                "Person stories exclude expired records but must not disappear when the viewport changes")
         #expect(fixture.store.archive.privateReels.map(\.id) == [reel.id])
         #expect(fixture.store.archive.privatePOIs.count == 2)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func storyMetadataNeverAdoptsPrivateQueuedDeletedOrBlockedCachedRecords() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let visible = fixture.memory(latitude: 37)
+        let privatePost = fixture.memory(latitude: 37, visibility: "private")
+        let pending = fixture.memory(latitude: 37, moderation: "local_pending")
+        let deleted = fixture.memory(latitude: 37)
+        let queued = fixture.memory(latitude: 37)
+        let blockedID = UUID()
+        let blocked = BackendMemory(id: UUID(), ownerId: blockedID, owner: .init(id: blockedID, handle: "blocked"),
+            kind: "reel", visibility: "public", location: .init(latitude: 37, longitude: -122), caption: "", place: nil,
+            media: [], createdAt: .now, publishedAt: .now, expiresAt: .now.addingTimeInterval(86_400))
+        let input = BackendMemoryInput(id: queued.id, kind: "reel", visibility: "public", location: queued.location)
+        let state = BackendLocalState(ownerID: fixture.owner.id, server: fixture.api.baseURL.absoluteString,
+            user: fixture.owner, mine: [visible, privatePost, pending, deleted, queued],
+            feed: [visible, privatePost, pending, deleted, queued, blocked],
+            queued: [.init(input: input, record: queued, photos: [])], deleted: [deleted.id], blocked: [blockedID])
+        try await BackendLocalStateDisk(directory: fixture.directory).save(state, revision: 0)
+        #expect(await fixture.store.restoreCachedState())
+        #expect(fixture.store.feedRecords.value.map(\.id) == [visible.id])
+        fixture.replyMap([fixture.memory(latitude: 37)])
+        _ = try await fixture.store.loadMap(fixture.region)
+        #expect(fixture.store.feedRecords.value.map(\.id) == [visible.id], "A viewport is never a Feed source")
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -209,18 +430,19 @@ private final class MapCacheFixture {
         #expect(await store.restoreCachedState())
     }
 
-    func memory(latitude: Double, publishedAt: Date = .now) -> BackendMemory {
-        BackendMemory(id: UUID(), ownerId: owner.id, owner: owner, kind: "reel", visibility: "public",
+    func memory(latitude: Double, publishedAt: Date = .now, visibility: String = "public",
+                moderation: String = "approved") -> BackendMemory {
+        BackendMemory(id: UUID(), ownerId: owner.id, owner: owner, kind: "reel", visibility: visibility,
                       location: .init(latitude: latitude, longitude: -122), caption: "Cached post", place: nil,
                       media: [], createdAt: publishedAt.addingTimeInterval(-86_400), publishedAt: publishedAt,
-                      expiresAt: publishedAt.addingTimeInterval(86_400), moderationStatus: "approved")
+                      expiresAt: publishedAt.addingTimeInterval(86_400), moderationStatus: moderation)
     }
 
-    func poiMemory(publishedAt: Date = .now) -> BackendMemory {
+    func poiMemory(publishedAt: Date = .now, media: [BackendMedia] = []) -> BackendMemory {
         let coordinate = BackendCoordinate(latitude: 37, longitude: -122)
         return BackendMemory(id: UUID(), ownerId: owner.id, owner: owner, kind: "poi", visibility: "public",
             location: coordinate, caption: "", place: .init(id: UUID(), sourceId: nil, name: "Cached café",
-                category: "coffee", coordinate: coordinate), media: [], createdAt: publishedAt,
+                category: "coffee", coordinate: coordinate), media: media, createdAt: publishedAt,
             publishedAt: publishedAt, expiresAt: publishedAt.addingTimeInterval(86_400), moderationStatus: "approved")
     }
 

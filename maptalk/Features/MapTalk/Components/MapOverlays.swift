@@ -15,9 +15,11 @@ struct MapOverlays: MapContent {
     let isPOIUnseen: (RatedPOI) -> Bool
     let onTapReal: ((RealPost) -> Void)?
     let onTapPOI: ((RatedPOI) -> Void)?
+    var compactReelMarkers = false
+    var selectedStoryAuthor: User? = nil
 
     var body: some MapContent {
-        ForEach(reals) { real in
+        ForEach(reals.filter { !compactReelMarkers || selectedStoryId == $0.id }) { real in
             MapCircle(center: real.center, radius: real.radiusMeters)
                 .foregroundStyle(Theme.neonPrimary.opacity(0.15))
                 .stroke(Theme.neonPrimary, lineWidth: 2)
@@ -26,8 +28,9 @@ struct MapOverlays: MapContent {
         ForEach(reals) { real in
             Annotation("", coordinate: real.center) {
                 let user = userProvider(real.userId)
-                let usesContentMarker = displayMode == .content || useTimelineStyle
                 let isSelected = selectedStoryId == real.id
+                let usesContentMarker = displayMode == .content || useTimelineStyle
+                    || (compactReelMarkers && !isSelected)
                 let isUnseen = isRealUnseen(real)
                 let baseMarker: AnyView = {
                     if usesContentMarker {
@@ -81,7 +84,10 @@ struct MapOverlays: MapContent {
             let isUnseen = isPOIUnseen(rated)
             Annotation("", coordinate: rated.poi.coordinate) {
                 let marker: AnyView = {
-                    if useTimelineStyle {
+                    if isSelected, let selectedStoryAuthor {
+                        return AnyView(RealAvatarMarker(user: selectedStoryAuthor,
+                            isSelected: true, isUnseen: isUnseen))
+                    } else if useTimelineStyle {
                         return AnyView(
                             UserMapMarker(category: rated.poi.category)
                                 .frame(width: 24, height: 26)

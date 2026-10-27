@@ -12,6 +12,8 @@ struct ExperienceMediaGallery: View {
 
     @State private var selection: UUID
     @State private var isLightboxPresented = false
+    @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
+    @State private var childPresentationID = UUID()
 
     init(items: [MediaDisplayItem], accentColor: Color, isPlaybackActive: Bool = true) {
         self.items = items
@@ -71,6 +73,12 @@ struct ExperienceMediaGallery: View {
             }
         }
         .animation(.easeInOut(duration: 0.22), value: selection)
+        .onChangeCompat(of: isLightboxPresented) { presented in
+            childPresentationChanged?(childPresentationID, presented)
+        }
+        .onDisappear {
+            if !isLightboxPresented { childPresentationChanged?(childPresentationID, false) }
+        }
         .fullScreenCover(isPresented: $isLightboxPresented) {
             MediaLightbox(
                 items: items,
@@ -78,6 +86,10 @@ struct ExperienceMediaGallery: View {
                 accentColor: accentColor,
                 isPresented: $isLightboxPresented
             )
+            .environment(\.friendStoryPlaybackEnabled, true)
+            .environment(\.friendStoryExpectedMedia, [])
+            .environment(\.friendStoryOnMediaReady, nil)
+            .environment(\.friendStoryChildPresentationChanged, nil)
         }
     }
 
@@ -253,6 +265,7 @@ struct MediaCardView: View {
     let accentColor: Color
     let mode: Mode
     var isPlaybackActive = true
+    @Environment(\.friendStoryOnMediaReady) private var onMediaReady
 
     var body: some View {
         ZStack {
@@ -296,6 +309,7 @@ struct MediaCardView: View {
                 image
                     .resizable()
                     .scaledToFill()
+                    .onAppear { onMediaReady?() }
                     .overlay {
                         LinearGradient(
                             colors: [.black.opacity(0.05), .black.opacity(0.35)],
@@ -367,8 +381,11 @@ struct AutoPlayVideoView: View {
     let usesAspectFit: Bool
     let isMuted: Bool
     let isPlaybackActive: Bool
+    let onReady: (() -> Void)?
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.friendStoryOnMediaReady) private var onMediaReady
+    @Environment(\.friendStoryPlaybackEnabled) private var parentPlaybackEnabled
     @State private var isVideoVisible = false
 
     init(
@@ -379,7 +396,8 @@ struct AutoPlayVideoView: View {
         showsPlaceholderBadge: Bool = true,
         usesAspectFit: Bool = false,
         isMuted: Bool? = nil,
-        isPlaybackActive: Bool = true
+        isPlaybackActive: Bool = true,
+        onReady: (() -> Void)? = nil
     ) {
         self.url = url
         self.poster = poster
@@ -389,6 +407,7 @@ struct AutoPlayVideoView: View {
         self.usesAspectFit = usesAspectFit
         self.isMuted = isMuted ?? (mode == .card)
         self.isPlaybackActive = isPlaybackActive
+        self.onReady = onReady
     }
 
     var body: some View {
@@ -403,10 +422,14 @@ struct AutoPlayVideoView: View {
                     isMuted: isMuted,
                     shouldPlay: VideoPlaybackPolicy.shouldPlay(
                         isVisible: isVideoVisible,
-                        isSelected: isPlaybackActive,
+                        isSelected: isPlaybackActive && parentPlaybackEnabled,
                         isSceneActive: scenePhase == .active
                     ),
-                    videoGravity: usesAspectFit ? .resizeAspect : .resizeAspectFill
+                    videoGravity: usesAspectFit ? .resizeAspect : .resizeAspectFill,
+                    onReady: {
+                        onReady?()
+                        onMediaReady?()
+                    }
                 )
                 .frame(width: geometry.size.width, height: geometry.size.height)
                 .opacity(isVideoVisible ? 1 : 0)
@@ -490,15 +513,18 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
     let isMuted: Bool
     let shouldPlay: Bool
     let videoGravity: AVLayerVideoGravity
+    var onReady: (() -> Void)? = nil
 
     func makeUIView(context: Context) -> PlayerContainerView {
         let view = PlayerContainerView()
+        view.onReady = onReady
         view.configure(with: url, muted: isMuted, videoGravity: videoGravity)
         view.setPlaying(shouldPlay)
         return view
     }
 
     func updateUIView(_ uiView: PlayerContainerView, context: Context) {
+        uiView.onReady = onReady
         uiView.configure(with: url, muted: isMuted, videoGravity: videoGravity)
         uiView.setPlaying(shouldPlay)
     }
@@ -513,6 +539,9 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
         private var currentURL: URL?
         private var isMuted = true
         private let audioOwner = UUID()
+        var onReady: (() -> Void)?
+        private var readyObservation: NSKeyValueObservation?
+        private var didReportReady = false
 
         override static var layerClass: AnyClass {
             AVPlayerLayer.self
@@ -548,6 +577,14 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
 
             self.player = queuePlayer
             self.looper = looper
+            readyObservation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+                guard layer.isReadyForDisplay else { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.currentURL == url, !self.didReportReady else { return }
+                    self.didReportReady = true
+                    self.onReady?()
+                }
+            }
         }
 
         func setPlaying(_ shouldPlay: Bool) {
@@ -572,6 +609,9 @@ struct LoopingVideoPlayerView: UIViewRepresentable {
         }
 
         func cleanup() {
+            readyObservation?.invalidate()
+            readyObservation = nil
+            didReportReady = false
             player?.pause()
             player?.isMuted = true
             VideoPlaybackAudioSession.shared.release(owner: audioOwner)

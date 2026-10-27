@@ -27,6 +27,10 @@ struct CompactRealCard: View {
     @State private var isLightboxPresented = false
     @State private var lightboxSelection: UUID
     @State private var capsuleOverlayHeight: CGFloat = 0
+    @Environment(\.friendStoryOnMediaReady) private var onMediaReady
+    @Environment(\.friendStoryExpectedMedia) private var expectedMedia
+    @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
+    @State private var childPresentationID = UUID()
 
     init(
         real: RealPost,
@@ -69,6 +73,12 @@ struct CompactRealCard: View {
                 regularCardContent
             }
         }
+        .onChangeCompat(of: isLightboxPresented) { presented in
+            childPresentationChanged?(childPresentationID, presented)
+        }
+        .onDisappear {
+            if !isLightboxPresented { childPresentationChanged?(childPresentationID, false) }
+        }
         .fullScreenCover(isPresented: $isLightboxPresented) {
             if lightboxItems.isEmpty == false {
                 ExperienceDetailView.MediaLightbox(
@@ -77,6 +87,10 @@ struct CompactRealCard: View {
                     accentColor: lightboxAccentColor,
                     isPresented: $isLightboxPresented
                 )
+                .environment(\.friendStoryPlaybackEnabled, true)
+                .environment(\.friendStoryExpectedMedia, [])
+                .environment(\.friendStoryOnMediaReady, nil)
+                .environment(\.friendStoryChildPresentationChanged, nil)
             }
         }
     }
@@ -230,6 +244,9 @@ struct CompactRealCard: View {
     }
 
     private var isSinglePhoto: Bool {
+        if !expectedMedia.isEmpty {
+            return expectedMedia.count == 1 && expectedMedia.first?.kind == .photo
+        }
         guard real.attachments.count == 1,
               let attachment = real.attachments.first,
               case .photo = attachment.kind else {
@@ -239,6 +256,9 @@ struct CompactRealCard: View {
     }
 
     private var isSingleVideo: Bool {
+        if !expectedMedia.isEmpty {
+            return expectedMedia.count == 1 && expectedMedia.first?.kind == .video
+        }
         guard real.attachments.count == 1,
               let attachment = real.attachments.first,
               case .video = attachment.kind else {
@@ -275,7 +295,7 @@ struct CompactRealCard: View {
     private var singleVideoTrailingInset: CGFloat { horizontalPadding }
 
     private var overflowCount: Int {
-        max(0, real.attachments.count - maxVisibleMediaCount)
+        max(0, (expectedMedia.isEmpty ? real.attachments.count : expectedMedia.count) - maxVisibleMediaCount)
     }
 
     private var textLineLimit: Int {
@@ -361,7 +381,7 @@ struct CompactRealCard: View {
     private var trimmedMessage: String? { PostCaption.visibleText(real.message) }
 
     private var hasMedia: Bool {
-        real.attachments.isEmpty == false
+        !expectedMedia.isEmpty || !real.attachments.isEmpty
     }
 
     private var capsuleJourney: JourneyPost? {
@@ -379,6 +399,10 @@ struct CompactRealCard: View {
 
     private var collageSources: [RealPost.Attachment?] {
         guard hasMedia else { return [] }
+        if !expectedMedia.isEmpty {
+            let available = Dictionary(real.attachments.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            return expectedMedia.prefix(maxVisibleMediaCount).map { available[$0.id] }
+        }
         return Array(real.attachments.prefix(maxVisibleMediaCount)).map { Optional($0) }
     }
 
@@ -386,6 +410,8 @@ struct CompactRealCard: View {
     private func collageTile(for attachment: RealPost.Attachment?) -> some View {
         if let attachment {
             attachmentThumbnail(for: attachment)
+        } else if !expectedMedia.isEmpty {
+            loadingMediaTile
         } else if let text = trimmedMessage {
             previewTextCard(text)
         } else {
@@ -416,6 +442,7 @@ struct CompactRealCard: View {
                             image
                                 .resizable()
                                 .scaledToFit()
+                                .onAppear { onMediaReady?() }
                         case .empty:
                             ProgressView()
                         case .failure:
@@ -430,8 +457,14 @@ struct CompactRealCard: View {
                     .onTapGesture {
                         handleMediaTap(for: attachment)
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("View photo")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityIdentifier("experience.real.photo.\(real.id.uuidString).\(attachment.id.uuidString)")
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            } else if !expectedMedia.isEmpty {
+                loadingMediaTile.frame(height: singlePhotoHeight)
             }
         }
     }
@@ -470,6 +503,8 @@ struct CompactRealCard: View {
                 .overlay(alignment: .bottomLeading) {
                     singleVideoJourneyCapsuleOverlay
                 }
+            } else if !expectedMedia.isEmpty {
+                loadingMediaTile.aspectRatio(3.0 / 4.0, contentMode: .fit)
             }
         }
     }
@@ -571,6 +606,7 @@ struct CompactRealCard: View {
             Text(real.cardDisplayDate.formatted(.relative(presentation: .named)))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
+                .accessibilityIdentifier("experience.real.timestamp.\(real.id.uuidString)")
 
             Spacer()
 
@@ -632,6 +668,7 @@ struct CompactRealCard: View {
     }
 
     private func handleMediaTap(for attachment: RealPost.Attachment?) {
+        guard expectedMedia.isEmpty || attachment != nil else { return }
         guard let first = lightboxItems.first else { return }
         if let attachment, let match = lightboxItems.first(where: { $0.id == attachment.id }) {
             lightboxSelection = match.id
@@ -728,6 +765,7 @@ struct CompactRealCard: View {
                     image
                         .resizable()
                         .scaledToFill()
+                        .onAppear { onMediaReady?() }
                 case .empty:
                     ProgressView()
                 case .failure:
@@ -754,6 +792,7 @@ struct CompactRealCard: View {
                             image
                                 .resizable()
                                 .scaledToFill()
+                                .onAppear { onMediaReady?() }
                         case .empty:
                             ProgressView()
                         case .failure:
@@ -805,6 +844,15 @@ struct CompactRealCard: View {
                 .font(.system(size: 30, weight: .bold))
                 .foregroundStyle(.white.opacity(0.85))
         }
+    }
+
+    private var loadingMediaTile: some View {
+        ProgressView()
+            .tint(.white.opacity(0.8))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityLabel("Loading media")
     }
 
     private func previewTextCard(_ text: String) -> some View {

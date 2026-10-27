@@ -114,6 +114,11 @@ nonisolated struct BackendMemory: Codable, Sendable {
     var moderationStatus: String? = nil
 }
 
+nonisolated struct BackendMemoryPage: Decodable, Sendable {
+    let items: [BackendMemory]
+    let nextCursor: String?
+}
+
 nonisolated struct BackendPlaceInput: Codable, Sendable {
     let name: String
     let category: String
@@ -289,6 +294,20 @@ final class BackendAPI {
             }
         } while cursor != nil
         return result
+    }
+
+    static let placeHistoryPageSize = 12
+
+    /// A deliberate place visit fetches one bounded page, never all history.
+    func placeMemories(placeID: UUID, cursor: String? = nil) async throws -> BackendMemoryPage {
+        var components = URLComponents(string: "/v1/places/\(placeID.uuidString)/memories")!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(Self.placeHistoryPageSize))]
+        if let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
+        let page: BackendMemoryPage = try await json(components.string!)
+        guard page.items.count <= Self.placeHistoryPageSize else {
+            throw BackendClientError.message("Couldn't load these visits. Please try again.")
+        }
+        return page
     }
 
     func publish(_ input: BackendMemoryInput) async throws -> BackendMemory {
