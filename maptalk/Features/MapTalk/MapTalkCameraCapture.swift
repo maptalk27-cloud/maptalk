@@ -23,8 +23,10 @@ internal struct MapTalkInlineCameraView: View {
     var body: some View {
         ZStack {
             Color.black
-            MapTalkCameraPreview(session: camera.session)
-                .accessibilityHidden(true)
+            if let session = camera.session {
+                MapTalkCameraPreview(session: session)
+                    .accessibilityHidden(true)
+            }
 
             LinearGradient(
                 colors: [.clear, .black.opacity(0.1), .black.opacity(0.72)],
@@ -109,7 +111,15 @@ internal struct MapTalkInlineCameraView: View {
                 }
                 .foregroundStyle(.white)
                 .padding(.horizontal, 24)
-                .padding(.bottom, 20)
+                .padding(.bottom, 4)
+
+                Text(camera.shutterHint)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .frame(height: 16)
+                    .opacity(camera.isReady || camera.captureInProgress ? 1 : 0)
+                    .padding(.bottom, 10)
+                    .accessibilityIdentifier("maptalk.place.shutter-hint")
             }
         }
         .onAppear {
@@ -192,10 +202,23 @@ nonisolated internal enum MapTalkInlineCameraPolicy {
     static func shouldKeepRecording(finishedSuccessfully: Bool, fileByteCount: Int, wasCancelled: Bool) -> Bool {
         finishedSuccessfully && fileByteCount > 0 && wasCancelled == false
     }
+
+    static func stabilizationMode(connectionSupports: Bool, formatSupportsStandard: Bool) -> AVCaptureVideoStabilizationMode {
+        // Avoid cinematic/auto modes' extra latency and tighter crop in a quick-capture composer.
+        connectionSupports && formatSupportsStandard ? .standard : .off
+    }
+
+    static func shutterHint(isRecording: Bool, isFinishing: Bool, microphoneJustGranted: Bool) -> String {
+        if isFinishing { return "Saving…" }
+        if isRecording { return "Release to finish" }
+        if microphoneJustGranted { return "Microphone ready · hold to record" }
+        return "Tap for photo · hold for video"
+    }
 }
 
 @MainActor
 private final class MapTalkInlineCameraModel: ObservableObject {
+    @Published private(set) var session: AVCaptureSession?
     @Published private(set) var isReady = false
     @Published private(set) var canFlip = false
     @Published private(set) var captureInProgress = false {
@@ -209,6 +232,7 @@ private final class MapTalkInlineCameraModel: ObservableObject {
     @Published private(set) var isRecordingVideo = false
     @Published private(set) var recordingStartedAt: Date?
     @Published private(set) var unavailableMessage: String?
+    @Published private var microphoneJustGranted = false
 
     var onCapture: (@MainActor (MapTalkCameraCaptureResult) -> Void)?
     var onIssue: (@MainActor (String) -> Void)?
@@ -219,19 +243,46 @@ private final class MapTalkInlineCameraModel: ObservableObject {
     private var microphoneRequest: Task<Void, Never>?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var previousIdleTimerDisabled: Bool?
-    private lazy var engine = MapTalkInlineCameraEngine { [weak self] event in
-        Task { @MainActor [weak self] in
-            guard let self else {
-                if case let .video(url) = event { try? FileManager.default.removeItem(at: url) }
-                return
-            }
-            self.receive(event)
-        }
-    }
+    private var engine: MapTalkInlineCameraEngine?
+    private var enginePreparation: Task<Void, Never>?
 
-    var session: AVCaptureSession { engine.session }
     var canBeginCapture: Bool {
         isVisible && wantsActive && isReady && captureInProgress == false
+    }
+
+    var shutterHint: String {
+        MapTalkInlineCameraPolicy.shutterHint(isRecording: isRecordingVideo,
+            isFinishing: isFinishing, microphoneJustGranted: microphoneJustGranted)
+    }
+
+    private func prepareEngineIfNeeded() {
+        if let engine {
+            engine.setActive(wantsActive)
+            return
+        }
+        guard enginePreparation == nil else { return }
+        let onEvent: @Sendable (MapTalkInlineCameraEvent) -> Void = { [weak self] event in
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    if case let .video(url) = event { try? FileManager.default.removeItem(at: url) }
+                    return
+                }
+                self.receive(event)
+            }
+        }
+        enginePreparation = Task { [weak self] in
+            // Session and output initialization can block as well as startRunning.
+            // Do not create them from SwiftUI's body on the main thread.
+            let prepared = await Task.detached(priority: .userInitiated) {
+                MapTalkInlineCameraEngine(onEvent: onEvent)
+            }.value
+            guard let self else { return }
+            self.enginePreparation = nil
+            guard self.isVisible else { return }
+            self.engine = prepared
+            self.session = prepared.session
+            if self.wantsActive { prepared.setActive(true) }
+        }
     }
 
     func setVisible(_ visible: Bool) {
@@ -240,7 +291,7 @@ private final class MapTalkInlineCameraModel: ObservableObject {
             permissionRequest?.cancel()
             microphoneRequest?.cancel()
             wantsActive = false
-            engine.setActive(false, discardCapture: true)
+            engine?.setActive(false, discardCapture: true)
             resetCapture()
         }
     }
@@ -252,11 +303,11 @@ private final class MapTalkInlineCameraModel: ObservableObject {
             if captureInProgress, backgroundTask == .invalid {
                 backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Finish place recording") { [weak self] in
                     guard let self else { return }
-                    self.engine.setActive(false, discardCapture: true)
+                    self.engine?.setActive(false, discardCapture: true)
                     self.endBackgroundTask()
                 }
             }
-            engine.setActive(false)
+            engine?.setActive(false)
             return
         }
 #if targetEnvironment(simulator)
@@ -276,7 +327,7 @@ private final class MapTalkInlineCameraModel: ObservableObject {
             guard Task.isCancelled == false, self.isVisible else { return }
             if granted {
                 self.unavailableMessage = nil
-                if self.wantsActive { self.engine.setActive(true) }
+                if self.wantsActive { self.prepareEngineIfNeeded() }
             } else {
                 self.unavailableMessage = "Allow camera access in Settings, or choose from your library."
             }
@@ -292,7 +343,11 @@ private final class MapTalkInlineCameraModel: ObservableObject {
             guard let self else { return }
             self.microphoneRequest = nil
             guard Task.isCancelled == false, self.isVisible else { return }
-            if granted == false {
+            if granted {
+                // The permission alert ends the original touch. A visible hint
+                // explains why that first hold did not start recording.
+                self.microphoneJustGranted = true
+            } else {
                 self.onIssue?("Allow microphone access in Settings to record video with sound.")
             }
         }
@@ -300,9 +355,10 @@ private final class MapTalkInlineCameraModel: ObservableObject {
 
     func capturePhoto() {
         guard canBeginCapture else { return }
+        microphoneJustGranted = false
         captureInProgress = true
         isFinishing = true
-        engine.capturePhoto()
+        engine?.capturePhoto()
     }
 
     func beginHeldRecording() {
@@ -317,21 +373,22 @@ private final class MapTalkInlineCameraModel: ObservableObject {
             }
             return
         }
+        microphoneJustGranted = false
         captureInProgress = true
         isRecordingVideo = true
-        engine.startRecording()
+        engine?.startRecording()
     }
 
     func endHeldRecording() {
         guard isRecordingVideo, isFinishing == false else { return }
         isFinishing = true
-        engine.stopRecording()
+        engine?.stopRecording()
     }
 
     func flip() {
         guard isReady, captureInProgress == false else { return }
         isReady = false
-        engine.flip()
+        engine?.flip()
     }
 
     private func resetCapture() {
@@ -522,16 +579,28 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
 
     private func updateOutputConnections() {
         for connection in [photoOutput.connection(with: .video), movieOutput.connection(with: .video)].compactMap({ $0 }) {
-            if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+            if connection.videoRotationAngle != 90, connection.isVideoRotationAngleSupported(90) {
+                connection.videoRotationAngle = 90
+            }
             if connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
                 connection.isVideoMirrored = videoInput?.device.position == .front
+            }
+        }
+        if let connection = movieOutput.connection(with: .video) {
+            let mode = MapTalkInlineCameraPolicy.stabilizationMode(
+                connectionSupports: connection.isVideoStabilizationSupported,
+                formatSupportsStandard: videoInput?.device.activeFormat.isVideoStabilizationModeSupported(.standard) == true
+            )
+            if connection.preferredVideoStabilizationMode != mode {
+                connection.preferredVideoStabilizationMode = mode
             }
         }
     }
 
     private func resumeIfNeeded() {
         guard wantsActive, configured else { return }
+        updateOutputConnections()
         if session.isRunning == false { session.startRunning() }
         if session.isRunning, session.isInterrupted == false {
             let front = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
@@ -608,7 +677,10 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
               let microphone = AVCaptureDevice.default(for: .audio) else { throw CameraError.unavailable }
         let input = try AVCaptureDeviceInput(device: microphone)
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        defer {
+            session.commitConfiguration()
+            updateOutputConnections()
+        }
         guard session.canAddInput(input) else { throw CameraError.unavailable }
         session.addInput(input)
         audioInput = input
@@ -628,6 +700,7 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
         session.removeInput(audioInput)
         self.audioInput = nil
         session.commitConfiguration()
+        updateOutputConnections()
     }
 
     func stopRecording() {
@@ -856,13 +929,13 @@ private struct MapTalkCameraPreview: UIViewRepresentable {
 
     func makeUIView(context: Context) -> MapTalkCameraPreviewUIView {
         let view = MapTalkCameraPreviewUIView()
-        view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspectFill
+        view.attach(session: session)
         return view
     }
 
     func updateUIView(_ uiView: MapTalkCameraPreviewUIView, context: Context) {
-        if uiView.previewLayer.session !== session { uiView.previewLayer.session = session }
+        uiView.attach(session: session)
     }
 
     static func dismantleUIView(_ uiView: MapTalkCameraPreviewUIView, coordinator: ()) {
@@ -875,10 +948,22 @@ private final class MapTalkCameraPreviewUIView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
 
+    func attach(session: AVCaptureSession) {
+        guard previewLayer.session !== session else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        previewLayer.session = session
+        CATransaction.commit()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
-        if let connection = previewLayer.connection, connection.isVideoRotationAngleSupported(90) {
+        if let connection = previewLayer.connection,
+           connection.videoRotationAngle != 90, connection.isVideoRotationAngleSupported(90) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
             connection.videoRotationAngle = 90
+            CATransaction.commit()
         }
     }
 }

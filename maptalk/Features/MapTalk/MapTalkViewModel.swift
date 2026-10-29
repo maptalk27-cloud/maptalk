@@ -19,6 +19,16 @@ struct MapTalkNearbyPlaceOption: Identifiable {
     var id: UUID { place.id }
 }
 
+struct MapTalkNearbyPlaceSearchResult {
+    let options: [MapTalkNearbyPlaceOption]
+    let issue: POISearchIssue?
+
+    init(options: [MapTalkNearbyPlaceOption], issue: POISearchIssue? = nil) {
+        self.options = options
+        self.issue = issue
+    }
+}
+
 @MainActor
 final class MapTalkViewModel: ObservableObject {
     enum Scope {
@@ -59,6 +69,7 @@ final class MapTalkViewModel: ObservableObject {
     @Published private(set) var liveLocation: CLLocation?
     @Published private(set) var locationAuthorization: CLAuthorizationStatus
     @Published private(set) var isLoadingNearbyPlaces = true
+    @Published private(set) var nearbyPlaceIssue: POISearchIssue?
 
     let scope: Scope
     @Published private(set) var friendFootprints: [MapTalkFriendFootprint] = []
@@ -783,15 +794,17 @@ final class MapTalkViewModel: ObservableObject {
             .merge(with: nearbyPlaceRefresh)
             .handleEvents(receiveOutput: { [weak self] _ in
                 self?.isLoadingNearbyPlaces = true
+                self?.nearbyPlaceIssue = nil
             })
             .debounce(for: .milliseconds(350), scheduler: DispatchQueue.main)
             .map { [environment] coordinate in
-                environment.nearbyPOIRepo.near(coordinate)
+                environment.nearbyPOIRepo.nearResult(coordinate)
             }
             .switchToLatest()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] places in
-                self?.nearbyDirectoryPOIs = places
+            .sink { [weak self] result in
+                self?.nearbyDirectoryPOIs = result.places
+                self?.nearbyPlaceIssue = result.issue
                 self?.isLoadingNearbyPlaces = false
             }
             .store(in: &cancellables)

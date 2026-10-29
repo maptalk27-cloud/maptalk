@@ -18,7 +18,7 @@ const ACTIVE_FEED_WINDOW = 72 * 60 * 60 * 1000;
 // current policy without rewriting history. Legacy rows fall back to capture.
 const PUBLICATION_TIME_SQL = 'COALESCE(published_at, created_at)';
 const PHOTO_LIMIT = 10 * 1024 * 1024;
-const CATEGORIES = ['viewpoint', 'restaurant', 'coffee', 'nightlife', 'art', 'market', 'other'];
+const CATEGORIES = ['viewpoint', 'restaurant', 'coffee', 'nightlife', 'art', 'market', 'hotel', 'airport', 'other'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 class APIError extends Error {

@@ -37,6 +37,8 @@ struct MapTalkView: View {
     @State private var pendingViewedStoryKey: String?
     @State private var publishDestination: MapTalkPublishDestination?
     @State private var queuedPublishDestination: MapTalkPublishDestination?
+    @State private var publishAcknowledgement: String?
+    @State private var publishAcknowledgementID = UUID()
     @State private var isActivityPresented = false
     @State private var isActivityOverExperiencePresented = false
     @State private var viewedActivityIDs = Set<String>()
@@ -938,6 +940,24 @@ struct MapTalkView: View {
                             .presentationBackground(Color(.systemBackground))
                     }
             }
+            .overlay(alignment: .top) {
+                if let publishAcknowledgement {
+                    Label(publishAcknowledgement, systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .background(.black.opacity(0.9), in: Capsule())
+                        .padding(.top, 70)
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier("maptalk.publish.saved")
+                }
+            }
+            .task(id: publishAcknowledgementID) {
+                guard publishAcknowledgement != nil else { return }
+                do { try await Task.sleep(for: .seconds(4)) } catch { return }
+                publishAcknowledgement = nil
+            }
             .sheet(item: $publishDestination) { destination in
                 MapTalkPublishComposer(
                     destination: destination,
@@ -945,6 +965,7 @@ struct MapTalkView: View {
                         viewModel.nearbyPlaceOptions(near: $0)
                     } ?? [],
                     isLoadingNearbyPlaces: viewModel.isLoadingNearbyPlaces,
+                    nearbyPlaceIssue: viewModel.nearbyPlaceIssue,
                     folders: environment.myMapArchive.journeyFolders,
                     myMapRecords: myMapBubbleRecords,
                     currentUserID: environment.myMapArchive.currentUserID,
@@ -962,7 +983,8 @@ struct MapTalkView: View {
                             requestID: requestID
                         )
                     },
-                    onSearchNearbyPlaces: searchNearbyPlaces
+                    onSearchNearbyPlaces: searchNearbyPlaces,
+                    onRetryNearbyPlaces: { viewModel.refreshNearbyPlaces() }
                 )
                 .presentationDetents([.fraction(0.84)])
                 .presentationDragIndicator(.hidden)
@@ -1418,12 +1440,13 @@ private extension MapTalkView {
             cause: cause, viewport: viewport, cameraPosition: $cameraPosition) { currentRegion = $0 }
     }
 
-    func searchNearbyPlaces(_ query: String) async -> [MapTalkNearbyPlaceOption] {
-        guard let location = viewModel.publishableLiveLocation else { return [] }
-        let publisher = environment.nearbyPOIRepo.search(query, near: location.coordinate)
-        for await places in publisher.values {
+    func searchNearbyPlaces(_ query: String) async -> MapTalkNearbyPlaceSearchResult {
+        guard let location = viewModel.publishableLiveLocation else { return .init(options: []) }
+        let publisher = environment.nearbyPOIRepo.searchResult(query, near: location.coordinate)
+        for await result in publisher.values {
             guard !Task.isCancelled,
-                  let currentLocation = viewModel.publishableLiveLocation else { return [] }
+                  let currentLocation = viewModel.publishableLiveLocation else { return .init(options: []) }
+            let places = result.places
             var matchingIDs = Set<UUID>()
             for place in places {
                 let canonicalID = environment.backend?.canonicalPlaceForSelection(place.poi).id ?? place.id
@@ -1432,11 +1455,12 @@ private extension MapTalkView {
             // GPS can change while Apple's request is in flight. Revalidate
             // every candidate against the current fix before displaying it.
             let options = viewModel.nearbyPlaceOptions(near: currentLocation, matching: places)
-            return options.filter { option in
+            let matchingOptions = options.filter { option in
                 matchingIDs.contains(option.id) || option.place.poi.name.localizedStandardContains(query)
             }
+            return .init(options: matchingOptions, issue: result.issue)
         }
-        return []
+        return .init(options: [], issue: .temporarilyUnavailable)
     }
 
     func updateStandalonePlacePreview(from places: [RatedPOI]) {
@@ -1699,7 +1723,16 @@ private extension MapTalkView {
             }
         }
 
-        // The marker is the acknowledgement; publishing never moves the map.
+        // A private or queued post has no public marker yet. Acknowledge the
+        // durable local save without claiming a network upload has completed.
+        if environment.backend?.pendingPublications[requestID] != nil {
+            publishAcknowledgement = "Saved · syncing in background"
+        } else if audience == .privateMyMap {
+            publishAcknowledgement = "Saved to MyMap"
+        } else {
+            publishAcknowledgement = visiblePublicly ? "Posted" : "Saved to MyMap"
+        }
+        publishAcknowledgementID = UUID()
         pendingRegionCause = .other
         reelAlignTrigger += 1
         publishDestination = nil

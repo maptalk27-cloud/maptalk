@@ -1375,7 +1375,7 @@ test('legacy place payloads keep their pre-airport idempotency hashes', async (t
   const retried = expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200);
   assert.deepEqual(retried, original);
   db = new DatabaseSync(api.databasePath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
   assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
   db.close();
 });
@@ -1492,6 +1492,25 @@ test('place history respects moderation, bilateral blocks, deletion and non-enum
     const missing = expectStatus(await api.call(`/v1/places/${randomUUID()}/memories`, { token: who.token }), 404);
     assert.equal(hidden.error.code, 'place_unavailable');
     assert.deepEqual(hidden, missing, 'private and nonexistent places remain indistinguishable');
+  }
+});
+
+test('hotel and airport categories publish without granting a wider GPS radius', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'alice');
+  for (const category of ['hotel', 'airport']) {
+    const draft = { id: randomUUID(), kind: 'poi', visibility: 'private', location: LOCATION,
+      place: { name: `New ${category}`, category, coordinate: LOCATION, sourceId: randomUUID() } };
+    const created = await publish(api, alice, draft);
+    assert.equal(created.place.category, category);
+    assert.equal(created.place.directoryKind, undefined);
+    assert.deepEqual(expectStatus(await api.call('/v1/memories', {
+      method: 'POST', token: alice.token, json: draft,
+    }), 200), created, 'retry keeps exactly the same category and record');
+    expectStatus(await api.call('/v1/memories', {
+      method: 'POST', token: alice.token, json: { ...draft, id: randomUUID(),
+        place: { ...draft.place, sourceId: randomUUID(), coordinate: { ...LOCATION, latitude: LOCATION.latitude + 0.01 } } },
+    }), 422);
   }
 });
 

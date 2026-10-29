@@ -165,7 +165,9 @@ iOS 当前使用受限的后台执行宽限期，不保证锁屏后一直上传�
 }
 ```
 
-已有地标用 `placeId` 替代 `place`，两者不可同时提交。类别沿用 App：`viewpoint`、`restaurant`、`coffee`、`nightlife`、`art`、`market`、`other`。Reel 不传地标，使用 `caption` 和 / 或 `mediaIds`。
+已有地标用 `placeId` 替代 `place`，两者不可同时提交。类别沿用 App：`viewpoint`、`restaurant`、`coffee`、`nightlife`、`art`、`market`、`other`；本地 schema 14 新增 `hotel`、`airport`。Reel 不传地标，使用 `caption` 和 / 或 `mediaIds`。
+
+schema 13→14 只扩展 `places.category` 约束，保留全部已有分类值、地点 ID、引用和数据。`airport` 视觉分类不会自动获得机场定位范围，范围仍只由 `directoryKind` 决定。此版本尚未部署；旧服务会拒绝新分类，因此不能先向真实用户发布包含新类别的客户端。生产升级仍须另行确认，并验证加密备份与恢复；不改变服务、资源或配额。
 
 Apple 地点首次写入可在 `place` 中附上 `sourceId` UUID 和独立的 `coordinate`。服务用来源 ID 合并同一地标，不用拍摄位置覆盖地标位置；随后引用同一 ID 不能改写已有名称或坐标。目前来源 ID 由客户端提供，服务未向 Apple 验证。
 

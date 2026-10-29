@@ -24,6 +24,10 @@ final class ApplePOIRepository: POIRepository {
     }
 
     func near(_ coordinate: CLLocationCoordinate2D) -> AnyPublisher<[RatedPOI], Never> {
+        nearResult(coordinate).map(\.places).eraseToAnyPublisher()
+    }
+
+    func nearResult(_ coordinate: CLLocationCoordinate2D) -> AnyPublisher<POISearchResult, Never> {
         Deferred { [self] in
             // An airport's directory point can be far from its gates. Only
             // this explicit category gets the wider query; ordinary shops do not.
@@ -32,8 +36,10 @@ final class ApplePOIRepository: POIRepository {
                 fetch(.airports, near: coordinate)
             )
             .map { nearby, airports in
-                Self.candidates(nearby + airports, near: coordinate,
-                    nearbyRadius: searchRadius, maximumResults: maximumResults)
+                POISearchResult(
+                    places: Self.candidates(nearby.places + airports.places, near: coordinate,
+                        nearbyRadius: self.searchRadius, maximumResults: self.maximumResults),
+                    issue: nearby.issue ?? airports.issue)
             }
         }
         .eraseToAnyPublisher()
@@ -43,20 +49,26 @@ final class ApplePOIRepository: POIRepository {
     /// catalogue. When a person types a place name, ask Maps for that name
     /// instead of filtering only the suggestions it happened to return.
     func search(_ query: String, near coordinate: CLLocationCoordinate2D) -> AnyPublisher<[RatedPOI], Never> {
+        searchResult(query, near: coordinate).map(\.places).eraseToAnyPublisher()
+    }
+
+    func searchResult(_ query: String, near coordinate: CLLocationCoordinate2D) -> AnyPublisher<POISearchResult, Never> {
         guard let request = Self.namedSearchRequest(query, near: coordinate) else {
-            return Just([]).eraseToAnyPublisher()
+            return Just(POISearchResult(places: [])).eraseToAnyPublisher()
         }
         return Deferred { [self] in
             let search = MKLocalSearch(request: request)
-            return Future<[RatedPOI], Never> { promise in
-                search.start { response, _ in
-                    promise(.success(response?.mapItems.compactMap(Self.makeRatedPOI) ?? []))
+            return Future<POISearchResult, Never> { promise in
+                search.start { response, error in
+                    promise(.success(Self.searchResult(mapItems: response?.mapItems, error: error)))
                 }
             }
             .receive(on: DispatchQueue.main)
-            .map { Self.candidates($0, near: coordinate,
-                nearbyRadius: searchRadius, maximumResults: maximumResults,
-                reservesOneAirport: false) }
+            .map { result in
+                POISearchResult(places: Self.candidates(result.places, near: coordinate,
+                    nearbyRadius: self.searchRadius, maximumResults: self.maximumResults,
+                    reservesOneAirport: false), issue: result.issue)
+            }
             .handleEvents(receiveCancel: search.cancel)
         }
         .eraseToAnyPublisher()
@@ -80,30 +92,44 @@ final class ApplePOIRepository: POIRepository {
     }
 
     private func fetch(_ kind: AppleNearbyPlaceCache.Query, near coordinate: CLLocationCoordinate2D)
-        -> AnyPublisher<[RatedPOI], Never> {
+        -> AnyPublisher<POISearchResult, Never> {
         let radius = kind == .airports ? POISelectionPolicy.airportRadius : searchRadius
         let request = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
         request.pointOfInterestFilter = kind == .airports
             ? MKPointOfInterestFilter(including: [.airport]) : .includingAll
         let search = MKLocalSearch(request: request)
-        return Future<[RatedPOI]?, Never> { promise in
+        return Future<POISearchResult, Never> { promise in
             search.start { response, error in
-                guard error == nil, let response else {
-                    promise(.success(nil))
-                    return
-                }
-                let places = response.mapItems.compactMap(Self.makeRatedPOI)
+                let result = Self.searchResult(mapItems: response?.mapItems, error: error)
+                let places = result.places
                     .filter { kind != .airports || $0.poi.directoryKind == .airport }
-                promise(.success(places))
+                promise(.success(POISearchResult(places: places, issue: result.issue)))
             }
         }
         .receive(on: DispatchQueue.main)
-        .map { [weak self] response -> [RatedPOI] in
-            guard let self else { return [] }
-            return cache.resolve(response, for: kind, near: coordinate, at: .now)
+        .map { [weak self] result -> POISearchResult in
+            guard let self else { return result }
+            let places = cache.resolve(result.issue == nil ? result.places : nil,
+                for: kind, near: coordinate, at: .now)
+            return POISearchResult(places: places, issue: result.issue)
         }
         .handleEvents(receiveCancel: search.cancel)
         .eraseToAnyPublisher()
+    }
+
+    /// MapKit reports a genuine miss as `placemarkNotFound`; network,
+    /// throttling and server failures must not impersonate a successful miss.
+    nonisolated static func searchResult(mapItems: [MKMapItem]?, error: Error?) -> POISearchResult {
+        if let error {
+            let error = error as NSError
+            let isMissingPlace = error.domain == MKErrorDomain
+                && error.code == Int(MKError.Code.placemarkNotFound.rawValue)
+            return POISearchResult(places: [], issue: isMissingPlace ? nil : .temporarilyUnavailable)
+        }
+        guard let mapItems else {
+            return POISearchResult(places: [], issue: .temporarilyUnavailable)
+        }
+        return POISearchResult(places: mapItems.compactMap(makeRatedPOI))
     }
 
     /// Distance is measured to the real landmark point. The caller keeps the
@@ -196,6 +222,10 @@ final class ApplePOIRepository: POIRepository {
             return .art
         case .store, .foodMarket:
             return .market
+        case .hotel:
+            return .hotel
+        case .airport:
+            return .airport
         case .park, .nationalPark, .beach, .marina, .landmark,
              .castle, .fortress, .nationalMonument, .aquarium, .zoo,
              .amusementPark, .fairground, .campground, .rvPark, .hiking:

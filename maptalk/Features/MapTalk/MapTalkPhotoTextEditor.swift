@@ -206,39 +206,105 @@ nonisolated enum PhotoTextOverlayRenderer {
 
 struct MapTalkPhotoTextEditor: View {
     let image: UIImage
+    let embedded: Bool
     let onCancel: @MainActor () -> Void
     let onDone: @MainActor (PhotoTextOverlay) -> Void
     @State private var draft: PhotoTextOverlay
     @State private var isTyping = true
 
-    init(image: UIImage, draft: PhotoTextOverlay, onCancel: @escaping @MainActor () -> Void,
+    init(image: UIImage, draft: PhotoTextOverlay, embedded: Bool = false, onCancel: @escaping @MainActor () -> Void,
          onDone: @escaping @MainActor (PhotoTextOverlay) -> Void) {
         self.image = image
+        self.embedded = embedded
         self.onCancel = onCancel
         self.onDone = onDone
         _draft = State(initialValue: PhotoTextOverlayRenderer.sanitized(draft))
     }
 
     var body: some View {
+        if embedded {
+            embeddedEditor
+        } else {
+            standaloneEditor
+        }
+    }
+
+    private var canvas: some View {
+        PhotoTextEditingCanvas(image: image, draft: $draft, isTyping: $isTyping)
+            .accessibilityIdentifier("maptalk.photo-text.canvas")
+    }
+
+    private func editingFooter(color: Color) -> some View {
+        HStack {
+            Text(isTyping ? "Tap photo to place text" : "Drag to move · tap to edit")
+                .font(.system(size: 12))
+                .foregroundStyle(color.opacity(0.6))
+            Spacer()
+            Button("Clear") {
+                draft.text = ""
+                isTyping = true
+            }
+            .font(.system(size: 13, weight: .medium))
+            .frame(minHeight: embedded ? 44 : 0)
+            .disabled(draft.isEmpty)
+            .accessibilityIdentifier("maptalk.photo-text.clear")
+        }
+    }
+
+    private func finishEditing() {
+        isTyping = false
+        onDone(PhotoTextOverlayRenderer.clamped(draft,
+            in: PhotoTextOverlayRenderer.orientedPixelSize(of: image)))
+    }
+
+    private var embeddedEditor: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text("Photo text")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.black)
+                HStack {
+                    Button("Cancel", action: onCancel)
+                        .font(.system(size: 15))
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("maptalk.photo-text.cancel")
+                    Spacer()
+                    Button("Done", action: finishEditing)
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(minWidth: 44, minHeight: 44)
+                        .accessibilityIdentifier("maptalk.photo-text.done")
+                }
+            }
+            .frame(height: 46)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+
+            canvas
+                .frame(maxWidth: .infinity, minHeight: 0, maxHeight: 326)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .layoutPriority(1)
+
+            editingFooter(color: .black)
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color.white)
+        .tint(.black)
+        .preferredColorScheme(.light)
+    }
+
+    private var standaloneEditor: some View {
         NavigationStack {
             VStack(spacing: 14) {
-                PhotoTextEditingCanvas(image: image, draft: $draft, isTyping: $isTyping)
-                    .accessibilityIdentifier("maptalk.photo-text.canvas")
-                HStack {
-                    Text(isTyping ? "Tap photo to place text" : "Drag to move · tap to edit")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.6))
-                    Spacer()
-                    Button("Clear") {
-                        draft.text = ""
-                        isTyping = true
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .disabled(draft.isEmpty)
-                    .accessibilityIdentifier("maptalk.photo-text.clear")
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
+                canvas
+                editingFooter(color: .white)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
             }
             .background(Color.black)
             .navigationTitle("Photo text")
@@ -250,11 +316,7 @@ struct MapTalkPhotoTextEditor: View {
                 }
                 .sharedBackgroundVisibility(.hidden)
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        isTyping = false
-                        onDone(PhotoTextOverlayRenderer.clamped(draft,
-                            in: PhotoTextOverlayRenderer.orientedPixelSize(of: image)))
-                    }
+                    Button("Done", action: finishEditing)
                     .fontWeight(.semibold)
                     .accessibilityIdentifier("maptalk.photo-text.done")
                 }

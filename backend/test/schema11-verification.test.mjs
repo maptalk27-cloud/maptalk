@@ -33,11 +33,15 @@ async function fixture(t) {
   return { sourcePath, targetPath };
 }
 
-// This verifier belongs to the historical 10 -> 11 release. Construct that
-// exact target shape even after the current server starts migrating to 13.
+// This verifier belongs to the historical 10 -> 11 release. Apply only that
+// release's ALTER, not later category-table rebuilds or cluster migrations.
 function upgradeFixtureToSchema11(path) {
-  const db = openDatabase(path);
-  db.exec('DROP TABLE cluster_media; DROP TABLE memory_clusters; DROP TABLE comments; PRAGMA user_version = 11;');
+  const db = new DatabaseSync(path);
+  db.exec(`
+    PRAGMA foreign_keys = ON;
+    ALTER TABLE places ADD COLUMN directory_kind TEXT CHECK(directory_kind IS NULL OR directory_kind = 'airport');
+    PRAGMA user_version = 11;
+  `);
   return db;
 }
 

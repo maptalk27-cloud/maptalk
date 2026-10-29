@@ -8,6 +8,8 @@ enum POICategory: String, CaseIterable, Codable {
     case nightlife
     case art
     case market
+    case hotel
+    case airport
     case other
 
     var displayName: String {
@@ -24,6 +26,10 @@ enum POICategory: String, CaseIterable, Codable {
             return "Art Spot"
         case .market:
             return "Market"
+        case .hotel:
+            return "Hotel"
+        case .airport:
+            return "Airport"
         case .other:
             return "Other"
         }
@@ -43,6 +49,10 @@ enum POICategory: String, CaseIterable, Codable {
             return "paintpalette.fill"
         case .market:
             return "cart.fill"
+        case .hotel:
+            return "bed.double.fill"
+        case .airport:
+            return "airplane"
         case .other:
             return "star.leadinghalf.filled"
         }
@@ -62,6 +72,10 @@ enum POICategory: String, CaseIterable, Codable {
             return Theme.neonWarning
         case .market:
             return .teal
+        case .hotel:
+            return .indigo
+        case .airport:
+            return .blue
         case .other:
             return .gray
         }
@@ -81,6 +95,10 @@ enum POICategory: String, CaseIterable, Codable {
             return [Color.pink, Color.purple]
         case .market:
             return [Color.yellow, Color.orange.opacity(0.9)]
+        case .hotel:
+            return [Color.indigo, Color.purple]
+        case .airport:
+            return [Color.blue, Color.indigo]
         case .other:
             return [Color.gray, Color.black.opacity(0.8)]
         }
@@ -100,6 +118,10 @@ enum POICategory: String, CaseIterable, Codable {
             return "🎨"
         case .market:
             return "🛍️"
+        case .hotel:
+            return "🛏️"
+        case .airport:
+            return "✈️"
         case .other:
             return "⭐️"
         }

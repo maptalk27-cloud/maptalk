@@ -252,7 +252,7 @@ test('schema12 migration and independent backup preserve all old rows and old ab
   for (const path of [api.databasePath, backupPath]) {
     const migrated = openDatabase(path);
     try {
-      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 13);
+      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 14);
       for (const [table, rows] of Object.entries(before)) assert.deepEqual(migrated.prepare(`SELECT * FROM ${table}`).all(), rows, table);
       for (const table of ['memory_clusters', 'cluster_media']) assert.equal(migrated.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
       assert.deepEqual(migrated.prepare('PRAGMA foreign_key_check').all(), []);

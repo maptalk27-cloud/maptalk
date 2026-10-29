@@ -13,7 +13,7 @@ export function openDatabase(databasePath) {
     chmodSync(path, 0o600);
     db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 13) throw new Error('Database is newer than this server; refusing to open it.');
+    if (version > 14) throw new Error('Database is newer than this server; refusing to open it.');
     if (version === 0) {
       transaction(db, () => {
         db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
@@ -284,6 +284,32 @@ export function openDatabase(databasePath) {
           PRAGMA user_version = 13;
         `);
       });
+    }
+    if (version < 14) {
+      // Widen only the category CHECK. Keep place identity and all referencing
+      // memories, sources and comments intact; never reclassify old records.
+      db.exec('PRAGMA foreign_keys = OFF;');
+      try {
+        transaction(db, () => {
+          db.exec(`
+            CREATE TABLE places_v14 (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              category TEXT NOT NULL CHECK(category IN
+                ('viewpoint', 'restaurant', 'coffee', 'nightlife', 'art', 'market', 'hotel', 'airport', 'other')),
+              latitude REAL NOT NULL CHECK(latitude BETWEEN -90 AND 90),
+              longitude REAL NOT NULL CHECK(longitude BETWEEN -180 AND 180),
+              directory_kind TEXT CHECK(directory_kind IS NULL OR directory_kind = 'airport')
+            ) STRICT;
+            INSERT INTO places_v14(id, name, category, latitude, longitude, directory_kind)
+              SELECT id, name, category, latitude, longitude, directory_kind FROM places;
+            DROP TABLE places;
+            ALTER TABLE places_v14 RENAME TO places;
+            PRAGMA user_version = 14;
+          `);
+          if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('Place category migration violated a foreign key.');
+        });
+      } finally { db.exec('PRAGMA foreign_keys = ON;'); }
     }
     return db;
   } catch (error) {

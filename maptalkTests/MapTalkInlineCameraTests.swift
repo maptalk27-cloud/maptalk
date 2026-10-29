@@ -5,6 +5,34 @@ import Testing
 
 struct MapTalkInlineCameraTests {
     @Test
+    func quickCaptureUsesStandardStabilizationOnlyWhenBothConnectionAndFormatSupportIt() {
+        #expect(MapTalkInlineCameraPolicy.stabilizationMode(
+            connectionSupports: true, formatSupportsStandard: true) == .standard)
+        #expect(MapTalkInlineCameraPolicy.stabilizationMode(
+            connectionSupports: false, formatSupportsStandard: true) == .off)
+        #expect(MapTalkInlineCameraPolicy.stabilizationMode(
+            connectionSupports: true, formatSupportsStandard: false) == .off)
+        #expect(MapTalkInlineCameraPolicy.stabilizationMode(
+            connectionSupports: false, formatSupportsStandard: false) == .off)
+    }
+
+    @Test
+    func shutterHintsExplainPhotoVideoAndRetryAfterMicrophonePermission() {
+        #expect(MapTalkInlineCameraPolicy.shutterHint(
+            isRecording: false, isFinishing: false, microphoneJustGranted: false)
+            == "Tap for photo · hold for video")
+        #expect(MapTalkInlineCameraPolicy.shutterHint(
+            isRecording: false, isFinishing: false, microphoneJustGranted: true)
+            == "Microphone ready · hold to record")
+        #expect(MapTalkInlineCameraPolicy.shutterHint(
+            isRecording: true, isFinishing: false, microphoneJustGranted: true)
+            == "Release to finish")
+        #expect(MapTalkInlineCameraPolicy.shutterHint(
+            isRecording: true, isFinishing: true, microphoneJustGranted: false)
+            == "Saving…")
+    }
+
+    @Test
     func shortPressProducesExactlyOnePhotoAndNeverStartsVideo() {
         var press = MapTalkShutterPressState()
         #expect(press.began(acceptsNewCapture: true) == true)

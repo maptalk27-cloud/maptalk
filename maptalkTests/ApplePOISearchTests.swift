@@ -25,6 +25,50 @@ struct ApplePOISearchTests {
     }
 
     @Test
+    func statusAwareSearchKeepsLegacyRepositoriesCompatible() {
+        let origin = CLLocationCoordinate2D(latitude: 47.448, longitude: -122.308)
+        let repository: any POIRepository = LocalSearchTestRepository(places: [])
+        var results: [POISearchResult] = []
+        let nearby = repository.nearResult(origin).sink { results.append($0) }
+        let named = repository.searchResult("hotel", near: origin).sink { results.append($0) }
+        #expect(results.count == 2)
+        #expect(results.allSatisfy { $0.places.isEmpty && $0.issue == nil })
+        withExtendedLifetime((nearby, named)) {}
+    }
+
+    @Test
+    func directoryFailureIsDifferentFromASuccessfulEmptyResult() {
+        let successfulEmpty = ApplePOIRepository.searchResult(mapItems: [], error: nil)
+        #expect(successfulEmpty.places.isEmpty)
+        #expect(successfulEmpty.issue == nil)
+        let notFound = NSError(domain: MKErrorDomain, code: Int(MKError.Code.placemarkNotFound.rawValue))
+        #expect(ApplePOIRepository.searchResult(mapItems: nil, error: notFound).issue == nil)
+        let failures = [
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet),
+            NSError(domain: MKErrorDomain, code: Int(MKError.Code.loadingThrottled.rawValue)),
+            NSError(domain: MKErrorDomain, code: Int(MKError.Code.serverFailure.rawValue)),
+        ]
+        for error in failures {
+            let result = ApplePOIRepository.searchResult(mapItems: nil, error: error)
+            #expect(result.places.isEmpty)
+            #expect(result.issue == .temporarilyUnavailable)
+        }
+        #expect(ApplePOIRepository.searchResult(mapItems: nil, error: nil).issue == .temporarilyUnavailable)
+    }
+
+    @Test
+    func recoveredSearchClearsItsFailureWithoutLosingPlaces() throws {
+        let item = MKMapItem(location: CLLocation(latitude: 47.448, longitude: -122.308), address: nil)
+        item.name = "Airport Hotel"
+        item.pointOfInterestCategory = .hotel
+        let result = ApplePOIRepository.searchResult(mapItems: [item], error: nil)
+        #expect(result.issue == nil)
+        let place = try #require(result.places.first)
+        #expect(place.poi.category == .hotel)
+        #expect(place.poi.directoryKind == nil, "An airport in a hotel name cannot expand its check-in radius")
+    }
+
+    @Test
     func namedLookupSearchesApplePlacesInsteadOfOnlyFilteringSuggestions() throws {
         let origin = CLLocationCoordinate2D(latitude: 47.448, longitude: -122.308)
         let request = try #require(ApplePOIRepository.namedSearchRequest("  SeaTac Airport \n", near: origin))
@@ -75,6 +119,22 @@ struct ApplePOISearchTests {
         #expect(ApplePOIRepository.category(for: .bakery) == .coffee)
         #expect(ApplePOIRepository.category(for: .parking) == .other)
         #expect(ApplePOIRepository.category(for: .skatePark) == .other)
+        #expect(ApplePOIRepository.category(for: .hotel) == .hotel)
+        #expect(ApplePOIRepository.category(for: .airport) == .airport)
+    }
+
+    @Test
+    func newCategoriesPreserveOldWireValuesAndHaveDistinctIcons() throws {
+        let original = ["viewpoint", "restaurant", "coffee", "nightlife", "art", "market", "other"]
+        for rawValue in original {
+            let data = try JSONEncoder().encode(rawValue)
+            let category = try JSONDecoder().decode(POICategory.self, from: data)
+            #expect(category.rawValue == rawValue)
+        }
+        #expect(POICategory.hotel.displayName == "Hotel")
+        #expect(POICategory.hotel.symbolName == "bed.double.fill")
+        #expect(POICategory.airport.symbolName == "airplane")
+        #expect(POICategory.allCases.count == original.count + 2)
     }
 
     @Test
@@ -99,7 +159,7 @@ struct ApplePOISearchTests {
     @Test
     func unknownAndUnrelatedDirectoryTypesAreNotMisrepresented() {
         let unsupported: [MKPointOfInterestCategory?] = [
-            nil, .airport, .hotel, .hospital, .school, .publicTransport,
+            nil, .hospital, .school, .publicTransport,
             .init(rawValue: "FutureRestaurantDistrict"),
         ]
         for category in unsupported {

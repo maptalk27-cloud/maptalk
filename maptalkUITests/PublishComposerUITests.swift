@@ -2,7 +2,8 @@ import XCTest
 
 /// Composer-only regressions. Demo mode never signs into, uploads to, or
 /// publishes against the hosted backend. These tests do not need library
-/// fixtures; they exercise presentation, cancellation and keyboard layout.
+/// fixtures except for the explicitly named photo regressions; they exercise
+/// presentation, cancellation and keyboard layout.
 final class PublishComposerUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -154,14 +155,7 @@ final class PublishComposerUITests: XCTestCase {
         defer { app.terminate() }
         openPlace(in: app)
         XCTAssertFalse(app.buttons["maptalk.place.photo-text"].exists)
-        app.buttons["Choose from library"].tap()
-        let photo = app.images.matching(NSPredicate(
-            format: "label CONTAINS[c] 'Photo' AND NOT label CONTAINS[c] 'Video'"
-        )).firstMatch
-        XCTAssertTrue(photo.waitForExistence(timeout: 15), "The existing simulator needs a photo fixture")
-        let frame = photo.frame
-        app.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+        importFirstPhoto(in: app)
         let edit = app.buttons["maptalk.place.photo-text"]
         waitUntilHittable(edit)
         edit.tap()
@@ -174,6 +168,10 @@ final class PublishComposerUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.exists)
         XCTAssertLessThan(input.frame.maxY, app.keyboards.firstMatch.frame.minY,
                           "Photo words must remain visible while typing")
+        let canvas = app.descendants(matching: .any).matching(identifier: "maptalk.photo-text.canvas").firstMatch
+        XCTAssertTrue(canvas.exists)
+        XCTAssertLessThanOrEqual(canvas.frame.height, 327,
+                                 "Inline editing must keep the composer's compact photo stage")
         attachScreenshot(app, name: "POI photo text editor above keyboard")
         done.tap()
         let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
@@ -197,6 +195,117 @@ final class PublishComposerUITests: XCTestCase {
         app.buttons["maptalk.place.retake"].tap()
         XCTAssertFalse(edit.exists)
         XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
+        let cancelRetake = app.buttons["maptalk.place.cancel-retake"]
+        waitUntilHittable(cancelRetake)
+        cancelRetake.tap()
+        waitUntilHittable(edit)
+        XCTAssertEqual(edit.value as? String, "",
+                       "Cancelling a retake must return the existing photo, not an empty composer")
+    }
+
+    @MainActor
+    func testPlacePhotoRetakeLibraryCancelAndClosePreserveWordsUntilDiscard() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        openPlace(in: app)
+        importFirstPhoto(in: app)
+        let edit = app.buttons["maptalk.place.photo-text"]
+        waitUntilHittable(edit)
+        edit.tap()
+        let input = app.textViews["maptalk.photo-text.input"]
+        waitUntilHittable(input)
+        input.tap()
+        input.typeText("Keep this memory")
+        app.buttons["maptalk.photo-text.done"].tap()
+        waitForPhotoWords("Keep this memory", in: app)
+
+        app.buttons["maptalk.place.retake"].tap()
+        let cancelRetake = app.buttons["maptalk.place.cancel-retake"]
+        waitUntilHittable(cancelRetake)
+        XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
+        cancelRetake.tap()
+        waitForPhotoWords("Keep this memory", in: app)
+        attachScreenshot(app, name: "Cancelled retake restores the photo and its words")
+
+        app.buttons["Choose from library"].tap()
+        cancelSystemLibrary(in: app)
+        waitForPhotoWords("Keep this memory", in: app)
+
+        app.buttons["maptalk.publish.cancel"].tap()
+        let keep = app.buttons["Keep editing"]
+        waitUntilHittable(keep)
+        XCTAssertTrue(app.buttons["Discard"].exists)
+        keep.tap()
+        waitForPhotoWords("Keep this memory", in: app)
+        app.buttons["maptalk.publish.cancel"].tap()
+        waitUntilHittable(app.buttons["Discard"])
+        app.buttons["Discard"].tap()
+        waitUntilHittable(app.buttons["Add a place"])
+        openPlace(in: app)
+        XCTAssertFalse(edit.exists)
+        XCTAssertFalse(app.buttons["maptalk.place.retake"].exists)
+    }
+
+    @MainActor
+    func testPlaceHotelAndAirportCategoriesAndManualDraftCloseProtection() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        openPlace(in: app)
+        openNewPlace(in: app)
+        let name = app.textFields["maptalk.place.new-name"]
+        waitUntilHittable(name)
+        name.tap()
+        name.typeText("A hotel worth remembering")
+
+        let hotel = app.buttons["maptalk.place.new-category.hotel"]
+        let airport = app.buttons["maptalk.place.new-category.airport"]
+        revealCategory(hotel, in: app)
+        hotel.tap()
+        XCTAssertEqual(hotel.value as? String, "Selected")
+        revealCategory(airport, in: app)
+        airport.tap()
+        XCTAssertEqual(airport.value as? String, "Selected")
+        XCTAssertNotEqual(hotel.value as? String, "Selected")
+        hotel.tap()
+        attachScreenshot(app, name: "Hotel and airport use dedicated selectable place types")
+        app.buttons["Use this place"].tap()
+        let landmark = app.buttons["maptalk.place.choose-landmark"]
+        waitUntilHittable(landmark)
+        XCTAssertEqual(landmark.value as? String, "A hotel worth remembering")
+
+        app.buttons["maptalk.publish.cancel"].tap()
+        waitUntilHittable(app.buttons["Keep editing"])
+        app.buttons["Keep editing"].tap()
+        waitUntilHittable(landmark)
+        XCTAssertEqual(landmark.value as? String, "A hotel worth remembering")
+        openNewPlace(in: app)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        revealCategory(hotel, in: app)
+        XCTAssertEqual(hotel.value as? String, "Selected",
+                       "Keeping the draft must preserve both its name and its chosen type")
+    }
+
+    @MainActor
+    func testPlaceAudienceChoicesAreVisibleAndSwitchWithoutOpeningAnotherMenu() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        openPlace(in: app)
+        let publicChoice = app.buttons["maptalk.place.audience.public"]
+        let privateChoice = app.buttons["maptalk.place.audience.private"]
+        waitUntilHittable(publicChoice)
+        waitUntilHittable(privateChoice)
+        XCTAssertEqual(privateChoice.value as? String, "Selected")
+        XCTAssertTrue(app.buttons["Add to MyMap"].exists)
+        publicChoice.tap()
+        XCTAssertEqual(publicChoice.value as? String, "Selected")
+        XCTAssertNotEqual(privateChoice.value as? String, "Selected")
+        XCTAssertTrue(app.buttons["Post"].exists)
+        XCTAssertTrue(privateChoice.isHittable,
+                      "Both audience choices must remain visible after a selection")
+        privateChoice.tap()
+        XCTAssertEqual(privateChoice.value as? String, "Selected")
+        XCTAssertTrue(app.buttons["Add to MyMap"].exists)
+        attachScreenshot(app, name: "POI audience is one directly tappable choice")
     }
 
     @MainActor
@@ -322,6 +431,38 @@ final class PublishComposerUITests: XCTestCase {
     private func openNewPlace(in app: XCUIApplication) {
         openPlaceChoices(in: app)
         revealAndTapCreatePlace(in: app)
+    }
+
+    @MainActor
+    private func importFirstPhoto(in app: XCUIApplication) {
+        app.buttons["Choose from library"].tap()
+        let photo = app.images.matching(NSPredicate(
+            format: "label CONTAINS[c] 'Photo' AND NOT label CONTAINS[c] 'Video'"
+        )).firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 15), "The existing simulator needs a photo fixture")
+        let frame = photo.frame
+        XCTAssertTrue(app.frame.contains(CGPoint(x: frame.midX, y: frame.midY)))
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+        waitUntilHittable(app.buttons["maptalk.place.photo-text"], timeout: 20)
+    }
+
+    @MainActor
+    private func waitForPhotoWords(_ words: String, in app: XCUIApplication) {
+        let edit = app.buttons["maptalk.place.photo-text"]
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            edit.exists && edit.isHittable && edit.value as? String == words
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 10), .completed)
+    }
+
+    @MainActor
+    private func revealCategory(_ category: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<5 where !category.isHittable {
+            guard let scroll = app.scrollViews.allElementsBoundByIndex.first(where: { $0.isHittable }) else { break }
+            scroll.swipeUp()
+        }
+        waitUntilHittable(category)
     }
 
     @MainActor

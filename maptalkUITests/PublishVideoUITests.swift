@@ -60,6 +60,81 @@ final class PublishVideoUITests: XCTestCase {
         XCTAssertTrue(app.buttons["maptalk.place.choose-landmark"].exists)
         XCTAssertTrue(app.buttons["Choose from library"].exists)
         attach(app, "POI imported video preview")
+
+        retake.tap()
+        let cancelRetake = app.buttons["maptalk.place.cancel-retake"]
+        waitUntilHittable(cancelRetake)
+        XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
+        cancelRetake.tap()
+        waitUntilHittable(retake)
+        XCTAssertTrue(app.descendants(matching: .any)["Video preview"].exists,
+                      "A cancelled camera retake must restore the imported video")
+        XCTAssertFalse(app.buttons["maptalk.place.photo-text"].exists,
+                       "Returning from retake must not turn video into a still-photo draft")
+        attach(app, "POI video restored after cancelling a retake")
+
+        app.buttons["maptalk.publish.cancel"].tap()
+        waitUntilHittable(app.buttons["Keep editing"])
+        app.buttons["Keep editing"].tap()
+        waitUntilHittable(retake)
+        XCTAssertTrue(app.descendants(matching: .any)["Video preview"].exists,
+                      "Keeping the post must preserve the playable video")
+    }
+
+    @MainActor
+    func testPlaceLongVideoCanCancelClipThenPrepareSelectedMinute() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["MAPTALK_LONG_VIDEO_TESTS"] == "1",
+                          "Requires the generated 65-second video to be the newest simulator library item")
+        let app = try launchDemo()
+        defer { app.terminate() }
+        let entry = app.buttons["Add a place"]
+        waitUntilHittable(entry)
+        entry.tap()
+        let library = app.buttons["Choose from library"]
+        waitUntilHittable(library)
+        library.tap()
+        try chooseVideo(in: app)
+
+        let editor = app.descendants(matching: .any).matching(identifier: "maptalk.place.clip-editor").firstMatch
+        XCTAssertTrue(editor.waitForExistence(timeout: 30),
+                      "Long videos must reach clip selection rather than disappearing or being rejected")
+        let slider = app.sliders["maptalk.place.clip.start"]
+        waitUntilHittable(slider)
+        let cancel = app.buttons["maptalk.place.clip.cancel"]
+        waitUntilHittable(cancel)
+        attach(app, "Long POI video offers a one-minute clip before importing")
+        cancel.tap()
+        XCTAssertTrue(library.waitForExistence(timeout: 10))
+        XCTAssertTrue(library.isEnabled)
+        attach(app, "Cancelled clip returns to camera controls")
+        XCTAssertFalse(editor.exists)
+        XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
+        XCTAssertFalse(app.buttons["maptalk.place.retake"].exists,
+                       "Cancelling the clip must not silently attach the untrimmed video")
+
+        let libraryFrame = library.frame
+        // After the clip overlay closes, iOS 26 can report this visible button
+        // as non-hittable. Exercise its actual touch target and require Photos
+        // to reopen and a second import to finish, rather than trusting AX alone.
+        XCTAssertGreaterThanOrEqual(libraryFrame.width, 44)
+        XCTAssertTrue(app.frame.contains(CGPoint(x: libraryFrame.midX, y: libraryFrame.midY)))
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: libraryFrame.midX, dy: libraryFrame.midY)).tap()
+        try chooseVideo(in: app)
+        XCTAssertTrue(editor.waitForExistence(timeout: 30))
+        waitUntilHittable(slider)
+        slider.adjust(toNormalizedSliderPosition: 0.5)
+        let use = app.buttons["maptalk.place.clip.use"]
+        waitUntilHittable(use)
+        use.tap()
+        let retake = app.buttons["maptalk.place.retake"]
+        XCTAssertTrue(retake.waitForExistence(timeout: 60),
+                      "A selected minute must finish importing as ordinary POI media")
+        waitUntilHittable(retake)
+        XCTAssertFalse(editor.exists)
+        XCTAssertTrue(app.descendants(matching: .any)["Video preview"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["maptalk.place.import.issue"].exists)
+        attach(app, "Selected minute is ready in the normal POI video preview")
     }
 
     @MainActor
@@ -89,6 +164,15 @@ final class PublishVideoUITests: XCTestCase {
         app.launchArguments = ["--mock-data", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         return app
+    }
+
+    @MainActor
+    private func waitUntilHittable(_ element: XCUIElement, timeout: TimeInterval = 10) {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"), object: element
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: timeout), .completed,
+                       "Expected a visible, tappable control: \(element.identifier)")
     }
 
     @MainActor
