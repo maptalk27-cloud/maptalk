@@ -112,15 +112,17 @@ struct FriendStoryContentView: View {
     let group: FriendStoryGroup
     let page: FriendStoryPage
     let pageIndex: Int
+    let pagerPages: [FriendStoryPage]
+    let pagerUserProvider: (UUID) -> User?
+    let selectedPageID: Binding<String>
+    let viewedKeys: Set<String>
     let isExpanded: Bool
     let isPlaybackActive: Bool
     let onPreviousPage: () -> Void
     let onNextPage: () -> Void
-    let onPreviousAuthor: () -> Void
-    let onNextAuthor: () -> Void
+    let onSelectPage: (Int) -> Void
     let onExpand: () -> Void
     let onClose: () -> Void
-    let onLocation: (UUID) -> Void
     let onJourney: (JourneyPost) -> Void
     let onReadReady: (String) -> Void
     let journeyProvider: (UUID) -> JourneyPost?
@@ -128,51 +130,45 @@ struct FriendStoryContentView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
-    @State private var readyPageID: String?
-    @State private var isEditing = false
+    @State private var readyPageIDs: Set<String> = []
     @State private var selectedProfile: UserMapViewModel.Context?
     @State private var isKeyboardVisible = false
     @State private var activeChildPresentations: Set<UUID> = []
-    @State private var authorSwipeIntent: AuthorSwipeIntent?
-    @GestureState private var isAuthorDragging = false
-
-    private enum AuthorSwipeIntent { case horizontal, vertical }
 
     private var author: User? { userProvider(group.authorID) ?? group.user }
     private var playbackEnabled: Bool {
-        isPlaybackActive && scenePhase == .active && !isEditing
+        isPlaybackActive && scenePhase == .active
             && selectedProfile == nil && !isKeyboardVisible && activeChildPresentations.isEmpty
     }
-    private var canSwitchAuthor: Bool {
-        isPlaybackActive && !isEditing && selectedProfile == nil
+    private var canNavigate: Bool {
+        isPlaybackActive && selectedProfile == nil
             && !isKeyboardVisible && activeChildPresentations.isEmpty
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            navigationHeader
-            content
-                .id(page.id)
+            postPager
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .clipped()
         }
         .background(Color.black)
-        .environment(\.friendStoryPlaybackEnabled, playbackEnabled)
-        .environment(\.friendStoryOnMediaReady, { noteReady(for: page.id) })
-        .environment(\.friendStoryExpectedMedia, page.expectedMedia)
-        .environment(\.friendStoryChildPresentationChanged, { id, presented in
-            if presented { activeChildPresentations.insert(id) }
-            else { activeChildPresentations.remove(id) }
-        })
-        .simultaneousGesture(authorSwipeGesture)
-        .onChangeCompat(of: page.id) { _ in
-            isEditing = false
-            activeChildPresentations.removeAll()
-            authorSwipeIntent = nil
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("friend-story.card")
+        .accessibilityValue(isExpanded ? "Expanded" : "Compact")
+        .background {
+            FriendStoryFloatingAccessory(
+                isVisible: isPlaybackActive && selectedProfile == nil
+                    && activeChildPresentations.isEmpty
+            ) {
+                navigationHeader
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22))
+                    .environment(\.colorScheme, .dark)
+                    .environment(\.appEnv, environment)
+            }
         }
-        .onChangeCompat(of: isAuthorDragging) { dragging in
-            if !dragging { authorSwipeIntent = nil }
+        .onChangeCompat(of: page.id) { _ in
+            activeChildPresentations.removeAll()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
             isKeyboardVisible = true
@@ -202,125 +198,118 @@ struct FriendStoryContentView: View {
         }
     }
 
-    private var authorSwipeGesture: some Gesture {
-        DragGesture(minimumDistance: 18, coordinateSpace: .local)
-            .updating($isAuthorDragging) { _, dragging, _ in dragging = true }
-            .onChanged { value in
-                guard canSwitchAuthor else { authorSwipeIntent = .vertical; return }
-                // A native vertical sheet pull can run simultaneously, but
-                // must never turn into another person midway through it.
-                if authorSwipeIntent == nil {
-                    authorSwipeIntent = abs(value.translation.width) > abs(value.translation.height) * 1.45
-                        ? .horizontal : .vertical
-                }
-            }
-            .onEnded { value in
-                let intent = authorSwipeIntent
-                authorSwipeIntent = nil
-                guard canSwitchAuthor, intent == .horizontal else { return }
-                let horizontal = value.translation.width
-                let projected = value.predictedEndTranslation.width
-                guard abs(horizontal) > 54 || (abs(horizontal) > 20 && abs(projected) > 130) else { return }
-                if horizontal < 0 { onNextAuthor() } else { onPreviousAuthor() }
-            }
-    }
-
     private var navigationHeader: some View {
         VStack(spacing: 0) {
-            progress
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Update \(pageIndex + 1) of \(group.pages.count)")
-                .accessibilityIdentifier("friend-story.page.\(page.id)")
-                .accessibilityAction(named: "Previous update", onPreviousPage)
-                .accessibilityAction(named: "Next update", onNextPage)
-                .accessibilityAction(named: "Previous person", onPreviousAuthor)
-                .accessibilityAction(named: "Next person", onNextAuthor)
-                .padding(.horizontal, 16)
-                .padding(.top, 5)
             HStack(spacing: 8) {
-                Button {
-                    if let author { selectedProfile = .profileContext(for: author) }
-                } label: {
-                    HStack(spacing: 8) {
-                        FriendStoryAvatar(user: author, diameter: 28)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(author?.handle ?? "Member")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                                .accessibilityIdentifier("friend-story.current-author")
-                            Text(page.publishedAt, style: .relative)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.white.opacity(0.6))
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
+                authorIdentity
+                Spacer(minLength: 4)
+                if group.pages.count > 12 {
+                    Text("\(pageIndex + 1) / \(group.pages.count)")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .fixedSize()
+                        .accessibilityHidden(true)
                 }
-                .buttonStyle(.plain)
-                .disabled(author == nil)
-                .accessibilityIdentifier("friend-story.open-author")
-                .accessibilityLabel("View profile")
-                .accessibilityValue(author?.handle ?? "Member")
-                Spacer(minLength: 0)
-                navigationButton("chevron.left", label: "Previous update", enabled: pageIndex > 0, action: onPreviousPage)
-                    .accessibilityIdentifier("friend-story.previous-page")
-                navigationButton("chevron.right", label: "Next update", enabled: pageIndex + 1 < group.pages.count, action: onNextPage)
-                    .accessibilityIdentifier("friend-story.next-page")
-                navigationButton("xmark", label: "Close stories", enabled: true, action: onClose)
-                    .accessibilityIdentifier("friend-story.close")
             }
             .padding(.leading, 16)
-            .padding(.trailing, 6)
-            .frame(height: 48)
+            .padding(.trailing, 16)
+            .frame(height: 44)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("friend-story.author-navigation")
+
+            FriendStoryProgressBars(count: group.pages.count,
+                                    index: pageIndex, pageID: page.id,
+                                    authorName: author?.handle ?? "Member",
+                                    onSelect: { index in
+                guard canNavigate else { return }
+                onSelectPage(index)
+            })
+                .frame(height: 24)
+                .accessibilityHint("Tap the progress bar to choose an update")
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment: onNextPage()
+                    case .decrement: onPreviousPage()
+                    @unknown default: break
+                    }
+                }
+                .accessibilityAction(named: "Previous update", onPreviousPage)
+                .accessibilityAction(named: "Next update", onNextPage)
+                .padding(.horizontal, 16)
         }
-        .background(Color.black.opacity(0.94))
+        .contentShape(Rectangle())
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("friend-story.navigation")
+        .accessibilityAction(.escape, onClose)
     }
 
-    @ViewBuilder
-    private var progress: some View {
-        if group.pages.count <= 12 {
-            HStack(spacing: 3) {
-                ForEach(group.pages.indices, id: \.self) { index in
-                    Capsule()
-                        .fill(Color.white.opacity(index <= pageIndex ? 0.88 : 0.22))
-                        .frame(height: 2)
+    private var authorIdentity: some View {
+        Button {
+            if let author { selectedProfile = .profileContext(for: author) }
+        } label: {
+            HStack(spacing: 8) {
+                FriendStoryAvatar(user: author, diameter: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(author?.handle ?? "Member")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(page.publishedAt.formatted(.relative(presentation: .named)))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("friend-story.timestamp")
                 }
             }
-            .frame(height: 6)
-        } else {
-            HStack {
-                Text("\(pageIndex + 1) / \(group.pages.count)")
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.65))
-                Spacer()
-            }
-            .frame(height: 12)
-        }
-    }
-
-    private func navigationButton(_ symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white.opacity(enabled ? 0.9 : 0.23))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(label)
+        .disabled(author == nil)
+        .accessibilityIdentifier("friend-story.open-author")
+        .accessibilityLabel("View profile")
+        .accessibilityValue(author?.handle ?? "Member")
+    }
+
+    private var pageSelection: Binding<String> {
+        Binding(get: { selectedPageID.wrappedValue }, set: { id in
+            guard canNavigate, id != selectedPageID.wrappedValue,
+                  pagerPages.contains(where: { $0.id == id }) else { return }
+            selectedPageID.wrappedValue = id
+        })
+    }
+
+    private var postPager: some View {
+        // Keep one stable native sequence through person boundaries. Let the
+        // pager manage its neighboring pages; replacing offscreen card bodies
+        // during a swipe can disturb its interactive transition.
+        TabView(selection: pageSelection) {
+            ForEach(pagerPages) { candidate in
+                content(for: candidate)
+                    .background(ExperiencePagerVerticalBounceGuard())
+                    // Native paging keeps adjacent cards mounted. Only the
+                    // selected card may play, mark read or present a child.
+                    .environment(\.friendStoryPlaybackEnabled, playbackEnabled && candidate.id == page.id)
+                    .environment(\.friendStoryExpectedMedia, candidate.expectedMedia)
+                    .environment(\.friendStoryOnMediaReady, { noteReady(for: candidate.id) })
+                    .environment(\.friendStoryChildPresentationChanged, { id, presented in
+                        guard candidate.id == page.id else { return }
+                        if presented { activeChildPresentations.insert(id) }
+                        else { activeChildPresentations.remove(id) }
+                    })
+                    .accessibilityHidden(!isPlaybackActive || candidate.id != page.id)
+                    .tag(candidate.id)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
     }
 
     @ViewBuilder
-    private var content: some View {
-        switch page.content {
+    private func content(for candidate: FriendStoryPage) -> some View {
+        switch candidate.content {
         case let .reel(real):
             ExperienceDetailView(
-                mode: .real(real, author),
+                mode: .real(displayedReel(real), pagerUserProvider(candidate.authorID)),
                 isExpanded: isExpanded,
                 onCollapsedTap: onExpand,
                 onJourneyAvatarStackTap: onJourney,
@@ -328,7 +317,7 @@ struct FriendStoryContentView: View {
                 userProvider: userProvider
             )
             .overlay(alignment: .bottomTrailing) {
-                if !page.isMediaReady {
+                if !candidate.isMediaReady {
                     ProgressView()
                         .tint(.white)
                         .padding(12)
@@ -338,163 +327,44 @@ struct FriendStoryContentView: View {
                         .accessibilityLabel("Loading media")
                 }
             }
-        case let .poi(place, _, media):
-            poiContent(place: place, media: media)
-        }
-    }
-
-    private func poiContent(place: RatedPOI, media: RatedPOI.Media?) -> some View {
-        VStack(spacing: 0) {
-            GeometryReader { geometry in
-                ZStack {
-                    poiMedia(place: place, media: media)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .clipped()
-                        // Aspect-fill pixels can extend outside the stage's
-                        // layout bounds even after clipping. Media is visual;
-                        // only the bounded tap zones below own interaction.
+        case let .poi(place, checkIn, media):
+            ExperienceDetailView(
+                mode: .poi(place),
+                isExpanded: isExpanded,
+                poiStorySelection: .init(checkIn: checkIn, media: media),
+                onCollapsedTap: onExpand,
+                onJourneyAvatarStackTap: onJourney,
+                journeyProvider: journeyProvider,
+                userProvider: userProvider,
+                onPOIContributorViewed: { keys in keys.forEach(onReadReady) },
+                isPOIContributorUnseen: { keys in keys.contains { !viewedKeys.contains($0) } }
+            )
+            .overlay(alignment: .bottomTrailing) {
+                if !candidate.isMediaReady {
+                    ProgressView()
+                        .tint(.white)
+                        .padding(12)
                         .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                    // These zones only cover the plain POI stage, never Reel
-                    // images, menus, place links, comments or Bubble controls.
-                    HStack(spacing: 0) {
-                        stageTapZone(action: onPreviousPage)
-                            .frame(width: geometry.size.width * 0.22)
-                        stageTapZone(action: { if !isExpanded { onExpand() } })
-                        stageTapZone(action: onNextPage)
-                            .frame(width: geometry.size.width * 0.22)
-                    }
-                }
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .contentShape(Rectangle())
-                .clipped()
-            }
-            .contentShape(Rectangle())
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(author?.handle ?? "Member") at \(place.poi.name)")
-            .accessibilityAddTraits(.isImage)
-            .accessibilityAction(named: "Expand update", onExpand)
-            .accessibilityIdentifier("friend-story.poi-stage")
-
-            HStack(spacing: 8) {
-                Button { onLocation(place.id) } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: place.poi.category.symbolName)
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(place.poi.category.accentColor)
-                            .frame(width: 28)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(place.poi.name)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                            Text("View place · Discussion")
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.6))
-                        }
-                        Spacer(minLength: 4)
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                    .foregroundStyle(.white)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Open \(place.poi.name) and place discussion")
-                .accessibilityIdentifier("friend-story.open-place")
-
-                if let backend = environment.backend {
-                    BackendContentSafetyMenu(
-                        store: backend,
-                        posts: [.init(id: page.memoryID, ownerID: page.authorID, title: "Check-in")],
-                        onEditorVisibilityChanged: { isEditing = $0 }
-                    )
+                        .accessibilityLabel("Loading media")
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .frame(minHeight: 62)
-            .background(Color.black)
         }
     }
 
-    private func stageTapZone(action: @escaping () -> Void) -> some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .onTapGesture(perform: action)
-            .accessibilityHidden(true)
-    }
-
-    @ViewBuilder
-    private func poiMedia(place: RatedPOI, media: RatedPOI.Media?) -> some View {
-        if let media {
-            switch media.kind {
-            case let .photo(url):
-                MapImage(url: url) { phase in
-                    switch phase {
-                    case let .success(image):
-                        image.resizable().aspectRatio(contentMode: isExpanded ? .fit : .fill)
-                            .onAppear { noteReady(for: page.id) }
-                    case .empty:
-                        ProgressView().tint(.white)
-                    default:
-                        unavailableMedia
-                    }
-                }
-                .background(Color.black)
-            case let .video(url, poster):
-                ExperienceDetailView.AutoPlayVideoView(
-                    url: url,
-                    poster: poster,
-                    accentColor: place.poi.category.accentColor,
-                    mode: isExpanded ? .lightbox : .card,
-                    usesAspectFit: isExpanded,
-                    isMuted: !isExpanded,
-                    isPlaybackActive: playbackEnabled,
-                    onReady: { noteReady(for: page.id) }
-                )
-            }
-        } else if page.kind == .poiLocationOnly {
-            VStack(spacing: 12) {
-                Image(systemName: place.poi.category.symbolName)
-                    .font(.system(size: 34, weight: .light))
-                    .foregroundStyle(place.poi.category.accentColor)
-                Text(place.poi.name)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                Text("Checked in")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(white: 0.08))
-        } else {
-            ProgressView()
-                .tint(.white)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(white: 0.08))
-                .accessibilityLabel("Loading media")
-        }
-    }
-
-    private var unavailableMedia: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "photo")
-                .font(.title2.weight(.light))
-            Text("Media unavailable")
-                .font(.caption)
-        }
-        .foregroundStyle(.white.opacity(0.65))
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(white: 0.08))
+    private func displayedReel(_ source: RealPost) -> RealPost {
+        // Another entry point (for example the author's profile) can edit the
+        // same post while this story stays mounted behind it.
+        guard let caption = environment.backend?.ownedMemories[source.id]?.caption else { return source }
+        var real = source
+        real.message = PostCaption.visibleText(caption)
+        return real
     }
 
     private func noteReady(for id: String) {
-        guard id == page.id else { return }
-        readyPageID = id
+        // A native pager can render a neighbor's first frame before selecting
+        // it. Remember readiness, but only the active page's delayed task may
+        // mark anything viewed (see canMarkViewed).
+        readyPageIDs.insert(id)
     }
 
     private var hasReadableText: Bool {
@@ -508,11 +378,62 @@ struct FriendStoryContentView: View {
     }
 
     private var canMarkViewed: Bool {
-        playbackEnabled && (readyPageID == page.id || hasReadableText)
+        playbackEnabled && (readyPageIDs.contains(page.id) || hasReadableText)
     }
 
     private var readinessTaskID: String {
         "\(page.id):\(canMarkViewed)"
+    }
+
+}
+
+/// A static position indicator. Media playback never owns navigation.
+private struct FriendStoryProgressBars: View {
+    let count: Int
+    let index: Int
+    let pageID: String
+    let authorName: String
+    let onSelect: (Int) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            Group {
+                if count <= 12 {
+                    HStack(spacing: 3) {
+                        ForEach(0..<count, id: \.self) { segment in
+                            bar(fraction: FriendStoryProgressSelection.fill(for: segment, index: index))
+                        }
+                    }
+                } else {
+                    bar(fraction: CGFloat(index + 1) / CGFloat(max(1, count)))
+                }
+            }
+            .frame(height: 2)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onTapGesture { location in
+                if let target = FriendStoryProgressSelection.index(
+                    at: location.x, width: geometry.size.width, count: count) {
+                    onSelect(target)
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Update \(index + 1) of \(count)")
+        .accessibilityValue(authorName)
+        .accessibilityIdentifier("friend-story.page.\(pageID)")
+    }
+
+    private func bar(fraction: CGFloat) -> some View {
+        GeometryReader { geometry in
+            Capsule()
+                .fill(Color.white.opacity(0.22))
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.88))
+                        .frame(width: geometry.size.width * min(1, max(0, fraction)))
+                }
+        }
     }
 }
 

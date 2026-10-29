@@ -15,11 +15,10 @@ struct MapOverlays: MapContent {
     let isPOIUnseen: (RatedPOI) -> Bool
     let onTapReal: ((RealPost) -> Void)?
     let onTapPOI: ((RatedPOI) -> Void)?
-    var compactReelMarkers = false
-    var selectedStoryAuthor: User? = nil
+    var showsSelectedReelRangeOnly = false
 
     var body: some MapContent {
-        ForEach(reals.filter { !compactReelMarkers || selectedStoryId == $0.id }) { real in
+        ForEach(reals.filter { !showsSelectedReelRangeOnly || selectedStoryId == $0.id }) { real in
             MapCircle(center: real.center, radius: real.radiusMeters)
                 .foregroundStyle(Theme.neonPrimary.opacity(0.15))
                 .stroke(Theme.neonPrimary, lineWidth: 2)
@@ -29,8 +28,9 @@ struct MapOverlays: MapContent {
             Annotation("", coordinate: real.center) {
                 let user = userProvider(real.userId)
                 let isSelected = selectedStoryId == real.id
+                // The public map identifies Reels by their author. Reducing
+                // range-circle clutter must not replace that identity with media.
                 let usesContentMarker = displayMode == .content || useTimelineStyle
-                    || (compactReelMarkers && !isSelected)
                 let isUnseen = isRealUnseen(real)
                 let baseMarker: AnyView = {
                     if usesContentMarker {
@@ -53,7 +53,7 @@ struct MapOverlays: MapContent {
                         )
                     }
                 }()
-                let marker: AnyView = {
+                let marker = { () -> AnyView in
                     if let heroNamespace {
                         return AnyView(
                             baseMarker.matchedGeometryEffect(
@@ -65,6 +65,10 @@ struct MapOverlays: MapContent {
                     }
                     return baseMarker
                 }()
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("maptalk.marker.reel.\(real.id.uuidString)")
+                .accessibilityLabel("\(user?.handle ?? "Member") Reel")
+                .accessibilityValue("\(usesContentMarker ? "Content" : "Avatar")\(isSelected ? ", selected" : "")")
 
                 if let onTapReal {
                     marker
@@ -83,11 +87,8 @@ struct MapOverlays: MapContent {
             let isSelected = selectedStoryId == rated.id
             let isUnseen = isPOIUnseen(rated)
             Annotation("", coordinate: rated.poi.coordinate) {
-                let marker: AnyView = {
-                    if isSelected, let selectedStoryAuthor {
-                        return AnyView(RealAvatarMarker(user: selectedStoryAuthor,
-                            isSelected: true, isUnseen: isUnseen))
-                    } else if useTimelineStyle {
+                let marker = { () -> AnyView in
+                    if useTimelineStyle {
                         return AnyView(
                             UserMapMarker(category: rated.poi.category)
                                 .frame(width: 24, height: 26)
@@ -112,6 +113,10 @@ struct MapOverlays: MapContent {
                         )
                     }
                 }()
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("maptalk.marker.poi.\(rated.id.uuidString)")
+                .accessibilityLabel(rated.poi.name)
+                .accessibilityValue("Category\(isSelected ? ", selected" : "")")
 
                 if let onTapPOI {
                     marker

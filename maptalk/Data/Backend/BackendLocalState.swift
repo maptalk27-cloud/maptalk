@@ -17,6 +17,10 @@ nonisolated struct QueuedPublication: Codable, Sendable, Identifiable {
         var contentType: String { mimeType ?? "image/jpeg" }
         var isVideo: Bool { contentType == "video/mp4" }
     }
+    struct ClusterPreview: Codable, Sendable {
+        var mediaID: UUID
+        let file: Photo
+    }
     var id: UUID { input.id }
     var input: BackendMemoryInput
     var record: BackendMemory
@@ -24,6 +28,9 @@ nonisolated struct QueuedPublication: Codable, Sendable, Identifiable {
     var attemptedPost = false
     var cancelled = false
     var failure: String?
+    // Optional so every pre-cluster queue remains decodable. These are local
+    // preview copies of selected sources, never another upload or quota charge.
+    var clusterPreviews: [ClusterPreview]? = nil
 }
 
 nonisolated struct BackendLocalState: Codable, Sendable {

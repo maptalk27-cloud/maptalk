@@ -275,7 +275,9 @@ final class UserMapViewModel: ObservableObject {
         }
         .sorted { ($0.latestVisit ?? .distantPast) > ($1.latestVisit ?? .distantPast) }
         self.reels = reels.filter { $0.userId == ownerID }.sorted { $0.createdAt > $1.createdAt }
-        journeyCatalog = []
+        journeyCatalog = self.reels.compactMap { reel in
+            reel.capsuleId.flatMap { environment.backend?.journey(for: $0, publicOnly: true) }
+        }
         journeyFolders = []
         summary = Summary(
             footprintCount: footprints.count,

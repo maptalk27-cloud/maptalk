@@ -14,6 +14,7 @@ export function userMediaLimitBytes(value = DEFAULT_USER_MEDIA_LIMIT_BYTES) {
 export function reclaimUnreferencedMedia(db, ownerID, mediaIDs) {
   const remove = db.prepare(`DELETE FROM media WHERE id = ? AND owner_id = ?
     AND NOT EXISTS (SELECT 1 FROM memory_media WHERE media_id = media.id)
+    AND NOT EXISTS (SELECT 1 FROM cluster_media WHERE media_id = media.id)
     AND NOT EXISTS (SELECT 1 FROM user_profiles WHERE avatar_media_id = media.id)`);
   for (const mediaID of new Set(mediaIDs)) remove.run(mediaID, ownerID);
 }

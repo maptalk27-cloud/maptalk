@@ -16,8 +16,8 @@ enum MapTalkPublishDestination: Identifiable, Hashable {
     var id: Self { self }
 }
 
-/// A POI has no authored caption. Its only text is the landmark metadata when
-/// the person is creating a place that does not already exist nearby.
+/// A POI has no separate authored caption. Optional photo text is rendered
+/// into its media before this draft is handed to the durable publishing queue.
 struct MapTalkPlaceDraft {
     enum Target {
         case existing(RatedPOI)
@@ -150,6 +150,9 @@ struct MapTalkPublishComposer: View {
 
     @State private var mediaPickerItem: PhotosPickerItem?
     @State private var selectedMedia: ComposerMediaAsset?
+    @State private var placePhotoText = PhotoTextOverlay()
+    @State private var editedPlacePhoto: ComposerMediaAsset?
+    @State private var isShowingPhotoTextEditor = false
     @State private var isLoadingMedia = false
     @State private var didFailMediaLoad = false
     @State private var mediaImportToken = UUID()
@@ -264,6 +267,7 @@ struct MapTalkPublishComposer: View {
             return selectedNearbyPOI != nil || (isCreatingLandmark && trimmedLandmarkName.isEmpty == false)
         case .reel:
             return trimmedReelText.isEmpty == false || reelAssets.isEmpty == false
+                || normalizedBubbleSource(selectedBubbleSource) != nil
         }
     }
 
@@ -362,6 +366,14 @@ struct MapTalkPublishComposer: View {
         )
         .sheet(item: $previewedReelVideo) { video in
             ComposerVideoPlayer(url: video.url)
+        }
+        .sheet(isPresented: $isShowingPhotoTextEditor) {
+            if case let .photo(_, _, image) = selectedMedia {
+                MapTalkPhotoTextEditor(image: image, draft: placePhotoText,
+                    onCancel: { isShowingPhotoTextEditor = false },
+                    onDone: applyPlacePhotoText)
+                    .presentationDetents([.large])
+            }
         }
     }
 
@@ -999,10 +1011,8 @@ struct MapTalkPublishComposer: View {
 
     private var reelFooterRows: some View {
         VStack(spacing: 0) {
-            if !isConnected {
-                bubbleSelector
-                reelRowDivider
-            }
+            bubbleSelector
+            reelRowDivider
 
             reelSettingRow(
                 title: "Location",
@@ -1178,6 +1188,21 @@ struct MapTalkPublishComposer: View {
 
                             Spacer(minLength: 0)
 
+                            if selectedMedia?.isVideo == false {
+                                Button {
+                                    guard !isLoadingMedia, !hasUnconfirmedSubmission else { return }
+                                    isShowingPhotoTextEditor = true
+                                } label: {
+                                    Text("Aa")
+                                        .font(.system(size: 20, weight: .semibold))
+                                        .frame(width: 44, height: 44)
+                                }
+                                .buttonStyle(ComposerPressStyle())
+                                .accessibilityLabel("Add text to photo")
+                                .accessibilityValue(placePhotoText.text)
+                                .accessibilityIdentifier("maptalk.place.photo-text")
+                            }
+
                             Button(action: presentPlaceLibrary) {
                                 Image(systemName: "photo.on.rectangle")
                                     .font(.system(size: 19, weight: .medium))
@@ -1239,7 +1264,7 @@ struct MapTalkPublishComposer: View {
 
     @ViewBuilder
     private var placeMediaVisual: some View {
-        switch selectedMedia {
+        switch editedPlacePhoto ?? selectedMedia {
         case let .photo(_, _, preview):
             Image(uiImage: preview)
                 .resizable()
@@ -2354,6 +2379,7 @@ struct MapTalkPublishComposer: View {
         placeVideoPlayer = nil
         selectedMedia.map(discard)
         selectedMedia = nil
+        resetPlacePhotoText()
         didFailMediaLoad = false
         isTextFocused = false
         submissionIssue = nil
@@ -2449,7 +2475,7 @@ struct MapTalkPublishComposer: View {
                 guard isCreatingLandmark, trimmedLandmarkName.isEmpty == false else { return }
                 target = .new(name: trimmedLandmarkName, category: landmarkCategory)
             }
-            draft = .place(.init(target: target, media: selectedMedia?.ratedPOIMedia))
+            draft = .place(.init(target: target, media: (editedPlacePhoto ?? selectedMedia)?.ratedPOIMedia))
 
         case .reel:
             guard canSubmit else { return }
@@ -2474,6 +2500,7 @@ struct MapTalkPublishComposer: View {
                 if isConnected {
                     placeVideoPlayer?.pause()
                     selectedMedia.map(discard)
+                    editedPlacePhoto.map(discard)
                     reelAssets.forEach(discard)
                 }
             } catch {
@@ -2511,6 +2538,7 @@ struct MapTalkPublishComposer: View {
         reelImportToken = UUID()
         placeVideoPlayer?.pause()
         selectedMedia.map(discard)
+        editedPlacePhoto.map(discard)
         reelAssets.forEach(discard)
         onCancel()
     }
@@ -2520,6 +2548,7 @@ struct MapTalkPublishComposer: View {
         if let selectedMedia, selectedMedia.id != asset.id {
             discard(selectedMedia)
         }
+        resetPlacePhotoText()
         selectedMedia = asset
         submissionIssue = nil
         didFailMediaLoad = false
@@ -2527,6 +2556,56 @@ struct MapTalkPublishComposer: View {
             placeVideoPlayer = AVPlayer(url: url)
         } else {
             placeVideoPlayer = nil
+        }
+    }
+
+    private func resetPlacePhotoText() {
+        editedPlacePhoto.map(discard)
+        editedPlacePhoto = nil
+        placePhotoText = PhotoTextOverlay()
+        isShowingPhotoTextEditor = false
+    }
+
+    private func applyPlacePhotoText(_ overlay: PhotoTextOverlay) {
+        guard case let .photo(sourceID, sourceURL, _) = selectedMedia,
+              !isLoadingMedia, !isSubmitting, !hasUnconfirmedSubmission else { return }
+        isShowingPhotoTextEditor = false
+        let overlay = PhotoTextOverlayRenderer.sanitized(overlay)
+        guard !overlay.isEmpty else {
+            resetPlacePhotoText()
+            return
+        }
+        let token = UUID()
+        mediaImportToken = token
+        isLoadingMedia = true
+        submissionIssue = nil
+        Task { @MainActor in
+            do {
+                // Always render from the original app-owned photo. Editing or
+                // clearing the words must never bake a second layer over them.
+                let imported = try await Task.detached(priority: .userInitiated) {
+                    guard let image = UIImage(contentsOfFile: sourceURL.path) else {
+                        throw ComposerMediaImportError.unreadable
+                    }
+                    let rendered = try PhotoTextOverlayRenderer.render(image: image, overlay: overlay)
+                    let photo = try PublishPhotoNormalizer.prepare(cameraImage: rendered)
+                    let url = try MapTalkMediaStorage.persist(photo.jpegData, fileExtension: "jpg")
+                    return ImportedComposerPhoto(url: url, preview: photo.preview)
+                }.value
+                guard mediaImportToken == token, selectedMedia?.id == sourceID else {
+                    try? FileManager.default.removeItem(at: imported.url)
+                    return
+                }
+                editedPlacePhoto.map(discard)
+                editedPlacePhoto = .photo(id: UUID(), url: imported.url,
+                    preview: UIImage(cgImage: imported.preview.image))
+                placePhotoText = overlay
+                isLoadingMedia = false
+            } catch {
+                guard mediaImportToken == token else { return }
+                isLoadingMedia = false
+                submissionIssue = "Couldn't save the text. Your original photo is still here; try again."
+            }
         }
     }
 

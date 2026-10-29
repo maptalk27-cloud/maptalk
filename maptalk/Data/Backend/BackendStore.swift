@@ -114,6 +114,106 @@ final class BackendStore: ObservableObject {
 
     func user(for id: UUID) -> User? { users[id] }
 
+    /// A cluster is reachable only through its authorized parent Reel. Never
+    /// register its private source snapshots as independent map/feed records.
+    func journey(for id: UUID, publicOnly: Bool = false) -> JourneyPost? {
+        guard isActive, let known = knownMemories[id],
+              let parent = currentRecords([known], publicOnly: publicOnly).first,
+              parent.ownerId == user.id || Self.isPubliclyVisible(parent),
+              let cluster = validatedCluster(in: parent) else { return nil }
+        let members = cluster.members.map { member in
+            var snapshot = member
+            snapshot.cluster = nil
+            return snapshot
+        }
+        let projection = project(members)
+        var references: [JourneyFolder.MemberReference] = []
+        for member in members {
+            let reference: JourneyFolder.MemberReference?
+            if member.kind == "reel" { reference = .reel(member.id) }
+            else { reference = member.place.map { .poi($0.id) } }
+            if let reference, !references.contains(reference) { references.append(reference) }
+        }
+        return JourneyPost(id: cluster.id, userId: parent.ownerId, title: cluster.title, content: "",
+            coordinate: .init(latitude: parent.location.latitude, longitude: parent.location.longitude),
+            createdAt: parent.createdAt, orderedMemberReferences: references,
+            reels: projection.reels, pois: projection.pois, likes: [], comments: [])
+    }
+
+    private func validatedCluster(in parent: BackendMemory) -> BackendCluster? {
+        guard parent.kind == "reel", let cluster = parent.cluster, cluster.id == parent.id,
+              (1...50).contains(cluster.members.count),
+              Set(cluster.members.map(\.id)).count == cluster.members.count,
+              cluster.members.allSatisfy({
+                  $0.id != parent.id && $0.ownerId == parent.ownerId && $0.owner.id == parent.ownerId
+                      && ($0.kind == "reel" || ($0.kind == "poi" && $0.place != nil))
+              }) else { return nil }
+        return cluster
+    }
+
+    private func rebuildClusterCatalogs() {
+        let privateIDs = Set(archive.privateReels.map(\.id))
+        let records = currentRecords(Array(knownMemories.values)).sorted { $0.createdAt > $1.createdAt }
+        archive.replaceServerBubbles(
+            privateBubbles: records.filter { $0.ownerId == user.id && privateIDs.contains($0.id) }
+                .compactMap { journey(for: $0.id) },
+            publicBubbles: records.compactMap { journey(for: $0.id, publicOnly: true) })
+    }
+
+    /// Freeze selection before touching the network. A POI selection means
+    /// this person's exact visits, not the shared place or somebody else's
+    /// visits. Pending visit IDs are stable even if their place is remapped.
+    private func makeClusterSelection(_ source: MapTalkReelBubbleSource, parentID: UUID)
+        throws -> (input: BackendClusterInput, snapshot: BackendCluster) {
+        let references: [JourneyFolder.MemberReference]
+        let title: String
+        switch source {
+        case let .memories(selected):
+            references = selected
+            title = "Bubble"
+        case let .folder(id):
+            guard let folder = archive.journeyFolders.first(where: { $0.id == id && $0.userId == user.id }) else {
+                throw BackendClientError.message("This collection is no longer available. Choose its memories again.")
+            }
+            references = folder.memberReferences
+            let trimmed = folder.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            title = trimmed.isEmpty ? "Bubble" : trimmed
+        }
+        guard title.utf16.count <= 160 else {
+            throw BackendClientError.message("Keep the collection title under 160 characters.")
+        }
+        var members: [BackendMemory] = []
+        var seen = Set<UUID>()
+        for reference in references {
+            let available: Bool
+            switch reference {
+            case let .reel(id): available = archive.privateReels.contains { $0.id == id && $0.userId == user.id }
+            case let .poi(id): available = archive.privatePOIs.contains { $0.id == id }
+            }
+            let selected = manageableMemories(for: reference).sorted {
+                $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt > $1.createdAt
+            }
+            guard available, !selected.isEmpty else {
+                throw BackendClientError.message("A selected memory is no longer available. Choose the cluster again.")
+            }
+            for var member in selected where seen.insert(member.id).inserted {
+                guard member.id != parentID, member.ownerId == user.id,
+                      member.moderationStatus != "rejected",
+                      !localState.queued.contains(where: { $0.id == member.id && $0.cancelled }) else {
+                    throw BackendClientError.message("A selected memory can no longer be shared.")
+                }
+                // V1 snapshots never recursively include another cluster.
+                member.cluster = nil
+                members.append(member)
+            }
+        }
+        guard !members.isEmpty, members.count <= 50 else {
+            throw BackendClientError.message("Choose between 1 and 50 memories for this cluster. Each place visit counts as one memory.")
+        }
+        return (.init(title: title, memoryIds: members.map(\.id)),
+                .init(id: parentID, title: title, members: members))
+    }
+
     /// Comments belong to an existing public post/place, never to a new visit.
     /// Expiry only removes active-map emphasis; it does not close discussion.
     func canComment(on target: BackendCommentTarget) -> Bool {
@@ -628,7 +728,7 @@ final class BackendStore: ObservableObject {
             throw BackendClientError.message("You can edit this reel after it finishes sharing.")
         }
         let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.utf16.count <= 2200, !text.isEmpty || !original.media.isEmpty else {
+        guard text.utf16.count <= 2200, !text.isEmpty || !original.media.isEmpty || original.cluster != nil else {
             throw BackendClientError.message(text.isEmpty ? "Keep a caption on a text-only reel." : "Keep the caption under 2,200 characters.")
         }
         let saved = try await api.updateMemoryCaption(id: memoryID, caption: text)
@@ -636,7 +736,9 @@ final class BackendStore: ObservableObject {
         guard saved.id == memoryID, saved.ownerId == user.id, saved.kind == "reel",
               saved.caption == text, saved.visibility == original.visibility,
               saved.createdAt == original.createdAt, saved.publishedAt == original.publishedAt,
-              saved.media.map(\.id) == original.media.map(\.id) else {
+              saved.media.map(\.id) == original.media.map(\.id),
+              saved.cluster?.id == original.cluster?.id,
+              saved.cluster?.members.map(\.id) == original.cluster?.members.map(\.id) else {
             throw BackendClientError.message("The edit wasn't confirmed. Your text is kept here; please try again.")
         }
         // Invalidate reads begun before PATCH so they cannot roll the card back.
@@ -701,7 +803,7 @@ final class BackendStore: ObservableObject {
         publicContentRevision += 1
         let removedRecords = knownMemories.values.filter { $0.ownerId == id }
         let ids = Set(removedRecords.map(\.id))
-        var mediaIDs = Set(removedRecords.flatMap { $0.media.map(\.id) })
+        var mediaIDs = Set(removedRecords.flatMap { $0.attachedMedia.map(\.id) })
         if let avatar = profileMetadata[id]?.avatar { mediaIDs.insert(avatar.id) }
         refreshGeneration += 1
         refreshTask?.task.cancel()
@@ -715,6 +817,7 @@ final class BackendStore: ObservableObject {
         }
         mediaDisk.remove(mediaIDs)
         knownMemories = knownMemories.filter { $0.value.ownerId != id }
+        rebuildClusterCatalogs()
         profileMetadata.removeValue(forKey: id)
         users.removeValue(forKey: id)
         commentThreads = commentThreads.reduce(into: [:]) { result, entry in
@@ -816,9 +919,9 @@ final class BackendStore: ObservableObject {
             }
             // Shared uploaded photos may still belong to another post. Keep
             // those; purge only assets no remaining known own post references.
-            let retained = Set(ownedMemories.values.flatMap { $0.media.map(\.id) }
+            let retained = Set(ownedMemories.values.flatMap { $0.attachedMedia.map(\.id) }
                 + profileMetadata.values.compactMap { $0.avatar?.id })
-            let removed = Set(original.media.map(\.id)).subtracting(retained)
+            let removed = Set(original.attachedMedia.map(\.id)).subtracting(retained)
             mediaRevision += 1
             for id in removed {
                 mediaDownloads.removeValue(forKey: id)?.cancel()
@@ -828,6 +931,7 @@ final class BackendStore: ObservableObject {
             uploadedMedia = uploadedMedia.filter { !removed.contains($0.value.id) }
             mediaDisk.remove(removed)
         }
+        rebuildClusterCatalogs()
         publicContentChanges.send(ids)
     }
 
@@ -882,8 +986,12 @@ final class BackendStore: ObservableObject {
                 }
             }
         case let .reel(reel):
-            guard reel.bubbleSource == nil else {
-                throw BackendClientError.message("Bubble publishing is not connected to the local server yet. Your draft is kept; remove the Bubble to test a photo or text Reel.")
+            if let source = reel.bubbleSource {
+                let cluster = try makeClusterSelection(source, parentID: requestID).input
+                input.cluster = cluster
+                guard !localState.queued.contains(where: { cluster.memoryIds.contains($0.id) }) else {
+                    throw BackendClientError.message("The selected memories are still uploading. Keep this draft and try again when they finish.")
+                }
             }
             input.caption = reel.text
             for attachment in reel.attachments {
@@ -968,6 +1076,7 @@ final class BackendStore: ObservableObject {
         // Do not keep the composer open and invite an accidental second post.
         if let reel = projection.reels.first {
             archive.saveReel(reel, audience: visibleAudience)
+            rebuildClusterCatalogs()
             if visibleAudience == .livePublic {
                 ownPublicReels.removeAll { $0.id == reel.id }
                 ownPublicReels.insert(reel, at: 0)
@@ -1025,6 +1134,11 @@ final class BackendStore: ObservableObject {
         if let directoryKind = input.place?.directoryKind {
             intent.append("directoryKind=\(directoryKind)")
         }
+        if let cluster = input.cluster {
+            // Add no component for legacy inputs: old retries remain identical.
+            intent.append("clusterTitle=\(cluster.title)")
+            intent.append("clusterMembers=\(cluster.memoryIds.map(\.uuidString).joined(separator: ","))")
+        }
         return intent.joined(separator: "\u{0}")
     }
 
@@ -1052,7 +1166,7 @@ final class BackendStore: ObservableObject {
             blockedUserIDs = saved.blocked
             mapExcludedMemoryIDs = saved.mapExcludedMemoryIDs ?? []
             remember(saved.mine + saved.profile + saved.feed)
-            await loadCachedMedia(saved.mine + saved.profile + saved.feed, identity: saved.user)
+            await loadCachedMedia(saved.mine + saved.profile + saved.feed + saved.queued.map(\.record), identity: saved.user)
             try requireActive()
             applyProfile(saved.user)
             rebuildLocalProjections()
@@ -1150,7 +1264,7 @@ final class BackendStore: ObservableObject {
     }
 
     private func loadCachedMedia(_ records: [BackendMemory], identity: BackendUser) async {
-        let items = records.flatMap(\.media) + records.compactMap { $0.owner.avatar } + [identity.avatar].compactMap { $0 }
+        let items = records.flatMap(\.attachedMedia) + records.compactMap { $0.owner.avatar } + [identity.avatar].compactMap { $0 }
         for item in items where localMedia[item.id] == nil {
             if let url = try? await mediaDisk.cachedURL(for: item.id, mimeType: item.mimeType), isActive {
                 localMedia[item.id] = url
@@ -1182,6 +1296,14 @@ final class BackendStore: ObservableObject {
                 let poster = stateDisk.posterURL(photo.id)
                 if photo.isVideo, FileManager.default.fileExists(atPath: poster.path) { localPosters[photo.id] = poster }
             }
+            for preview in entry.clusterPreviews ?? [] {
+                if localMedia[preview.mediaID].map({ FileManager.default.fileExists(atPath: $0.path) }) != true {
+                    localMedia[preview.mediaID] = stateDisk.mediaURL(preview.file)
+                }
+                let poster = stateDisk.posterURL(preview.file.id)
+                if preview.file.isVideo, localPosters[preview.mediaID] == nil,
+                   FileManager.default.fileExists(atPath: poster.path) { localPosters[preview.mediaID] = poster }
+            }
         }
         let queuedIDs = Set(queued.map(\.id))
         let mine = currentRecords(localState.mine).filter { !queuedIDs.contains($0.id) } + queued.map(\.record)
@@ -1190,6 +1312,7 @@ final class BackendStore: ObservableObject {
         let publicProjection = project(currentRecords(localState.profile, publicOnly: true))
         let activeProjection = project(currentRecords(localState.feed, publicOnly: true))
         archive.replaceServerRecords(pois: privateProjection.pois, reels: privateProjection.reels)
+        rebuildClusterCatalogs()
         ownPublicPOIs = publicProjection.pois
         ownPublicReels = publicProjection.reels
         feedPOIs.send(activeProjection.pois)
@@ -1234,10 +1357,13 @@ final class BackendStore: ObservableObject {
         var contentTypes: [String] = []
         var posters: [URL?] = []
         var place: BackendPlace?
+        var cluster: BackendCluster?
         switch draft {
         case let .reel(reel):
-            guard reel.bubbleSource == nil else {
-                throw BackendClientError.message("Bubble publishing isn't available yet. Remove the Bubble to save this Reel.")
+            if let source = reel.bubbleSource {
+                let selection = try makeClusterSelection(source, parentID: requestID)
+                input.cluster = selection.input
+                cluster = selection.snapshot
             }
             input.caption = reel.text
             for attachment in reel.attachments {
@@ -1278,10 +1404,23 @@ final class BackendStore: ObservableObject {
         let record = BackendMemory(id: requestID, ownerId: user.id, owner: localState.user, kind: input.kind,
             visibility: "private", location: input.location, caption: input.caption ?? "", place: place,
             media: photos.map { BackendMedia(id: $0.id, mimeType: $0.contentType, byteCount: 0, path: "/v1/media/\($0.id.uuidString.lowercased())") },
-            createdAt: capturedAt, publishedAt: nil, expiresAt: .distantFuture, moderationStatus: "local_pending")
-        let entry = QueuedPublication(input: input, record: record, photos: photos)
+            createdAt: capturedAt, publishedAt: nil, expiresAt: .distantFuture, moderationStatus: "local_pending",
+            cluster: cluster)
+        var entry = QueuedPublication(input: input, record: record, photos: photos)
         try await stateDisk.copyMedia(sources, items: photos, posters: posters)
         do {
+            // Keep any already-available member media with the durable intent,
+            // including across sign-out or source-upload file cleanup.
+            var seen = Set<UUID>()
+            let previewMedia = (cluster?.members.flatMap(\.media) ?? []).filter {
+                seen.insert($0.id).inserted && localMedia[$0.id] != nil
+            }
+            let previews = previewMedia.map {
+                QueuedPublication.ClusterPreview(mediaID: $0.id, file: .init(id: UUID(), mimeType: $0.mimeType))
+            }
+            entry.clusterPreviews = previews.isEmpty ? nil : previews
+            try await stateDisk.copyMedia(previewMedia.compactMap { localMedia[$0.id] },
+                items: previews.map(\.file), posters: previewMedia.map { localPosters[$0.id] })
             try requireActive()
             localState.queued.append(entry)
             try await persistLocalState()
@@ -1290,7 +1429,7 @@ final class BackendStore: ObservableObject {
             // next sign-in. Never delete its photos after that handoff.
             if isActive {
                 localState.queued.removeAll { $0.id == requestID }
-                stateDisk.removePhotos(photos.map(\.id))
+                stateDisk.removePhotos(photos.map(\.id) + (entry.clusterPreviews ?? []).map { $0.file.id })
             }
             throw error
         }
@@ -1332,7 +1471,14 @@ final class BackendStore: ObservableObject {
     private func schedulePendingRetry() {
         guard automaticallySync, isActive, syncAuthorized, connectionAvailable != false,
               !backgroundExecutionExpired else { return }
-        let dates = localState.queued.filter { $0.cancelled || $0.failure == nil }
+        let dates = localState.queued.filter { entry in
+            if entry.cancelled { return true }
+            guard entry.failure == nil else { return false }
+            // A blocked source owns its retry/error UI. Do not wake forever
+            // just to discover that its dependent cluster is still waiting.
+            guard let cluster = entry.input.cluster else { return true }
+            return !localState.queued.contains { cluster.memoryIds.contains($0.id) }
+        }
             .map { syncRetryDates[$0.id] ?? Date() }
         guard let next = dates.min() else { return }
         let delay = max(0.01, next.timeIntervalSinceNow)
@@ -1376,6 +1522,14 @@ final class BackendStore: ObservableObject {
         for id in ids {
             guard let entry = localState.queued.first(where: { $0.id == id }), entry.cancelled || entry.failure == nil else { continue }
             if respectingBackoff, let next = syncRetryDates[id], next > Date() { continue }
+            if !entry.cancelled, let cluster = entry.input.cluster,
+               localState.queued.contains(where: { cluster.memoryIds.contains($0.id) }) {
+                // Sources can fail/back off independently. Never send the
+                // parent early (404), nor permanently fail it just for waiting.
+                pendingPublications[id] = .waiting
+                syncRetryDates[id] = Date().addingTimeInterval(max(1, retryDelay(1)))
+                continue
+            }
             currentSyncID = id
             var reconcilingVideoUpload = false
             do {
@@ -1453,6 +1607,17 @@ final class BackendStore: ObservableObject {
                         localPosters[media.id] = try await mediaDisk.cachedPosterURL(for: media.id)
                     }
                 }
+                let clusterMedia = Dictionary((saved.cluster?.members.flatMap(\.media) ?? [])
+                    .map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                for preview in sending.clusterPreviews ?? [] {
+                    guard let media = clusterMedia[preview.mediaID] else { continue }
+                    let url = stateDisk.mediaURL(preview.file)
+                    let data = try await Task.detached { try Data(contentsOf: url) }.value
+                    localMedia[media.id] = try await mediaDisk.write(data, for: media.id, mimeType: media.mimeType)
+                    if media.mimeType == "video/mp4" {
+                        localPosters[media.id] = try await mediaDisk.cachedPosterURL(for: media.id)
+                    }
+                }
                 try requireActive()
                 if localState.queued.first(where: { $0.id == id })?.cancelled == true {
                     try await finishCancelledPublication(id)
@@ -1465,6 +1630,7 @@ final class BackendStore: ObservableObject {
                         localState.queued[index].record.place = saved.place
                     }
                 }
+                remapQueuedClusterSource(from: sending.record, to: saved)
                 localState.mine.removeAll { $0.id == id }
                 localState.mine.insert(saved, at: 0)
                 if Self.isPubliclyVisible(saved) {
@@ -1482,7 +1648,7 @@ final class BackendStore: ObservableObject {
                     localState.queued.append(sending)
                     throw error
                 }
-                stateDisk.removePhotos(sending.photos.map(\.id))
+                stateDisk.removePhotos(sending.photos.map(\.id) + (sending.clusterPreviews ?? []).map { $0.file.id })
                 syncRetryCounts.removeValue(forKey: id)
                 syncRetryDates.removeValue(forKey: id)
                 for item in sending.photos {
@@ -1528,6 +1694,29 @@ final class BackendStore: ObservableObject {
     private func canUpdatePublicationProgress(_ id: UUID) -> Bool {
         isActive && !Task.isCancelled && currentSyncID == id
             && localState.queued.contains { $0.id == id && !$0.cancelled }
+    }
+
+    /// Source post IDs never change. Only provisional media/place identities
+    /// change on confirmation; keep the selected caption/order frozen locally.
+    private func remapQueuedClusterSource(from original: BackendMemory, to saved: BackendMemory) {
+        let mediaIDs = Dictionary(zip(original.media.map(\.id), saved.media.map(\.id)), uniquingKeysWith: { first, _ in first })
+        for index in localState.queued.indices {
+            guard var cluster = localState.queued[index].record.cluster,
+                  let memberIndex = cluster.members.firstIndex(where: { $0.id == original.id }) else { continue }
+            let member = cluster.members[memberIndex]
+            cluster.members[memberIndex] = BackendMemory(id: member.id, ownerId: member.ownerId, owner: member.owner,
+                kind: member.kind, visibility: member.visibility, location: member.location, caption: member.caption,
+                place: saved.place, media: saved.media, createdAt: member.createdAt, publishedAt: saved.publishedAt,
+                expiresAt: saved.expiresAt, moderationStatus: saved.moderationStatus)
+            localState.queued[index].record.cluster = cluster
+            if let previews = localState.queued[index].clusterPreviews {
+                localState.queued[index].clusterPreviews = previews.map { preview in
+                    var updated = preview
+                    updated.mediaID = mediaIDs[preview.mediaID] ?? preview.mediaID
+                    return updated
+                }
+            }
+        }
     }
 
     private func publicationFailureMessage(_ error: Error) -> String {
@@ -1577,7 +1766,11 @@ final class BackendStore: ObservableObject {
         localState.queued.removeAll { $0.id == id }
         do { try await persistLocalState() }
         catch { localState.queued.append(entry); throw error }
-        stateDisk.removePhotos(entry.photos.map(\.id))
+        stateDisk.removePhotos(entry.photos.map(\.id) + (entry.clusterPreviews ?? []).map { $0.file.id })
+        for preview in entry.clusterPreviews ?? [] where localMedia[preview.mediaID] == stateDisk.mediaURL(preview.file) {
+            localMedia.removeValue(forKey: preview.mediaID)
+            localPosters.removeValue(forKey: preview.mediaID)
+        }
         // Cancellation can arrive while a confirmed upload is being copied to
         // the playback cache. Remove both provisional and server media IDs.
         let cancelledMedia = Set(entry.photos.map(\.id) + entry.photos.compactMap { $0.uploaded?.id })
@@ -1638,6 +1831,7 @@ final class BackendStore: ObservableObject {
         user.avatarURL = nil
         users = [user.id: user]
         archive.replaceServerRecords(pois: [], reels: [])
+        archive.replaceServerBubbles(privateBubbles: [], publicBubbles: [])
         ownPublicPOIs = []
         ownPublicReels = []
         feedPOIs.send([])
@@ -1665,7 +1859,7 @@ final class BackendStore: ObservableObject {
                 knownPlaceIDs.insert(place.id)
                 if let sourceID = place.sourceId { placeAliases[sourceID] = place.id }
             }
-            for media in record.media where localMedia[media.id] == nil { mediaByID[media.id] = media }
+            for media in record.attachedMedia where localMedia[media.id] == nil { mediaByID[media.id] = media }
             if record.ownerId != user.id, let avatar = record.owner.avatar, localMedia[avatar.id] == nil {
                 mediaByID[avatar.id] = avatar
             }
@@ -1751,7 +1945,7 @@ final class BackendStore: ObservableObject {
                 reels.append(RealPost(id: record.id, userId: record.ownerId,
                     center: .init(latitude: record.location.latitude, longitude: record.location.longitude),
                     radiusMeters: 220, message: record.caption.isEmpty ? nil : record.caption,
-                    attachments: attachments, likes: [], comments: [],
+                    attachments: attachments, capsuleId: validatedCluster(in: record)?.id, likes: [], comments: [],
                     visibility: record.visibility == "public" ? .publicAll : .privateOnly,
                     createdAt: record.createdAt, expiresAt: Self.publicExpiry(for: record), publishedAt: record.publishedAt))
             } else if let place = record.place {

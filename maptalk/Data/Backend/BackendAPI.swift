@@ -112,6 +112,25 @@ nonisolated struct BackendMemory: Codable, Sendable {
     let publishedAt: Date?
     let expiresAt: Date
     var moderationStatus: String? = nil
+    // Optional for pre-cluster server responses and durable offline caches.
+    var cluster: BackendCluster? = nil
+
+    /// Embedded snapshots are attachments, never independently discoverable
+    /// memories. Only their media participates in the parent's hydration.
+    var attachedMedia: [BackendMedia] {
+        media + (cluster?.members.flatMap(\.media) ?? [])
+    }
+}
+
+nonisolated struct BackendCluster: Codable, Sendable {
+    let id: UUID
+    let title: String
+    var members: [BackendMemory]
+}
+
+nonisolated struct BackendClusterInput: Codable, Sendable {
+    let title: String
+    let memoryIds: [UUID]
 }
 
 nonisolated struct BackendMemoryPage: Decodable, Sendable {
@@ -137,6 +156,7 @@ nonisolated struct BackendMemoryInput: Codable, Sendable {
     var place: BackendPlaceInput? = nil
     var placeId: UUID? = nil
     var capturedAt: String? = nil
+    var cluster: BackendClusterInput? = nil
 }
 
 nonisolated enum BackendCommentTarget: Hashable, Sendable {

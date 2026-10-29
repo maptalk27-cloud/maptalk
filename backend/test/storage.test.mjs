@@ -73,7 +73,7 @@ test('schema upgrades preserve existing private and public records', async () =>
     insert.run('public-id', 'public');
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     const rows = db.prepare('SELECT * FROM memories ORDER BY id').all();
     assert.equal(rows.length, 2);
     assert.equal(rows[0].visibility, 'private');
@@ -103,7 +103,7 @@ test('version two databases acquire archive/source tables without changing recor
     db.exec('DROP TABLE comments; DROP TABLE place_sources; DROP TABLE archive_hidden; PRAGMA user_version = 2;');
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     assert.equal(db.prepare('SELECT caption FROM memories').get().caption, 'Kept');
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM archive_hidden').get().count, 0);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM place_sources').get().count, 0);
@@ -124,7 +124,7 @@ test('version three upgrade adds Apple identities without changing existing acco
     db.exec('DROP TABLE comments; DROP TABLE auth_identities; DROP TABLE apple_auth_challenges; PRAGMA user_version = 3;');
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     assert.equal(db.prepare('SELECT password_hash FROM users').get().password_hash, 'existing-password-hash');
     assert.equal(db.prepare('SELECT token_hash FROM sessions').get().token_hash, digest(session.token));
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM auth_identities').get().count, 0);
@@ -161,7 +161,7 @@ test('version four upgrade preserves Apple identities, sessions and content whil
     `);
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     assert.equal(db.prepare('SELECT provider_subject FROM auth_identities').get().provider_subject, 'stable-apple-sub');
     assert.equal(db.prepare('SELECT token_hash FROM sessions').get().token_hash, digest(session.token));
     assert.equal(db.prepare('SELECT caption FROM memories').get().caption, 'Kept');
@@ -205,7 +205,7 @@ test('version six migration approves only pending records and preserves privacy,
     const safety = Object.fromEntries(safetyTables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
     db.close();
     db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     assert.deepEqual(db.prepare('SELECT * FROM memories ORDER BY id').all().map(row => ({ ...row })), before.map(row => ({ ...row,
       moderation_status: row.moderation_status === 'pending' ? 'approved' : row.moderation_status })));
     for (const table of safetyTables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), safety[table], table);
@@ -242,7 +242,7 @@ test('version seven adds retry mappings without changing media, records, avatars
     const tables = ['users', 'media', 'user_profiles', 'memories', 'memory_media', 'deleted_memories'];
     const before = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
     db.close(); db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     for (const table of tables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table]);
     db.prepare('INSERT INTO media_upload_requests VALUES (?, ?, ?, ?, ?)').run('owner', 'key', 'hash', 'photo', 6);
     db.exec("DELETE FROM memories; UPDATE user_profiles SET avatar_media_id = NULL; DELETE FROM media;");
@@ -287,7 +287,7 @@ test('version eight media rebuild preserves exact bytes, avatars, links and retr
     const tables = ['users', 'media', 'user_profiles', 'memories', 'memory_media', 'media_upload_requests'];
     const before = Object.fromEntries(tables.map(table => [table, db.prepare(`SELECT * FROM ${table}`).all()]));
     db.close(); db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     assert.equal(db.prepare('PRAGMA foreign_keys').get().foreign_keys, 1);
     for (const table of tables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table], table);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
@@ -327,7 +327,7 @@ test('version nine additive upload migration preserves all existing rows and bac
     const priorBackup = join(directory, 'before.sqlite');
     await backupDatabase(path, priorBackup);
     db.close(); db = openDatabase(path);
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
     for (const table of tables) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all(), before[table], table);
     restored = openDatabase(priorBackup);
     for (const table of tables) assert.deepEqual(restored.prepare(`SELECT * FROM ${table}`).all(), before[table], `backup ${table}`);
@@ -383,7 +383,7 @@ test('version ten airport metadata migration preserves every old row and resumab
     db.close(); db = openDatabase(path);
     restored = openDatabase(backup);
     for (const database of [db, restored]) {
-      assert.equal(database.prepare('PRAGMA user_version').get().user_version, 12);
+      assert.equal(database.prepare('PRAGMA user_version').get().user_version, 13);
       assert.deepEqual(database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name), [...tables, 'comments'].sort());
       assert.equal(database.prepare('SELECT COUNT(*) AS n FROM comments').get().n, 0);
       for (const table of tables) {
@@ -437,7 +437,7 @@ test('version eleven comments migration only adds empty discussion storage and p
     await backupDatabase(path, backup);
     db.close(); db = openDatabase(path); restored = openDatabase(backup);
     for (const current of [db, restored]) {
-      assert.equal(current.prepare('PRAGMA user_version').get().user_version, 12);
+      assert.equal(current.prepare('PRAGMA user_version').get().user_version, 13);
       for (const table of tables) assert.deepEqual(current.prepare(`SELECT * FROM ${table}`).all(), before[table], table);
       assert.equal(current.prepare('SELECT COUNT(*) AS n FROM comments').get().n, 0);
       assert.deepEqual(current.prepare('PRAGMA foreign_key_check').all(), []);

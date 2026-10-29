@@ -40,6 +40,8 @@ struct LikesAvatarGrid: View {
 
     @State private var viewerState: POIStoryViewerState?
     @State private var containerWidth: CGFloat = 0
+    @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
+    @State private var childPresentationID = UUID()
     private var columns: [GridItem] {
         gridColumns(for: containerWidth)
     }
@@ -64,6 +66,7 @@ struct LikesAvatarGrid: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("experience.poi.footprint.\(info.contributor.userId.uuidString)")
                     } else if let user = entry.user {
                         Button {
                             onUserSelected(user)
@@ -71,6 +74,7 @@ struct LikesAvatarGrid: View {
                             AvatarSquare(user: entry.user, endorsement: entry.endorsement)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("experience.poi.footprint.\(user.id.uuidString)")
                     } else {
                         AvatarSquare(user: entry.user, endorsement: entry.endorsement)
                     }
@@ -82,6 +86,12 @@ struct LikesAvatarGrid: View {
         .padding(.horizontal, ExperienceSheetLayout.engagementHorizontalInset)
         .background(ContainerWidthReader())
         .onPreferenceChange(LikesAvatarGridWidthPreferenceKey.self) { containerWidth = $0 }
+        .onChangeCompat(of: viewerState != nil) { presented in
+            childPresentationChanged?(childPresentationID, presented)
+        }
+        .onDisappear {
+            if viewerState == nil { childPresentationChanged?(childPresentationID, false) }
+        }
         .fullScreenCover(item: $viewerState) { state in
             POIStoryViewer(
                 contributors: storyContributors,
@@ -94,6 +104,10 @@ struct LikesAvatarGrid: View {
             ) {
                 viewerState = nil
             }
+            .environment(\.friendStoryExpectedMedia, [])
+            .environment(\.friendStoryOnMediaReady, nil)
+            .environment(\.friendStoryPlaybackEnabled, true)
+            .environment(\.friendStoryChildPresentationChanged, nil)
             .preferredColorScheme(.dark)
         }
     }
@@ -435,6 +449,8 @@ struct POIStoryViewer: View {
                                   isPlaybackActive: isPlaybackActive)
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .clipped()
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("experience.poi-story.media.\(item.id.uuidString)")
                 } else {
                     Color.black
                 }
@@ -496,6 +512,8 @@ struct POIStoryViewer: View {
                     .foregroundStyle(.white.opacity(0.85))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Close place story")
+            .accessibilityIdentifier("experience.poi-story.close")
         }
     }
 

@@ -233,16 +233,19 @@ private extension View {
     @ViewBuilder
     func collapsedPreviewTap(_ action: (() -> Void)?) -> some View {
         if let action {
-            contentShape(Rectangle())
-                // The compact card itself opens the full interaction, but the
-                // surrounding TabView still owns horizontal paging. A regular
-                // gesture here cancels that pager before it can recognize.
-                .simultaneousGesture(
-                    TapGesture().onEnded(action),
-                    including: .gesture
-                )
+            // Only otherwise unhandled taps expand the card. An ancestor
+            // simultaneous gesture also catches photo/profile/Bubble taps,
+            // replacing the compact branch while it is presenting a child.
+            background {
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: action)
+                    .accessibilityHidden(true)
+            }
                 .accessibilityAddTraits(.isButton)
                 .accessibilityHint("Open details")
+                .accessibilityAction(.default, action)
         } else {
             self
         }

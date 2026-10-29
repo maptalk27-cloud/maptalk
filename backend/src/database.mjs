@@ -13,7 +13,7 @@ export function openDatabase(databasePath) {
     chmodSync(path, 0o600);
     db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 12) throw new Error('Database is newer than this server; refusing to open it.');
+    if (version > 13) throw new Error('Database is newer than this server; refusing to open it.');
     if (version === 0) {
       transaction(db, () => {
         db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
@@ -261,6 +261,27 @@ export function openDatabase(databasePath) {
           CREATE INDEX comments_place_time ON comments(place_id, created_at DESC, id DESC);
           CREATE INDEX comments_author_time ON comments(user_id, created_at DESC);
           PRAGMA user_version = 12;
+        `);
+      });
+    }
+    if (version < 13) {
+      transaction(db, () => {
+        db.exec(`
+          -- A cluster is an immutable authored attachment, not a live folder or
+          -- a foreign key to its source records. Deleting a source keeps it intact.
+          CREATE TABLE IF NOT EXISTS memory_clusters (
+            memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+            title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 160),
+            members_json TEXT NOT NULL CHECK(json_valid(members_json)
+              AND json_type(members_json) = 'array' AND json_array_length(members_json) BETWEEN 1 AND 50)
+          ) STRICT;
+          CREATE TABLE IF NOT EXISTS cluster_media (
+            memory_id TEXT NOT NULL REFERENCES memory_clusters(memory_id) ON DELETE CASCADE,
+            media_id TEXT NOT NULL REFERENCES media(id),
+            PRIMARY KEY(memory_id, media_id)
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS cluster_media_asset ON cluster_media(media_id);
+          PRAGMA user_version = 13;
         `);
       });
     }

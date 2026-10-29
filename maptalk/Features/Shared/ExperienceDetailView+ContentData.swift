@@ -219,7 +219,19 @@ extension ExperienceDetailView {
     }
 
     func galleryItems(for ratedPOI: RatedPOI) -> [MediaDisplayItem] {
-        ratedPOI.media.map(mediaDisplayItem)
+        if let selection = poiStorySelection {
+            return selection.media.map { [mediaDisplayItem($0)] } ?? []
+        }
+        return ratedPOI.media.map(mediaDisplayItem)
+    }
+
+    /// Only the media/people interaction is scoped. Counts, comments, category
+    /// and endorsements continue to describe the original shared place.
+    func poiStoryCheckIns(for ratedPOI: RatedPOI) -> [RatedPOI.CheckIn] {
+        guard let selection = poiStorySelection else { return ratedPOI.checkIns }
+        var visit = selection.checkIn
+        visit.media = selection.media.map { [$0] } ?? []
+        return [visit]
     }
 
     func mediaDisplayItem(_ media: RatedPOI.Media) -> MediaDisplayItem {
@@ -261,7 +273,7 @@ extension ExperienceDetailView {
             }
         }
 
-        let mediaCheckIns = ratedPOI.checkIns.filter { checkIn in
+        let mediaCheckIns = poiStoryCheckIns(for: ratedPOI).filter { checkIn in
             checkIn.media.contains(where: isStoryEligibleMedia)
         }
         guard mediaCheckIns.isEmpty == false else { return [] }
@@ -306,7 +318,9 @@ extension ExperienceDetailView {
     }
 
     func checkInEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {
-        ratedPOI.checkInPeople().map { person in
+        var peopleSource = ratedPOI
+        peopleSource.checkIns = poiStoryCheckIns(for: ratedPOI)
+        return peopleSource.checkInPeople().map { person in
             let checkIn = person.latest
             let endorsement = checkIn.endorsement
             let kind: FriendEngagement.Kind = endorsement == nil ? .like : .rating

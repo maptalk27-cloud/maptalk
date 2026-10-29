@@ -20,9 +20,13 @@ struct BackendCaptionEditor: View {
     }
 
     private var canSave: Bool {
+        Self.canSave(caption: caption, for: memory, isSaving: saving)
+    }
+
+    static func canSave(caption: String, for memory: BackendMemory, isSaving: Bool) -> Bool {
         let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !saving && text != memory.caption && text.utf16.count <= 2200
-            && (!text.isEmpty || !memory.media.isEmpty)
+        return !isSaving && text != memory.caption && text.utf16.count <= 2200
+            && (!text.isEmpty || !memory.media.isEmpty || memory.cluster != nil)
     }
 
     var body: some View {

@@ -5,9 +5,16 @@ import { link, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { openDatabase } from '../src/database.mjs';
+import { openDatabase as openCurrentDatabase } from '../src/database.mjs';
 import { backupDatabase } from '../src/backup.mjs';
 import { verifySchema12Copies } from '../scripts/verify-schema12.mjs';
+
+// Preserve the exact historical 11 -> 12 verifier fixtures after schema 13.
+function openDatabase(path) {
+  const db = openCurrentDatabase(path);
+  db.exec('DROP TABLE cluster_media; DROP TABLE memory_clusters; PRAGMA user_version = 12;');
+  return db;
+}
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'maptalk-schema12-verification-'));

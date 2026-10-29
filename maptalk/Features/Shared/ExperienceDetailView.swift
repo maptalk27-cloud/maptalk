@@ -20,6 +20,14 @@ struct ExperienceDetailView: View {
         case journey(JourneyPost)
     }
 
+    /// A story selects one authentic visit slice without changing the shared
+    /// place's metadata, statistics or discussion. A nil media value is an
+    /// intentionally empty slice, including media that has not downloaded yet.
+    struct POIStorySelection {
+        let checkIn: RatedPOI.CheckIn
+        let media: RatedPOI.Media?
+    }
+
     struct SequencePager {
         struct Item: Identifiable {
             let id: UUID
@@ -141,6 +149,7 @@ struct ExperienceDetailView: View {
     let standaloneMode: Mode?
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
+    let poiStorySelection: POIStorySelection?
     let onCollapsedTap: (() -> Void)?
     let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
     let journeyProvider: (UUID) -> JourneyPost?
@@ -161,6 +170,7 @@ struct ExperienceDetailView: View {
     init(
         mode: Mode,
         isExpanded: Bool = true,
+        poiStorySelection: POIStorySelection? = nil,
         onCollapsedTap: (() -> Void)? = nil,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         journeyProvider: @escaping (UUID) -> JourneyPost? = { _ in nil },
@@ -176,6 +186,7 @@ struct ExperienceDetailView: View {
         self.standaloneMode = mode
         self.sequenceContext = nil
         self.isExpanded = isExpanded
+        self.poiStorySelection = poiStorySelection
         self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.journeyProvider = journeyProvider
@@ -198,6 +209,7 @@ struct ExperienceDetailView: View {
         self.standaloneMode = nil
         self.sequenceContext = nil
         self.isExpanded = isExpanded
+        self.poiStorySelection = nil
         self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.journeyProvider = journeyProvider
@@ -221,6 +233,7 @@ struct ExperienceDetailView: View {
         self.standaloneMode = nil
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
+        self.poiStorySelection = nil
         self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.journeyProvider = journeyProvider
@@ -321,7 +334,7 @@ struct ExperienceDetailView: View {
         case let .real(post, _):
             return [.init(id: post.id, ownerID: post.userId, title: "Post")]
         case let .poi(place):
-            return place.checkIns.map {
+            return poiStoryCheckIns(for: place).map {
                 .init(id: $0.id, ownerID: $0.userId,
                       title: "\($0.userId == backend.user.id ? "Your check-in" : "@\(backend.user(for: $0.userId)?.handle ?? "member")") · \($0.createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute().second()))")
             }

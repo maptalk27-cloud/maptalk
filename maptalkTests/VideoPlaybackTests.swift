@@ -49,6 +49,53 @@ struct VideoPlaybackTests {
         #expect(layer.player == nil)
     }
 
+    @Test(.timeLimit(.minutes(1))) @MainActor
+    func bundledVideoPlaysAndLoopsWithoutStoryProgressCallbacks() async throws {
+        let resource = "istockphoto-1467181036-640_adpp_is"
+        let url = try #require(Bundle.main.url(forResource: resource, withExtension: "mp4")
+            ?? Bundle.main.url(forResource: resource, withExtension: "mp4", subdirectory: "Mock"))
+        try #require(url.isFileURL, "Playback must use the bundled asset, never the network")
+        let duration = try await AVURLAsset(url: url).load(.duration).seconds
+        try #require(duration.isFinite && duration > 0 && duration < 10)
+
+        let view = ExperienceDetailView.LoopingVideoPlayerView.PlayerContainerView(
+            frame: CGRect(x: 0, y: 0, width: 180, height: 320)
+        )
+        defer { view.cleanup() }
+        view.configure(with: url, muted: true, videoGravity: .resizeAspect)
+        let layer = try #require(view.layer as? AVPlayerLayer)
+        let player = try #require(layer.player)
+        view.setPlaying(true)
+
+        // Observe the real player's queue advancing into another loop. No
+        // story timer, progress callback or synthetic end event drives it.
+        // SuspendingClock excludes Mac sleep from this bounded playback wait.
+        let clock = SuspendingClock()
+        let deadline = clock.now.advanced(by: .seconds(duration + 5))
+        var firstPlayingItem: AVPlayerItem?
+        var furthestFirstCycleTime: TimeInterval = 0
+        var playedAnotherLoop = false
+        while clock.now < deadline {
+            if player.timeControlStatus == .playing, let item = player.currentItem {
+                let elapsed = player.currentTime().seconds
+                if elapsed.isFinite, elapsed > 0.1 {
+                    if firstPlayingItem == nil { firstPlayingItem = item }
+                    if item === firstPlayingItem {
+                        furthestFirstCycleTime = max(furthestFirstCycleTime, elapsed)
+                    } else if furthestFirstCycleTime >= duration * 0.8 {
+                        playedAnotherLoop = true
+                        break
+                    }
+                }
+            }
+            try await clock.sleep(for: .milliseconds(50))
+        }
+        #expect(playedAnotherLoop,
+                "The selected video must keep looping without advancing stories; reached \(furthestFirstCycleTime) of \(duration) seconds")
+        #expect(layer.player === player)
+        #expect(player.isMuted)
+    }
+
     @Test @MainActor
     func audibleSessionIsScopedMixableAndRestoresPreviousConfiguration() {
         let session = PlaybackAudioSessionSpy()

@@ -149,6 +149,90 @@ final class PublishComposerUITests: XCTestCase {
     }
 
     @MainActor
+    func testPlacePhotoTextCanBeEditedCancelledAndCleared() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        openPlace(in: app)
+        XCTAssertFalse(app.buttons["maptalk.place.photo-text"].exists)
+        app.buttons["Choose from library"].tap()
+        let photo = app.images.matching(NSPredicate(
+            format: "label CONTAINS[c] 'Photo' AND NOT label CONTAINS[c] 'Video'"
+        )).firstMatch
+        XCTAssertTrue(photo.waitForExistence(timeout: 15), "The existing simulator needs a photo fixture")
+        let frame = photo.frame
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: frame.midX, dy: frame.midY)).tap()
+        let edit = app.buttons["maptalk.place.photo-text"]
+        waitUntilHittable(edit)
+        edit.tap()
+        let input = app.textViews["maptalk.photo-text.input"]
+        waitUntilHittable(input)
+        input.tap()
+        input.typeText("A quiet morning")
+        let done = app.buttons["maptalk.photo-text.done"]
+        waitUntilHittable(done)
+        XCTAssertTrue(app.keyboards.firstMatch.exists)
+        XCTAssertLessThan(input.frame.maxY, app.keyboards.firstMatch.frame.minY,
+                          "Photo words must remain visible while typing")
+        attachScreenshot(app, name: "POI photo text editor above keyboard")
+        done.tap()
+        let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            edit.exists && edit.value as? String == "A quiet morning"
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 10), .completed)
+        attachScreenshot(app, name: "Words rendered into POI photo preview")
+        edit.tap()
+        waitUntilHittable(input)
+        XCTAssertEqual(input.value as? String, "A quiet morning")
+        input.tap()
+        input.typeText(" changed")
+        app.buttons["maptalk.photo-text.cancel"].tap()
+        waitUntilHittable(edit)
+        XCTAssertEqual(edit.value as? String, "A quiet morning")
+        edit.tap()
+        app.buttons["maptalk.photo-text.clear"].tap()
+        done.tap()
+        waitUntilHittable(edit)
+        XCTAssertEqual(edit.value as? String, "")
+        app.buttons["maptalk.place.retake"].tap()
+        XCTAssertFalse(edit.exists)
+        XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
+    }
+
+    @MainActor
+    func testReelCanAttachAClusterWithoutAddingAnotherPhotoOrCaption() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        waitUntilHittable(app.buttons["Share a reel"])
+        app.buttons["Share a reel"].tap()
+        let choose = app.buttons["maptalk.reel.choose-bubble"]
+        waitUntilHittable(choose)
+        XCTAssertFalse(app.buttons["maptalk.reel.publish"].isEnabled)
+        choose.tap()
+        let memory = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "maptalk.reel.bubble-memory."
+        )).firstMatch
+        waitUntilHittable(memory)
+        memory.tap()
+        app.buttons["Done"].tap()
+        waitUntilHittable(choose)
+        XCTAssertTrue(app.buttons["maptalk.reel.publish"].isEnabled,
+                      "The selected cluster is content; another caption or photo is optional")
+        XCTAssertTrue(app.descendants(matching: .any)["maptalk.reel.bubble-preview"].exists)
+        attachScreenshot(app, name: "Existing Reel composer with attached cluster")
+
+        choose.tap()
+        app.buttons["Remove bubble selection"].tap()
+        app.buttons["Back to reel"].tap()
+        XCTAssertTrue(app.buttons["maptalk.reel.publish"].isEnabled,
+                      "Cancelling the picker must preserve the previously selected cluster")
+        choose.tap()
+        app.buttons["Remove bubble selection"].tap()
+        app.buttons["Done"].tap()
+        XCTAssertFalse(app.buttons["maptalk.reel.publish"].isEnabled)
+    }
+
+    @MainActor
     func testNearbyPlaceSearchStaysInPickerAndPreservesCaptureDraft() throws {
         let app = launchDemo()
         defer { app.terminate() }

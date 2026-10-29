@@ -155,7 +155,8 @@ struct MapTalkView: View {
             }
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             let previewControlsPadding = ControlsLayout.previewPadding(for: geometry,
-                fraction: activeCompactFraction(for: geometry.size.height))
+                fraction: ControlsLayout.previewFraction)
+                + (friendStoryNavigation.isActive ? FriendStoryLayout.floatingHeight : 0)
             let collapseDetent = {
                 experiencePresentation.collapseToCompact()
             }
@@ -411,10 +412,7 @@ struct MapTalkView: View {
             ZStack(alignment: .top) {
                 MapReader { mapProxy in
                     let selectFriendFootprint: (MapTalkFriendFootprint) -> Void = { tapped in
-                        if friendStoryNavigation.isActive {
-                            openFriendMapContent(.poi(tapped.ratedPOI))
-                            return
-                        }
+                        finishFriendStory(restoreMap: false)
                         viewModel.cancelPendingLocationFocus()
                         let nextID = FriendFootprintTapSelectionPolicy.nextID(
                             tappedID: tapped.id,
@@ -481,10 +479,7 @@ struct MapTalkView: View {
                             isRealUnseen: isRealUnseen,
                             isPOIUnseen: isPOIUnseen,
                             onTapReal: { real in
-                                if friendStoryNavigation.isActive {
-                                    openFriendMapContent(.real(real, viewModel.user(for: real.userId)))
-                                    return
-                                }
+                                finishFriendStory(restoreMap: false)
                                 viewModel.cancelPendingLocationFocus()
                                 if let item = storyItemForReal(real) {
                                     selectStoryItem(item, true, false, nil)
@@ -501,10 +496,7 @@ struct MapTalkView: View {
                                 experiencePresentation.presentNewContent()
                             },
                             onTapPOI: { rated in
-                                if friendStoryNavigation.isActive {
-                                    openFriendMapContent(.poi(rated))
-                                    return
-                                }
+                                finishFriendStory(restoreMap: false)
                                 viewModel.cancelPendingLocationFocus()
                                 if let item = storyItemForPOI(rated) {
                                     selectStoryItem(item, true, false, nil)
@@ -525,13 +517,14 @@ struct MapTalkView: View {
                                 activeExperience = .poi(rated: rated, nonce: UUID())
                                 experiencePresentation.presentNewContent()
                             },
-                            compactReelMarkers: usesFriendStories && focusedJourneyHeader == nil,
-                            selectedStoryAuthor: friendStoryNavigation.routes.isEmpty
-                                ? friendStoryNavigation.session?.currentGroup?.user : nil
+                            showsSelectedReelRangeOnly: usesFriendStories && focusedJourneyHeader == nil
                         )
                     }
                     .ignoresSafeArea()
                     .accessibilityIdentifier("maptalk.map-canvas")
+                    .accessibilityValue(currentCamera.map {
+                        "\($0.centerCoordinate.latitude),\($0.centerCoordinate.longitude)"
+                    } ?? "")
                     .onMapCameraChange(frequency: .continuous) { _ in
                         friendFootprintInteractionGate.noteCameraMotion()
                         if cameraPosition.positionedByUser {
@@ -724,9 +717,10 @@ struct MapTalkView: View {
                         }
                 }
                 .ignoresSafeArea(edges: .top)
-                .opacity(publishDestination == nil ? 1 : 0)
-                .allowsHitTesting(publishDestination == nil)
+                .opacity(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded) ? 1 : 0)
+                .allowsHitTesting(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded))
                 .animation(.easeOut(duration: 0.16), value: publishDestination)
+                .animation(.easeOut(duration: 0.16), value: experiencePresentation.isExpanded)
 
                 if focusedJourneyHeader == nil {
                     VStack {
@@ -935,7 +929,8 @@ struct MapTalkView: View {
 
                 content
                     .id(experiencePresentation.contentRevision)
-                    .mapExperienceSheetChrome(presentation: experiencePresentation)
+                    .modifier(FriendStorySheetChrome(presentation: experiencePresentation,
+                                                     navigation: friendStoryNavigation))
                     .fullScreenCover(isPresented: $isActivityOverExperiencePresented) {
                         activityContent
                             .presentationBackground(Color(.systemBackground))
@@ -1182,10 +1177,11 @@ struct MapTalkView: View {
                 }
             }
             .onChangeCompat(of: geometry.size) { _ in
-                experiencePresentation.configureCompactDetent(.fraction(activeCompactFraction(for: geometry.size.height)))
+                experiencePresentation.configureCompactDetent(.fraction(ControlsLayout.previewFraction))
                 let recalculatedBase = ControlsLayout.basePadding(for: geometry)
                 let recalculatedPreview = ControlsLayout.previewPadding(for: geometry,
-                    fraction: activeCompactFraction(for: geometry.size.height))
+                    fraction: ControlsLayout.previewFraction)
+                    + (friendStoryNavigation.isActive ? FriendStoryLayout.floatingHeight : 0)
                 let isElevated = controlsBottomPadding > recalculatedBase + 1
                 controlsBottomPadding = isElevated ? recalculatedPreview : recalculatedBase
                 if friendStoryNavigation.isActive, friendStoryNavigation.routes.isEmpty,
@@ -1209,12 +1205,6 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
-    func activeCompactFraction(for availableHeight: CGFloat) -> CGFloat {
-        friendStoryNavigation.isActive
-            ? FriendStoryLayout.compactFraction(base: ControlsLayout.previewFraction, availableHeight: availableHeight)
-            : ControlsLayout.previewFraction
-    }
-
     var usesFriendStories: Bool {
         guard !viewModel.isUserScope else { return false }
 #if DEBUG
@@ -1295,7 +1285,7 @@ private extension MapTalkView {
         journeyStack = []
         selectedFriendFootprintID = nil
         if !alreadyOpen {
-            experiencePresentation.configureCompactDetent(.fraction(activeCompactFraction(for: geometry.size.height)))
+            experiencePresentation.configureCompactDetent(.fraction(ControlsLayout.previewFraction))
             experiencePresentation.presentNewContent()
         }
         focusFriendStoryPage(page, geometry: geometry)
@@ -1366,17 +1356,6 @@ private extension MapTalkView {
             }.first
     }
 
-    func openFriendMapContent(_ mode: ExperienceDetailView.Mode) {
-        let content: FriendStoryNavigation.Route.Content
-        switch mode {
-        case let .poi(place): content = .place(place)
-        case let .real(reel, _): content = .reel(reel)
-        case let .journey(journey): content = .bubble(.init(journey: journey, userProvider: viewModel.user(for:)))
-        }
-        friendStoryNavigation.routes.append(.init(content: content,
-            returnCamera: friendStoryMapSnapshot(), returnDetent: experiencePresentation.detent))
-    }
-
     func focusFriendStoryPage(_ page: FriendStoryPage, geometry: GeometryProxy) {
         switch page.content {
         case let .reel(reel):
@@ -1387,12 +1366,22 @@ private extension MapTalkView {
             selectedRealId = nil
         }
         reelAlignTrigger &+= 1
-        guard let locationKey = page.locationKey,
-              friendStoryNavigation.needsMapFocus(locationKey: locationKey, viewportSize: geometry.size) else { return }
-        // Hidden maps synchronize when the user returns to the compact detent.
-        guard !experiencePresentation.isExpanded else { return }
+        guard let locationKey = page.locationKey else {
+            // A location-less update must not finish the previous person's
+            // delayed dive after the author has already changed.
+            flightController.cancelActiveTransition()
+            friendStoryNavigation.lastLocationKey = nil
+            friendStoryNavigation.lastViewportSize = nil
+            friendStoryNavigation.lastFocusedAuthorID = nil
+            return
+        }
+        guard friendStoryNavigation.needsMapFocus(locationKey: locationKey,
+            viewportSize: geometry.size, authorID: page.authorID) else { return }
+        // Both detents share one selection and camera. Switching a post while
+        // expanded must not leave the map at the previous post on return.
         friendStoryNavigation.lastLocationKey = locationKey
         friendStoryNavigation.lastViewportSize = geometry.size
+        friendStoryNavigation.lastFocusedAuthorID = page.authorID
         switch page.content {
         case let .reel(reel): focusFriendStoryContent(.real(reel, viewModel.user(for: reel.userId)), geometry: geometry)
         case let .poi(place, _, _): focusFriendStoryContent(.poi(place), geometry: geometry)
@@ -1415,7 +1404,7 @@ private extension MapTalkView {
         case let .journey(journey):
             guard let target = MapJourneyCamera.target(for: journey, size: geometry.size,
                 safeAreaBottom: geometry.safeAreaInsets.bottom,
-                compactFraction: activeCompactFraction(for: geometry.size.height)) else { return }
+                compactFraction: ControlsLayout.previewFraction) else { return }
             flightController.cancelActiveTransition()
             withAnimation(.easeInOut(duration: 0.28)) { cameraPosition = .region(target.region) }
             currentRegion = target.region
@@ -1423,16 +1412,10 @@ private extension MapTalkView {
         }
         let viewport = MapCameraViewport(size: geometry.size,
             topInset: MapTalkTopChromeLayout.height(safeAreaTop: geometry.safeAreaInsets.top, showsStories: true),
-            bottomInset: geometry.size.height * activeCompactFraction(for: geometry.size.height) + geometry.safeAreaInsets.bottom)
-        if let currentRegion, currentRegion.center.distance(to: region.center) > 80_000 {
-            let target = viewport.framed(region)
-            flightController.cancelActiveTransition()
-            withAnimation(.easeInOut(duration: 0.28)) { cameraPosition = .region(target) }
-            self.currentRegion = target
-        } else {
-            flightController.handleRegionChange(currentRegion: currentRegion, targetRegion: region,
-                cause: cause, viewport: viewport, cameraPosition: $cameraPosition) { currentRegion = $0 }
-        }
+            bottomInset: geometry.size.height * ControlsLayout.previewFraction
+                + geometry.safeAreaInsets.bottom + FriendStoryLayout.floatingHeight)
+        flightController.handleRegionChange(currentRegion: currentRegion, targetRegion: region,
+            cause: cause, viewport: viewport, cameraPosition: $cameraPosition) { currentRegion = $0 }
     }
 
     func searchNearbyPlaces(_ query: String) async -> [MapTalkNearbyPlaceOption] {
@@ -1592,7 +1575,7 @@ private extension MapTalkView {
             projectedPoint: projectedPoint,
             canvasSize: canvasSize,
             topChromeBottom: topChromeBottom,
-            compactSheetFraction: activeCompactFraction(for: canvasSize.height)
+            compactSheetFraction: ControlsLayout.previewFraction
         ),
               let coordinateAtTarget = mapProxy.convert(targetPoint, from: .local) else {
             return

@@ -341,7 +341,7 @@ final class MapTalkViewModel: ObservableObject {
     /// MapTalk exposes only snapshots attached to public Reels. Private Bubble
     /// snapshots remain reachable from MyMap through its own provider.
     func journey(for id: UUID) -> JourneyPost? {
-        if environment.backend != nil { return nil }
+        if let backend = environment.backend { return backend.journey(for: id, publicOnly: true) }
         return environment.myMapArchive.publicBubbleCatalog.first { $0.id == id }
             ?? environment.myMapArchive.legacyJourneyCatalog.first { $0.id == id }
             ?? PreviewData.journey(for: id)

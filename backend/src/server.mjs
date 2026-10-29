@@ -93,7 +93,7 @@ function credentials(body) {
 }
 
 function memoryInput(body, time) {
-  object(body, ['id', 'kind', 'visibility', 'location', 'caption', 'mediaIds', 'place', 'placeId', 'capturedAt']);
+  object(body, ['id', 'kind', 'visibility', 'location', 'caption', 'mediaIds', 'place', 'placeId', 'capturedAt', 'cluster']);
   const result = {
     id: id(body.id), kind: body.kind, visibility: visibility(body.visibility),
     location: coordinate(body.location), caption: body.caption ?? '',
@@ -118,6 +118,19 @@ function memoryInput(body, time) {
     'POI allows at most one photo; Reel allows at most nine.');
   result.mediaIds = result.mediaIds.map(id);
   requireValue(new Set(result.mediaIds).size === result.mediaIds.length, 'Duplicate media.');
+  if (body.cluster !== undefined) {
+    requireValue(result.kind === 'reel', 'Only a Reel can contain a cluster.');
+    object(body.cluster, ['title', 'memoryIds']);
+    requireValue(typeof body.cluster.title === 'string' && body.cluster.title.trim().length > 0
+      && body.cluster.title.length <= 160, 'A cluster needs a title of at most 160 characters.');
+    requireValue(Array.isArray(body.cluster.memoryIds) && body.cluster.memoryIds.length >= 1
+      && body.cluster.memoryIds.length <= 50, 'Choose between 1 and 50 records.');
+    const memoryIds = body.cluster.memoryIds.map(id);
+    requireValue(new Set(memoryIds).size === memoryIds.length, 'Duplicate cluster record.');
+    requireValue(!memoryIds.includes(result.id), 'A Reel cannot contain itself.');
+    // Do not add a default field: old persisted retry hashes must stay identical.
+    result.cluster = { title: body.cluster.title.trim(), memoryIds };
+  }
   if (result.kind === 'poi') {
     requireValue(result.caption === '', 'POI check-ins do not have captions.');
     requireValue((body.place !== undefined) !== (body.placeId !== undefined), 'Choose one place or placeId.');
@@ -141,7 +154,7 @@ function memoryInput(body, time) {
     }
   } else {
     requireValue(body.place === undefined && body.placeId === undefined, 'Reels are not POI check-ins.');
-    requireValue(result.caption.length > 0 || result.mediaIds.length > 0, 'Add a caption or photo.');
+    requireValue(result.caption.length > 0 || result.mediaIds.length > 0 || result.cluster, 'Add a caption, media or cluster.');
   }
   return result;
 }
@@ -374,12 +387,14 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     return row;
   }
 
-  function serializeMemory(row) {
+  function serializeMemory(row, includeCluster = true) {
     const owner = db.prepare('SELECT id, handle FROM users WHERE id = ?').get(row.owner_id);
     const place = row.place_id ? db.prepare(`SELECT places.*, place_sources.source_id FROM places
       LEFT JOIN place_sources ON place_sources.place_id = places.id WHERE places.id = ?`).get(row.place_id) : null;
     const media = db.prepare(`SELECT media.id, media.mime_type, media.byte_count FROM memory_media
       JOIN media ON media.id = memory_media.media_id WHERE memory_id = ? ORDER BY position`).all(row.id);
+    const cluster = includeCluster
+      ? db.prepare('SELECT title, members_json FROM memory_clusters WHERE memory_id = ?').get(row.id) : null;
     return {
       id: row.id, ownerId: row.owner_id, owner: userJSON(db, owner),
       kind: row.kind, visibility: row.visibility,
@@ -391,6 +406,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       media: media.map(mediaJSON), createdAt: new Date(row.created_at).toISOString(),
       publishedAt: row.published_at === null ? null : new Date(row.published_at).toISOString(),
       expiresAt: new Date((row.published_at ?? row.created_at) + ACTIVE_FEED_WINDOW).toISOString(),
+      ...(cluster ? { cluster: { id: row.id, title: cluster.title, members: JSON.parse(cluster.members_json) } } : {}),
     };
   }
 
@@ -426,7 +442,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     const items = rows.slice(0, limit);
     const last = items.at(-1);
     return {
-      items: items.map(serializeMemory),
+      items: items.map(row => serializeMemory(row)),
       nextCursor: rows.length > limit ? Buffer.from(JSON.stringify({ createdAt: last.list_order, id: last.id })).toString('base64url') : null,
     };
   }
@@ -771,6 +787,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
             .run(user.id, requestID, '', now());
         } else if (previous.media_id) {
           if (db.prepare('SELECT 1 FROM memory_media WHERE media_id = ? LIMIT 1').get(previous.media_id)
+            || db.prepare('SELECT 1 FROM cluster_media WHERE media_id = ? LIMIT 1').get(previous.media_id)
             || db.prepare('SELECT 1 FROM user_profiles WHERE avatar_media_id = ? LIMIT 1').get(previous.media_id)) {
             throw new APIError(409, 'media_in_use', 'Remove associated records or replace the avatar before deleting this photo.');
           }
@@ -791,6 +808,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       if (method === 'DELETE') {
         if (media.owner_id !== user.id) throw notFound();
         if (db.prepare('SELECT 1 FROM memory_media WHERE media_id = ? LIMIT 1').get(mediaID)
+          || db.prepare('SELECT 1 FROM cluster_media WHERE media_id = ? LIMIT 1').get(mediaID)
           || db.prepare('SELECT 1 FROM user_profiles WHERE avatar_media_id = ? LIMIT 1').get(mediaID)) {
           throw new APIError(409, 'media_in_use', 'Remove associated records or replace the avatar before deleting this photo.');
         }
@@ -799,9 +817,11 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       }
       const isAvatar = db.prepare('SELECT 1 FROM user_profiles WHERE user_id = ? AND avatar_media_id = ?')
         .get(media.owner_id, mediaID);
-      if (media.owner_id !== user.id && !isAvatar && !db.prepare(`SELECT 1 FROM memory_media
-        JOIN memories ON memories.id = memory_media.memory_id
-        WHERE media_id = ? AND visibility = 'public' AND moderation_status = 'approved' LIMIT 1`).get(mediaID)) throw notFound();
+      if (media.owner_id !== user.id && !isAvatar && !db.prepare(`SELECT 1 FROM memories
+        WHERE owner_id = ? AND visibility = 'public' AND moderation_status = 'approved'
+          AND (EXISTS (SELECT 1 FROM memory_media WHERE memory_id = memories.id AND media_id = ?)
+            OR EXISTS (SELECT 1 FROM cluster_media WHERE memory_id = memories.id AND media_id = ?)) LIMIT 1`)
+        .get(media.owner_id, mediaID, mediaID)) throw notFound();
       const range = mediaByteRange(request.headers.range, media.byte_count);
       if (!range) {
         response.writeHead(416, { 'Content-Range': `bytes */${media.byte_count}`, 'Accept-Ranges': 'bytes' });
@@ -823,19 +843,29 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     if (method === 'POST' && path === '/v1/memories') {
       const input = memoryInput(await authorizedJSON(request, user.id), now());
       const requestHash = digest(JSON.stringify(input));
-      const deleted = db.prepare('SELECT owner_id FROM deleted_memories WHERE id = ?').get(input.id);
-      if (deleted) {
-        if (deleted.owner_id !== user.id) throw new APIError(409, 'id_conflict', 'Use a new record ID.');
-        throw new APIError(410, 'record_deleted', 'This record was deleted; use a new ID for a new record.');
-      }
-      const existing = db.prepare('SELECT * FROM memories WHERE id = ?').get(input.id);
-      if (existing) {
-        if (existing.owner_id !== user.id || existing.request_hash !== requestHash) {
-          throw new APIError(409, 'id_conflict', 'Use a new record ID for different content.');
-        }
-        return json(response, 200, serializeMemory(existing));
-      }
       const saved = transaction(db, () => {
+        const deleted = db.prepare('SELECT owner_id FROM deleted_memories WHERE id = ?').get(input.id);
+        if (deleted) {
+          if (deleted.owner_id !== user.id) throw new APIError(409, 'id_conflict', 'Use a new record ID.');
+          throw new APIError(410, 'record_deleted', 'This record was deleted; use a new ID for a new record.');
+        }
+        const existing = db.prepare('SELECT * FROM memories WHERE id = ?').get(input.id);
+        if (existing) {
+          if (existing.owner_id !== user.id || existing.request_hash !== requestHash) {
+            throw new APIError(409, 'id_conflict', 'Use a new record ID for different content.');
+          }
+          return { status: 200, row: existing };
+        }
+        const members = input.cluster?.memoryIds.map(memoryID => {
+          const source = memoryFor(memoryID, user.id, true);
+          // A rejected source cannot be republished through a new attachment.
+          if (source.moderation_status !== 'approved') throw notFound();
+          const member = serializeMemory(source, false);
+          // A snapshot retains only explicitly selected record media, not an
+          // unrelated avatar whose lifecycle belongs to the current profile.
+          member.owner = { id: member.owner.id, handle: member.owner.handle };
+          return member;
+        });
         for (const mediaID of input.mediaIds) {
           if (!db.prepare('SELECT id FROM media WHERE id = ? AND owner_id = ?').get(mediaID, user.id)) throw notFound();
         }
@@ -881,13 +911,21 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
             'approved');
         const attach = db.prepare('INSERT INTO memory_media(memory_id, media_id, position) VALUES (?, ?, ?)');
         input.mediaIds.forEach((mediaID, position) => attach.run(input.id, mediaID, position));
+        if (members) {
+          db.prepare('INSERT INTO memory_clusters(memory_id, title, members_json) VALUES (?, ?, ?)')
+            .run(input.id, input.cluster.title, JSON.stringify(members));
+          const retain = db.prepare('INSERT INTO cluster_media(memory_id, media_id) VALUES (?, ?)');
+          for (const mediaID of new Set(members.flatMap(member => member.media.map(media => media.id)))) {
+            retain.run(input.id, mediaID);
+          }
+        }
         // Only a genuinely new memory restores an archive item. Retrying an old POST does not
         // undo a later intentional hide, even if the original network response was lost.
         db.prepare('DELETE FROM archive_hidden WHERE owner_id = ? AND kind = ? AND target_id = ?')
           .run(user.id, input.kind, input.kind === 'poi' ? placeID : input.id);
-        return db.prepare('SELECT * FROM memories WHERE id = ?').get(input.id);
+        return { status: 201, row: db.prepare('SELECT * FROM memories WHERE id = ?').get(input.id) };
       });
-      return json(response, 201, serializeMemory(saved));
+      return json(response, saved.status, serializeMemory(saved.row));
     }
 
     if (method === 'GET' && path === '/v1/me/memories') {
@@ -966,7 +1004,8 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
           requireValue(typeof body.caption === 'string' && body.caption.length <= 2200, 'Caption is too long.');
           caption = body.caption.trim();
           const hasMedia = db.prepare('SELECT 1 FROM memory_media WHERE memory_id = ? LIMIT 1').get(memoryID);
-          requireValue(caption.length > 0 || hasMedia, 'Add a caption or photo.');
+          const hasCluster = db.prepare('SELECT 1 FROM memory_clusters WHERE memory_id = ?').get(memoryID);
+          requireValue(caption.length > 0 || hasMedia || hasCluster, 'Add a caption, media or cluster.');
         }
         const firstPublication = body.visibility === 'public' && current.published_at === null;
         const published = firstPublication ? now() : current.published_at;
@@ -976,7 +1015,8 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       }
       // Permanent deletion withdraws the same record from every public surface.
       transaction(db, () => {
-        const mediaIDs = db.prepare('SELECT media_id FROM memory_media WHERE memory_id = ?').all(memoryID).map(row => row.media_id);
+        const mediaIDs = db.prepare(`SELECT media_id FROM memory_media WHERE memory_id = ?
+          UNION SELECT media_id FROM cluster_media WHERE memory_id = ?`).all(memoryID, memoryID).map(row => row.media_id);
         db.prepare('INSERT INTO deleted_memories(id, owner_id, deleted_at) VALUES (?, ?, ?)')
           .run(memoryID, user.id, now());
         db.prepare('DELETE FROM memories WHERE id = ? AND owner_id = ?').run(memoryID, user.id);

@@ -250,6 +250,8 @@ struct POICollapsedHero: View {
         .padding(.top, POIHeroLayout.headerTopPadding)
         .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
         .padding(.vertical, POIHeroLayout.collapsedVerticalPadding)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("experience.poi.collapsed")
     }
 }
 
@@ -299,6 +301,8 @@ struct POIExpandedHero: View {
         .padding(.top, POIHeroLayout.headerTopPadding)
         .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
         .padding(.vertical, POIHeroLayout.collapsedVerticalPadding)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("experience.poi.expanded")
     }
 }
 struct POIHeroStatsRow: View {
@@ -552,6 +556,7 @@ struct POIRecentSharersRow: View {
                         .padding(.vertical, 4)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("experience.poi.sharer.\(sharer.userId.uuidString)")
                 }
             }
             .padding(.vertical, 2)

@@ -211,9 +211,10 @@ extension View {
     /// Keeps the public and private map capsule chrome in lockstep.
     func mapExperienceSheetChrome(
         compactDetent: PresentationDetent,
+        expandedDetent: PresentationDetent = .large,
         selection: Binding<PresentationDetent>
     ) -> some View {
-        presentationDetents([compactDetent, .large], selection: selection)
+        presentationDetents([compactDetent, expandedDetent], selection: selection)
             .presentationContentInteraction(.resizes)
             .presentationBackground(.thinMaterial)
             .presentationCompactAdaptation(.none)

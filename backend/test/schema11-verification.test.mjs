@@ -16,6 +16,8 @@ async function fixture(t) {
   const targetPath = join(directory, 'restored.sqlite');
   const db = openDatabase(sourcePath);
   db.exec(`
+    DROP TABLE cluster_media;
+    DROP TABLE memory_clusters;
     DROP TABLE comments;
     ALTER TABLE places DROP COLUMN directory_kind;
     PRAGMA user_version = 10;
@@ -32,10 +34,10 @@ async function fixture(t) {
 }
 
 // This verifier belongs to the historical 10 -> 11 release. Construct that
-// exact target shape even after the current server starts migrating to 12.
+// exact target shape even after the current server starts migrating to 13.
 function upgradeFixtureToSchema11(path) {
   const db = openDatabase(path);
-  db.exec('DROP TABLE comments; PRAGMA user_version = 11;');
+  db.exec('DROP TABLE cluster_media; DROP TABLE memory_clusters; DROP TABLE comments; PRAGMA user_version = 11;');
   return db;
 }
 

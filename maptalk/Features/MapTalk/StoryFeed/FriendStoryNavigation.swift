@@ -3,13 +3,75 @@ import MapKit
 import SwiftUI
 
 enum FriendStoryLayout {
-    // The original card keeps its full compact height underneath the author
-    // controls; this is not a new media layout or a third presentation stop.
-    static let navigationAllowance: CGFloat = 72
+    static let headerHeight: CGFloat = 68
+    static let headerGap: CGFloat = 12
+    static var floatingHeight: CGFloat { headerHeight + headerGap }
 
-    static func compactFraction(base: CGFloat, availableHeight: CGFloat) -> CGFloat {
-        guard availableHeight > 0 else { return base }
-        return min(0.55, base + navigationAllowance / availableHeight)
+    static func accessoryFrame(above card: CGRect) -> CGRect {
+        CGRect(x: card.minX + 10, y: card.minY - floatingHeight,
+               width: max(0, card.width - 20), height: headerHeight)
+    }
+
+    static func accessoryOpacity(cardTop: CGFloat, containerBottom: CGFloat) -> CGFloat {
+        min(1, max(0, (containerBottom - cardTop) / floatingHeight))
+    }
+}
+
+/// Leave real map pixels above the native sheet for its detached identity.
+/// The model still uses `.large`, so existing media and return routes retain
+/// their expanded behavior without replacing the native pan recognizer.
+private struct FriendStoryExpandedDetent: CustomPresentationDetent {
+    static func height(in context: Context) -> CGFloat? {
+        max(1, context.maxDetentValue - FriendStoryLayout.floatingHeight)
+    }
+}
+
+struct FriendStorySheetChrome: ViewModifier {
+    @ObservedObject var presentation: MapExperiencePresentation
+    @ObservedObject var navigation: FriendStoryNavigation
+
+    func body(content: Content) -> some View {
+        if navigation.isActive {
+            let expanded = PresentationDetent.custom(FriendStoryExpandedDetent.self)
+            content
+                .mapExperienceSheetChrome(compactDetent: presentation.compactDetent,
+                                          expandedDetent: expanded, selection: Binding(
+                    get: { presentation.isExpanded ? expanded : presentation.compactDetent },
+                    set: { presentation.detent = $0 == expanded ? .large : presentation.compactDetent }
+                ))
+        } else {
+            // Direct map cards keep the original native detents and binding.
+            // Person-story navigation must not translate their presentation.
+            content.mapExperienceSheetChrome(compactDetent: presentation.compactDetent,
+                                             selection: $presentation.detent)
+        }
+    }
+}
+
+enum FriendStoryProgressSelection {
+    /// Static sequence position, independent of elapsed time or video playback.
+    static func fill(for segment: Int, index: Int) -> CGFloat {
+        segment >= 0 && index >= segment ? 1 : 0
+    }
+
+    static func index(at x: CGFloat, width: CGFloat, count: Int) -> Int? {
+        guard count > 0, width.isFinite, width > 0, x.isFinite else { return nil }
+        let fraction = min(max(x / width, 0), 1)
+        return min(Int(fraction * CGFloat(count)), count - 1)
+    }
+}
+
+enum FriendStoryPageSelection {
+    /// Progress controls resolve within the displayed person's sequence.
+    static func index(for pageID: String, in group: FriendStoryGroup) -> Int? {
+        group.pages.firstIndex { $0.id == pageID }
+    }
+
+    /// Keep native pager tags and positions stable while crossing authors.
+    /// The session is already frozen; selecting an author must not replace
+    /// its page window while UIKit is finishing the horizontal gesture.
+    static func pagerPages(in session: FriendStorySession) -> [FriendStoryPage] {
+        session.groups.flatMap(\.pages)
     }
 }
 
@@ -40,11 +102,13 @@ final class FriendStoryNavigation: ObservableObject {
     var origin: MapSnapshot?
     var lastLocationKey: String?
     var lastViewportSize: CGSize?
+    var lastFocusedAuthorID: UUID?
 
     var isActive: Bool { session != nil }
 
-    func needsMapFocus(locationKey: String, viewportSize: CGSize) -> Bool {
+    func needsMapFocus(locationKey: String, viewportSize: CGSize, authorID: UUID? = nil) -> Bool {
         lastLocationKey != locationKey || lastViewportSize != viewportSize
+            || (authorID != nil && lastFocusedAuthorID != authorID)
     }
 
     func begin(groups: [FriendStoryGroup], authorID: UUID, viewedKeys: Set<String>, origin: MapSnapshot) {
@@ -59,12 +123,49 @@ final class FriendStoryNavigation: ObservableObject {
         routes.removeAll()
     }
 
+    /// The lower card pager may cross an author boundary only from its edge,
+    /// landing on the exact adjacent card rather than an unread/resume cursor.
+    /// Explicit author selection keeps its existing resume/unread entry rules.
+    @discardableResult
+    func selectPagerPage(id: String, fromAuthorID: UUID) -> Bool {
+        guard routes.isEmpty, var session,
+              session.selectedAuthorID == fromAuthorID,
+              let group = session.currentGroup,
+              let pageIndex = session.currentPageIndex,
+              let authorIndex = session.groups.firstIndex(where: { $0.authorID == fromAuthorID }) else {
+            return false
+        }
+        if group.pages.contains(where: { $0.id == id }) {
+            guard session.selectPage(id: id) else { return false }
+        } else {
+            let next = session.groups.indices.contains(authorIndex + 1)
+                ? session.groups[authorIndex + 1].pages.first : nil
+            let previous = authorIndex > 0 ? session.groups[authorIndex - 1].pages.last : nil
+            let destination: FriendStoryPage?
+            if pageIndex == group.pages.count - 1, next?.id == id {
+                destination = next
+            } else if pageIndex == 0, previous?.id == id {
+                destination = previous
+            } else {
+                destination = nil
+            }
+            guard let destination,
+                  session.selectAuthor(id: destination.authorID) else { return false }
+            // Author entry can restore an old cursor. A sequential swipe must
+            // override it even when every destination page was already read.
+            session.selectPage(id: destination.id)
+        }
+        self.session = session
+        return true
+    }
+
     func clear() {
         session = nil
         routes = []
         origin = nil
         lastLocationKey = nil
         lastViewportSize = nil
+        lastFocusedAuthorID = nil
     }
 }
 
@@ -111,17 +212,30 @@ struct FriendStoryFlow: View {
                     group: group,
                     page: page,
                     pageIndex: session.currentPageIndex ?? 0,
+                    pagerPages: FriendStoryPageSelection.pagerPages(in: session),
+                    pagerUserProvider: { id in
+                        userProvider(id) ?? session.groups.first(where: { $0.authorID == id })?.user
+                    },
+                    selectedPageID: Binding(
+                        // UIKit may read this binding again before SwiftUI
+                        // redraws. Always return the live cursor, not `page`'s
+                        // previous-render snapshot after a progress-bar tap.
+                        get: { navigation.session?.currentPage?.id ?? page.id },
+                        set: { selectPagerPage($0, fromAuthorID: group.authorID) }
+                    ),
+                    viewedKeys: viewedKeys,
                     isExpanded: isExpanded,
                     isPlaybackActive: allowsPlayback && scenePhase == .active && navigation.routes.isEmpty,
                     onPreviousPage: { movePage(-1) },
                     onNextPage: { movePage(1) },
-                    onPreviousAuthor: { moveAuthor(-1) },
-                    onNextAuthor: { moveAuthor(1) },
+                    onSelectPage: { index in
+                        guard group.pages.indices.contains(index) else { return }
+                        selectPage(group.pages[index].id, authorID: group.authorID)
+                    },
                     onExpand: {
                         withAnimation(.easeInOut(duration: 0.24)) { detent = .large }
                     },
                     onClose: onClose,
-                    onLocation: openPlace,
                     onJourney: openBubble,
                     onReadReady: onRead,
                     journeyProvider: journeyProvider,
@@ -147,8 +261,17 @@ struct FriendStoryFlow: View {
         focusPage(page)
     }
 
-    private func moveAuthor(_ offset: Int) {
-        guard navigation.session?.moveAuthor(by: offset, viewedKeys: viewedKeys) == true,
+    private func selectPage(_ id: String, authorID: UUID) {
+        // A delayed native-pager callback from the previous person's card
+        // must never move the new person's cursor. Absolute IDs are idempotent.
+        guard navigation.session?.selectedAuthorID == authorID,
+              navigation.session?.selectPage(id: id) == true,
+              let page = navigation.session?.currentPage else { return }
+        focusPage(page)
+    }
+
+    private func selectPagerPage(_ id: String, fromAuthorID: UUID) {
+        guard navigation.selectPagerPage(id: id, fromAuthorID: fromAuthorID),
               let page = navigation.session?.currentPage else { return }
         focusPage(page)
     }

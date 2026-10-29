@@ -1375,7 +1375,7 @@ test('legacy place payloads keep their pre-airport idempotency hashes', async (t
   const retried = expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200);
   assert.deepEqual(retried, original);
   db = new DatabaseSync(api.databasePath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 12);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 13);
   assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
   db.close();
 });

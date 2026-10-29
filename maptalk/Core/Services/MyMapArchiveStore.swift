@@ -85,6 +85,13 @@ final class MyMapArchiveStore: ObservableObject {
         publicReelOverlays = []
     }
 
+    /// Replace server projections as media fills in or a parent is withdrawn.
+    /// The server owns snapshot immutability; these are hydrated UI copies.
+    func replaceServerBubbles(privateBubbles: [JourneyPost], publicBubbles: [JourneyPost]) {
+        privateBubbleCatalog = privateBubbles
+        publicBubbleCatalog = publicBubbles
+    }
+
     private func persistFolders() {
         do {
             try writeFolders(journeyFolders)

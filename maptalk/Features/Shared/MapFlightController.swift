@@ -95,9 +95,11 @@ final class MapFlightController: ObservableObject {
         cameraPosition: Binding<MapCameraPosition>,
         onRegionUpdate: @escaping (MKCoordinateRegion) -> Void
     ) {
-        if activeTransitionID != nil {
-            activeTransitionID = nil
-        }
+        // A camera callback during lift/cruise contains the flight's temporary
+        // wide zoom, not a zoom chosen by the user. A replacement flight must
+        // land at its destination instead of preserving that intermediate span.
+        let wasTransitioning = activeTransitionID != nil
+        activeTransitionID = nil
 
         let clampedTarget = cityClamp(targetRegion)
         guard let existingRegion = currentRegion else {
@@ -113,7 +115,8 @@ final class MapFlightController: ObservableObject {
         let currentSpan = existingRegion.dominantSpanMeters
         let targetSpan = targetRegion.dominantSpanMeters
 
-        if existingRegion.contains(targetRegion.center, insetFraction: 0.92) &&
+        if !wasTransitioning &&
+            existingRegion.contains(targetRegion.center, insetFraction: 0.92) &&
             targetSpan <= currentSpan * 1.15 {
             let preserved = MKCoordinateRegion(center: targetRegion.center, span: existingRegion.span)
             let framedPreserved = viewport?.framed(preserved) ?? preserved
@@ -125,7 +128,8 @@ final class MapFlightController: ObservableObject {
             return
         }
 
-        if cause != .initial,
+        if !wasTransitioning,
+           cause != .initial,
            cause != .other,
            travelDistance < currentSpan * 2,
            targetSpan > currentSpan * 1.3 {
