@@ -48,7 +48,7 @@ struct MySettingsView: View {
                 }
             } footer: {
                 if environment.backend != nil {
-                    Text("Removing a record from MyMap does not withdraw a public post. Use Make private or Delete post to withdraw it. Collections are stored only on this device.")
+                    Text("Deleting a memory from MyMap also removes its public post. Deleting a place removes only your visits, not other people's. Collections are stored only on this device.")
                 }
             }
 

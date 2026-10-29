@@ -68,10 +68,19 @@ struct FriendStoryPage: Identifiable {
     }
 }
 
+/// One continuous stop in a person's story. Pages stay individually addressable
+/// for swiping, read state and deletion; only their navigation chrome is grouped.
+struct FriendStoryMoment: Identifiable {
+    let id: String
+    let pageRange: Range<Int>
+    let placeID: UUID?
+}
+
 struct FriendStoryGroup: Identifiable {
     let authorID: UUID
     var user: User?
     let pages: [FriendStoryPage]
+    let moments: [FriendStoryMoment]
     private let viewedKeys: Set<String>
 
     var id: UUID { authorID }
@@ -83,7 +92,29 @@ struct FriendStoryGroup: Identifiable {
         self.authorID = authorID
         self.user = user
         self.pages = pages
+        self.moments = Self.makeMoments(pages)
         self.viewedKeys = viewedKeys
+    }
+
+    func momentIndex(containing pageIndex: Int) -> Int? {
+        moments.firstIndex { $0.pageRange.contains(pageIndex) }
+    }
+
+    private static func makeMoments(_ pages: [FriendStoryPage]) -> [FriendStoryMoment] {
+        var moments: [FriendStoryMoment] = []
+        for (index, page) in pages.enumerated() {
+            let placeID: UUID?
+            if case let .poi(place, _, _) = page.content { placeID = place.id }
+            else { placeID = nil }
+            if let placeID, let previous = moments.last, previous.placeID == placeID,
+               pages[previous.pageRange.lowerBound].authorID == page.authorID {
+                moments[moments.count - 1] = .init(id: previous.id,
+                    pageRange: previous.pageRange.lowerBound..<(index + 1), placeID: placeID)
+            } else {
+                moments.append(.init(id: page.id, pageRange: index..<(index + 1), placeID: placeID))
+            }
+        }
+        return moments
     }
 
     fileprivate func replacingPages(_ pages: [FriendStoryPage]) -> Self {
@@ -419,8 +450,9 @@ struct FriendStorySession {
     }
 
     private static func initialPage(in group: FriendStoryGroup, viewedKeys: Set<String>) -> FriendStoryPage? {
-        if let unread = group.pages.first(where: { !viewedKeys.contains($0.readKey) }) { return unread }
-        guard let latestMemory = group.pages.last?.memoryID else { return nil }
-        return group.pages.first { $0.memoryID == latestMemory }
+        // A new visit starts with unseen content, or replays the story from
+        // its beginning once everything is read. Exact in-session returns
+        // are handled separately by resumePageIDs above.
+        group.pages.first(where: { !viewedKeys.contains($0.readKey) }) ?? group.pages.first
     }
 }

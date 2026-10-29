@@ -239,7 +239,8 @@ struct FriendStoryFlow: View {
                     onJourney: openBubble,
                     onReadReady: onRead,
                     journeyProvider: journeyProvider,
-                    userProvider: userProvider
+                    userProvider: userProvider,
+                    placeProvider: placeProvider
                 )
                 .opacity(navigation.routes.isEmpty ? 1 : 0)
                 .allowsHitTesting(navigation.routes.isEmpty)

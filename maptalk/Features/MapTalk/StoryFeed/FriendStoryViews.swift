@@ -86,7 +86,7 @@ struct FriendStoriesRow: View {
                             .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: selected)
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel("\(user?.handle ?? "Member"), \(group.pages.count) updates")
+                        .accessibilityLabel("\(user?.handle ?? "Member"), \(group.moments.count) updates")
                         .accessibilityValue(isUnseen(group) ? "Unread" : "Viewed")
                         .accessibilityIdentifier("friend-story.author.\(group.authorID.uuidString)")
                         .id(group.authorID)
@@ -127,6 +127,7 @@ struct FriendStoryContentView: View {
     let onReadReady: (String) -> Void
     let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
+    let placeProvider: (UUID) -> RatedPOI?
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
@@ -145,6 +146,11 @@ struct FriendStoryContentView: View {
             && !isKeyboardVisible && activeChildPresentations.isEmpty
     }
 
+    private var showsFullBleedPOIPreview: Bool {
+        guard !isExpanded, case let .poi(_, _, media) = page.content else { return false }
+        return media != nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             postPager
@@ -153,6 +159,9 @@ struct FriendStoryContentView: View {
                 .clipped()
         }
         .background(Color.black)
+        // The pager itself must reach the sheet's bottom edge; a child cannot
+        // fill the home-indicator inset while its parent clips above it.
+        .ignoresSafeArea(.container, edges: showsFullBleedPOIPreview ? .bottom : [])
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("friend-story.card")
         .accessibilityValue(isExpanded ? "Expanded" : "Compact")
@@ -199,12 +208,22 @@ struct FriendStoryContentView: View {
     }
 
     private var navigationHeader: some View {
-        VStack(spacing: 0) {
+        let momentIndex = group.momentIndex(containing: pageIndex) ?? 0
+        let moment = group.moments.indices.contains(momentIndex) ? group.moments[momentIndex] : nil
+        return VStack(spacing: 0) {
             HStack(spacing: 8) {
                 authorIdentity
                 Spacer(minLength: 4)
-                if group.pages.count > 12 {
-                    Text("\(pageIndex + 1) / \(group.pages.count)")
+                if let moment, moment.pageRange.count > 1 {
+                    Text("\(pageIndex - moment.pageRange.lowerBound + 1) / \(moment.pageRange.count)")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.75))
+                        .fixedSize()
+                        .accessibilityLabel("At this place, item \(pageIndex - moment.pageRange.lowerBound + 1) of \(moment.pageRange.count)")
+                        .accessibilityIdentifier("friend-story.moment-position")
+                } else if group.moments.count > 12 {
+                    Text("\(momentIndex + 1) / \(group.moments.count)")
                         .font(.system(size: 10, weight: .medium, design: .rounded))
                         .foregroundStyle(.white.opacity(0.65))
                         .fixedSize()
@@ -216,13 +235,15 @@ struct FriendStoryContentView: View {
             .frame(height: 44)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("friend-story.author-navigation")
+            .accessibilityValue("Stop \(momentIndex + 1) of \(group.moments.count)")
 
-            FriendStoryProgressBars(count: group.pages.count,
-                                    index: pageIndex, pageID: page.id,
+            FriendStoryProgressBars(count: group.moments.count,
+                                    index: momentIndex, pageID: page.id,
+                                    pageIndex: pageIndex, pageCount: group.pages.count,
                                     authorName: author?.handle ?? "Member",
                                     onSelect: { index in
-                guard canNavigate else { return }
-                onSelectPage(index)
+                guard canNavigate, group.moments.indices.contains(index) else { return }
+                onSelectPage(group.moments[index].pageRange.lowerBound)
             })
                 .frame(height: 24)
                 .accessibilityHint("Tap the progress bar to choose an update")
@@ -328,17 +349,26 @@ struct FriendStoryContentView: View {
                 }
             }
         case let .poi(place, checkIn, media):
-            ExperienceDetailView(
-                mode: .poi(place),
-                isExpanded: isExpanded,
-                poiStorySelection: .init(checkIn: checkIn, media: media),
-                onCollapsedTap: onExpand,
-                onJourneyAvatarStackTap: onJourney,
-                journeyProvider: journeyProvider,
-                userProvider: userProvider,
-                onPOIContributorViewed: { keys in keys.forEach(onReadReady) },
-                isPOIContributorUnseen: { keys in keys.contains { !viewedKeys.contains($0) } }
-            )
+            Group {
+                if !isExpanded, let media {
+                    FriendStoryPOIPreview(place: place, media: media,
+                        isPlaybackActive: playbackEnabled && candidate.id == page.id)
+                } else {
+                    // Expanding returns to the original shared place card,
+                    // including other visitors, not a replacement timeline.
+                    ExperienceDetailView(
+                        mode: .poi(Self.placeForCard(place, isExpanded: isExpanded, provider: placeProvider)),
+                        isExpanded: isExpanded,
+                        poiStorySelection: isExpanded ? nil : .init(checkIn: checkIn, media: media),
+                        onCollapsedTap: onExpand,
+                        onJourneyAvatarStackTap: onJourney,
+                        journeyProvider: journeyProvider,
+                        userProvider: userProvider,
+                        onPOIContributorViewed: { keys in keys.forEach(onReadReady) },
+                        isPOIContributorUnseen: { keys in keys.contains { !viewedKeys.contains($0) } }
+                    )
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if !candidate.isMediaReady {
                     ProgressView()
@@ -349,6 +379,12 @@ struct FriendStoryContentView: View {
                 }
             }
         }
+    }
+
+    static func placeForCard(_ place: RatedPOI, isExpanded: Bool,
+                             provider: (UUID) -> RatedPOI?) -> RatedPOI {
+        guard isExpanded, let detail = provider(place.id), detail.id == place.id else { return place }
+        return detail
     }
 
     private func displayedReel(_ source: RealPost) -> RealPost {
@@ -387,11 +423,106 @@ struct FriendStoryContentView: View {
 
 }
 
+/// Only the person's compact POI preview changes. Native sheet expansion,
+/// the original place details and the outer post pager keep their ownership.
+private struct FriendStoryPOIPreview: View {
+    let place: RatedPOI
+    let media: RatedPOI.Media
+    let isPlaybackActive: Bool
+    @State private var isLightboxPresented = false
+    @State private var childPresentationID = UUID()
+    @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
+
+    private var item: ExperienceDetailView.MediaDisplayItem {
+        switch media.kind {
+        case let .photo(url):
+            return .init(id: media.id, content: .photo(url))
+        case let .video(url, poster):
+            return .init(id: media.id, content: .video(url: url, poster: poster, metadata: nil))
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Button {
+                guard isPlaybackActive else { return }
+                isLightboxPresented = true
+            } label: {
+                GeometryReader { geometry in
+                    ExperienceDetailView.MediaCardView(item: item,
+                        accentColor: place.poi.category.accentColor, mode: .card,
+                        isPlaybackActive: isPlaybackActive && !isLightboxPresented)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                        .overlay(alignment: .top) {
+                            LinearGradient(colors: [.black.opacity(0.72), .clear],
+                                startPoint: .top, endPoint: .bottom)
+                                .frame(height: 140)
+                                .allowsHitTesting(false)
+                        }
+                        .overlay(alignment: .topLeading) {
+                            ExperienceDetailView.POIPlaceHeading(
+                                info: .init(name: place.poi.name, category: place.poi.category,
+                                    endorsementBadges: ExperienceDetailView.poiEndorsementBadges(for: place)),
+                                accentColor: place.poi.category.accentColor)
+                                .padding(.horizontal, 20)
+                                .padding(.top, 28)
+                                .accessibilityIdentifier("friend-story.poi.place-name")
+                                .allowsHitTesting(false)
+                        }
+                        .overlay(alignment: .bottom) {
+                            LinearGradient(colors: [.clear, .black.opacity(0.5)],
+                                startPoint: .top, endPoint: .bottom)
+                                .frame(height: 100)
+                                .allowsHitTesting(false)
+                        }
+                        .overlay(alignment: .bottomTrailing) {
+                            ExperienceDetailView.POIHeroStatsRow(model: .init(
+                                checkIns: place.checkInPersonCount,
+                                comments: place.comments.count,
+                                favorites: place.favoritesCount,
+                                endorsements: place.endorsements,
+                                commentTarget: .place(place.id)))
+                                .padding(.horizontal, 20)
+                                .padding(.bottom, 32)
+                                .accessibilityElement(children: .contain)
+                                .accessibilityIdentifier("friend-story.poi.stats")
+                                .allowsHitTesting(false)
+                        }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open check-in media")
+            .accessibilityIdentifier("friend-story.poi.media.\(media.id.uuidString)")
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("friend-story.poi.preview")
+        .onChangeCompat(of: isLightboxPresented) { presented in
+            childPresentationChanged?(childPresentationID, presented)
+        }
+        .onDisappear {
+            if !isLightboxPresented { childPresentationChanged?(childPresentationID, false) }
+        }
+        .fullScreenCover(isPresented: $isLightboxPresented) {
+            ExperienceDetailView.MediaLightbox(items: [item], selection: .constant(media.id),
+                accentColor: place.poi.category.accentColor, isPresented: $isLightboxPresented)
+                .environment(\.friendStoryPlaybackEnabled, true)
+                .environment(\.friendStoryExpectedMedia, [])
+                .environment(\.friendStoryOnMediaReady, nil)
+                .environment(\.friendStoryChildPresentationChanged, nil)
+        }
+    }
+}
+
 /// A static position indicator. Media playback never owns navigation.
 private struct FriendStoryProgressBars: View {
     let count: Int
     let index: Int
     let pageID: String
+    let pageIndex: Int
+    let pageCount: Int
     let authorName: String
     let onSelect: (Int) -> Void
 
@@ -419,7 +550,7 @@ private struct FriendStoryProgressBars: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Update \(index + 1) of \(count)")
+        .accessibilityLabel("Update \(pageIndex + 1) of \(pageCount)")
         .accessibilityValue(authorName)
         .accessibilityIdentifier("friend-story.page.\(pageID)")
     }

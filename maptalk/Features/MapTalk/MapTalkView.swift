@@ -144,7 +144,9 @@ struct MapTalkView: View {
                 case let .poi(group):
                     return ExperienceDetailView.SequencePager.Item(
                         id: group.id,
-                        mode: .poi(group.ratedPOI)
+                        mode: .poi(focusedJourneyHeader == nil
+                            ? viewModel.publicPlaceDetails(id: group.id) ?? group.ratedPOI
+                            : group.ratedPOI)
                     )
                 case let .journey(journey):
                     return ExperienceDetailView.SequencePager.Item(
@@ -1345,11 +1347,9 @@ private extension MapTalkView {
     }
 
     func friendStoryPlace(_ id: UUID) -> RatedPOI? {
-        // Prefer the map's richer place projection, not a fabricated personal
-        // POI. The story still references its exact original check-in.
-        viewModel.ratedPOIs.first { $0.id == id }
-            ?? viewModel.friendFootprints.first { $0.ratedPOI.id == id }?.ratedPOI
-            ?? viewModel.activityPOIs.first { $0.id == id }
+        // The expanded original card has public place history; the compact
+        // story continues to reference only its exact original check-in.
+        viewModel.publicPlaceDetails(id: id)
             ?? friendStoryNavigation.session?.groups.flatMap(\.pages).compactMap { page in
                 if case let .poi(place, _, _) = page.content, place.id == id { return place }
                 return nil
@@ -1444,11 +1444,13 @@ private extension MapTalkView {
         // place as photos arrive, preserving its detent, identity and map camera.
         switch activeExperience {
         case let .poi(previous, nonce):
-            if let current = places.first(where: { $0.id == previous.id }), current != previous {
+            if let current = viewModel.publicPlaceDetails(id: previous.id,
+                latestPublicPlace: places.first { $0.id == previous.id }), current != previous {
                 activeExperience = .poi(rated: current, nonce: nonce)
             }
         case let .friendPlace(previous, sourceID, nonce):
-            if let current = places.first(where: { $0.id == previous.id }), current != previous {
+            if let current = viewModel.publicPlaceDetails(id: previous.id,
+                latestPublicPlace: places.first { $0.id == previous.id }), current != previous {
                 activeExperience = .friendPlace(rated: current, sourceID: sourceID, nonce: nonce)
             }
         default:

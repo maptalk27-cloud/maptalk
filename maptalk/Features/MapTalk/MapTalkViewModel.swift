@@ -244,6 +244,42 @@ final class MapTalkViewModel: ObservableObject {
             .filter { isUserScope || hasRecentVisit($0, asOf: freshnessDate) }
     }
 
+    /// Feed membership stays recent, but opening its original place card must
+    /// not replace public history with the feed's 72-hour slice. These sources
+    /// are public projections only; private MyMap visits are never borrowed.
+    func publicPlaceDetails(id: UUID, latestPublicPlace: RatedPOI? = nil) -> RatedPOI? {
+        let sources = [
+            latestPublicPlace?.id == id ? latestPublicPlace : nil,
+            ratedPOIs.first { $0.id == id },
+            friendFootprints.first { $0.ratedPOI.id == id }?.ratedPOI,
+            activityPOIs.first { $0.id == id }
+        ].compactMap { $0 }.compactMap { removingUnavailableMapVisits(from: $0) }
+        guard var result = sources.first else { return nil }
+        for source in sources.dropFirst() {
+            // Metadata and downloads can arrive independently. For a shared
+            // visit, an unloaded snapshot must not erase already-ready media.
+            for visit in source.checkIns {
+                if let index = result.checkIns.firstIndex(where: { $0.id == visit.id }) {
+                    result.checkIns[index].media = mergeReadyPlaceMedia(
+                        result.checkIns[index].media, with: visit.media)
+                } else {
+                    result.checkIns.append(visit)
+                }
+            }
+            result.media = mergeReadyPlaceMedia(result.media, with: source.media)
+        }
+        return result
+    }
+
+    private func mergeReadyPlaceMedia(_ existing: [RatedPOI.Media], with incoming: [RatedPOI.Media]) -> [RatedPOI.Media] {
+        let existingIDs = Set(existing.map(\.id))
+        let incomingIDs = Set(incoming.map(\.id))
+        // A photo can finish before a preceding video. When a fuller snapshot
+        // arrives, use its publication order rather than download-completion order.
+        if existingIDs.isStrictSubset(of: incomingIDs) { return incoming }
+        return existing + incoming.filter { !existingIDs.contains($0.id) }
+    }
+
     func mapRenderReels(
         retaining selectedID: UUID?,
         selectedMapReel: RealPost? = nil

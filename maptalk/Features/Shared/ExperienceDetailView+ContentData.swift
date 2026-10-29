@@ -100,7 +100,7 @@ extension ExperienceDetailView {
             let accent = rated.poi.category.accentColor
             let friendCheckIns = checkInEngagements(for: rated)
             let friendComments = poiCommentEngagements(for: rated)
-            let endorsementBadges = poiEndorsementBadges(for: rated)
+            let endorsementBadges = Self.poiEndorsementBadges(for: rated)
             let tagBadges = poiBadgeStrings(for: rated)
             let stories = poiStoryContributors(for: rated)
             let gallery = galleryItems(for: rated)
@@ -247,7 +247,7 @@ extension ExperienceDetailView {
         ratedPOI.tags.map { "\($0.tag.emoji) \($0.tag.displayName) · \($0.count)" }
     }
 
-    func poiEndorsementBadges(for ratedPOI: RatedPOI) -> [EndorsementBadge] {
+    static func poiEndorsementBadges(for ratedPOI: RatedPOI) -> [EndorsementBadge] {
         let summary = ratedPOI.endorsements
         let entries: [(RatedPOI.Endorsement, Int)] = [
             (.hype, summary.hype),

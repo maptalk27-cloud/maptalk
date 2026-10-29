@@ -10,6 +10,90 @@ struct FriendStoryFeedTests {
     private let bob = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
     @Test
+    func consecutiveVisitsAtOnePlaceShareOneMomentWithoutLosingOriginalPages() throws {
+        let first = visit(id: 101, author: alice, ago: 100, media: [media(700), media(701)])
+        let second = visit(id: 102, author: alice, ago: 50, media: [media(702)])
+        let group = try #require(groups(places: [place(id: 500, visits: [second, first])]).first)
+        #expect(group.moments.count == 1)
+        #expect(group.moments[0].pageRange == 0..<3)
+        #expect(group.moments[0].placeID == uuid(500))
+        #expect(group.moments[0].id == group.pages[0].id)
+        #expect(group.pages.map(\.memoryID) == [first.id, first.id, second.id])
+        #expect(group.pages.map(\.mediaID) == [uuid(700), uuid(701), uuid(702)])
+        #expect(Set(group.readKeys).count == 3)
+        #expect(group.momentIndex(containing: 0) == 0)
+        #expect(group.momentIndex(containing: 2) == 0)
+        #expect(group.momentIndex(containing: 3) == nil)
+        #expect(group.momentIndex(containing: -1) == nil)
+    }
+
+    @Test
+    func anotherPlaceOrReelSeparatesReturnVisitsInsteadOfReorderingTheStory() throws {
+        let first = visit(id: 101, author: alice, ago: 500)
+        let elsewhere = visit(id: 102, author: alice, ago: 400)
+        let returned = visit(id: 103, author: alice, ago: 300)
+        let originalReel = reel(id: 201, author: alice, ago: 200)
+        let afterReel = visit(id: 104, author: alice, ago: 100)
+        let group = try #require(groups(reals: [originalReel], places: [
+            place(id: 500, visits: [first, returned, afterReel]),
+            // Same display name and coordinate must not merge separate IDs.
+            place(id: 501, visits: [elsewhere])
+        ]).first)
+        #expect(group.pages.map(\.memoryID) == [first.id, elsewhere.id, returned.id, originalReel.id, afterReel.id])
+        #expect(group.moments.map(\.pageRange) == [0..<1, 1..<2, 2..<3, 3..<4, 4..<5])
+        #expect(group.moments.map(\.placeID) == [uuid(500), uuid(501), uuid(500), nil, uuid(500)])
+    }
+
+    @Test
+    func sharedPlaceMomentsNeverCombineDifferentAuthors() throws {
+        let first = visit(id: 101, author: alice, ago: 100)
+        let other = visit(id: 102, author: bob, ago: 75)
+        let repeated = visit(id: 103, author: alice, ago: 50)
+        let result = groups(places: [place(id: 500, visits: [first, other, repeated])])
+        let own = try #require(result.first { $0.authorID == alice })
+        let friend = try #require(result.first { $0.authorID == bob })
+        #expect(own.moments.count == 1)
+        #expect(own.pages.map(\.memoryID) == [first.id, repeated.id])
+        #expect(friend.moments.count == 1)
+        #expect(friend.pages.map(\.memoryID) == [other.id])
+    }
+
+    @Test
+    func backendRepeatedVisitsGroupBeforeDownloadsAndKeepTheirIdentityAfterDownloads() throws {
+        let first = record(id: 101, author: alice, kind: "poi", ago: 100, media: [backendMedia(700)])
+        let second = record(id: 102, author: alice, kind: "poi", ago: 50, media: [backendMedia(701)])
+        let pending = try #require(groups(records: [second, first]).first)
+        #expect(pending.moments.count == 1)
+        #expect(pending.moments[0].pageRange == 0..<2)
+        #expect(pending.pages.allSatisfy { !$0.isMediaReady })
+        let loaded = try #require(groups(places: [place(id: 500, visits: [
+            visit(id: 101, author: alice, ago: 100, media: [media(700)]),
+            visit(id: 102, author: alice, ago: 50, media: [media(701)])
+        ])], records: [first, second]).first)
+        #expect(loaded.pages.allSatisfy { $0.isMediaReady })
+        #expect(loaded.pages.map(\.id) == pending.pages.map(\.id))
+        #expect(loaded.moments.map(\.id) == pending.moments.map(\.id))
+        #expect(loaded.readKeys == pending.readKeys)
+    }
+
+    @Test
+    func groupedVisitCanBeSwipedAndDeletedIndependently() throws {
+        let first = visit(id: 101, author: alice, ago: 100)
+        let second = visit(id: 102, author: alice, ago: 50)
+        let result = groups(places: [place(id: 500, visits: [first, second])])
+        var session = try #require(FriendStorySession(groups: result, authorID: alice))
+        #expect(session.currentPage?.memoryID == first.id)
+        let advanced = session.movePage(by: 1)
+        #expect(advanced)
+        #expect(session.currentPage?.memoryID == second.id)
+        #expect(session.currentGroup?.moments.count == 1)
+        session.invalidate(memoryIDs: [first.id])
+        #expect(session.currentPage?.memoryID == second.id)
+        #expect(session.currentPageIndex == 0)
+        #expect(session.currentGroup?.moments.first?.pageRange == 0..<1)
+    }
+
+    @Test
     func oneAuthorHasOneEntryAcrossPlacesRepeatedVisitsAndReels() throws {
         let first = visit(id: 101, author: alice, ago: 300)
         let repeated = visit(id: 102, author: alice, ago: 100)
@@ -247,7 +331,7 @@ struct FriendStoryFeedTests {
     }
 
     @Test
-    func firstEntryStartsAtFirstUnreadAndAllReadStartsAtLatestPublicationsFirstSlice() throws {
+    func firstEntryStartsAtFirstUnreadAndAllReadReplaysFromFirstSlice() throws {
         let first = visit(id: 101, author: alice, ago: 100)
         let last = visit(id: 102, author: alice, ago: 20, media: [media(700), media(701)])
         let result = groups(places: [place(id: 500, visits: [first, last])])
@@ -256,7 +340,8 @@ struct FriendStoryFeedTests {
         #expect(partial.currentPage?.id == pages[1].id)
         let complete = try #require(FriendStorySession(groups: result, authorID: alice,
             viewedKeys: Set(pages.map(\.readKey))))
-        #expect(complete.currentPage?.id == pages[1].id)
+        #expect(complete.currentPage?.id == pages[0].id)
+        #expect(complete.currentPageIndex == 0)
     }
 
     @Test

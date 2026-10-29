@@ -66,89 +66,71 @@ final class FriendStoryUITests: XCTestCase {
         revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE2", app: app).tap()
         XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
         rewind(app)
-        // The floating bar selects the story slice; the original POI card
-        // retains its compact/expanded layout and original avatar interaction.
-        for _ in 0..<90 {
-            let position = pagePosition(app)
-            if currentPage(app).identifier.hasPrefix("friend-story.page.poi:")
-                && poiMediaID(from: currentPage(app).identifier) != nil
-                && position.index > 0 && position.index + 1 < position.count { break }
-            XCTAssertTrue(advancePage(app), "The demo author must have an interior POI media update")
+        // This POC checks the existing demo place projection, not a server
+        // history fetch. Only the compact story's media presentation changes.
+        for _ in 0..<pagePosition(app).count {
+            if poiMediaID(from: currentPage(app).identifier) != nil { break }
+            XCTAssertTrue(advancePage(app), "The demo author must have a POI media update")
         }
         let pageID = currentPage(app).identifier
         let mediaID = try XCTUnwrap(poiMediaID(from: pageID))
         let author = currentAuthor(app).value as? String
         let authorID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE2"
-        let pageIndex = pagePosition(app).index
         assertSharedHeader(app)
-
-        selectPage(pageIndex - 1, app: app)
-        XCTAssertEqual(currentAuthor(app).value as? String, author)
-        selectPage(pageIndex, app: app)
-        XCTAssertEqual(currentPage(app).identifier, pageID)
-        selectPage(pageIndex + 1, app: app)
-        XCTAssertEqual(currentAuthor(app).value as? String, author)
-        selectPage(pageIndex, app: app)
-
         assertOriginalPOICard(app, expanded: false)
-        evidence(app, name: "Original POI — compact card with circular contributor avatars")
-        let sharer = app.buttons["experience.poi.sharer.\(authorID)"]
-        XCTAssertTrue(sharer.waitForExistence(timeout: 5))
-        XCTAssertTrue(sharer.isHittable)
-        sharer.tap()
-        assertCurrentPOIMedia(mediaID, app: app)
-        evidence(app, name: "Original POI circular avatar — exact current story slice")
-        app.buttons["experience.poi-story.close"].tap()
+        let media = app.buttons["friend-story.poi.media.\(mediaID)"]
+        XCTAssertTrue(media.isHittable)
+        evidence(app, name: "POI compact — full-card media and non-button place name")
+        media.tap()
+        let close = app.buttons["experience.media-lightbox.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "The media opens the existing lightbox directly")
+        assertStoryHeaderHidden(app)
+        evidence(app, name: "POI media — existing lightbox")
+        close.tap()
         XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
         XCTAssertEqual(currentPage(app).identifier, pageID)
         XCTAssertEqual(currentAuthor(app).value as? String, author)
         waitForDetent("Half screen", app: app)
-        assertSharedHeader(app)
-        assertOriginalPOICard(app, expanded: false)
+        XCTAssertTrue(media.isHittable)
 
-        let collapsed = app.descendants(matching: .any)["experience.poi.collapsed"].firstMatch
-        collapsed.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.15)).tap()
-        waitForDetent("Expanded", app: app)
+        expandStoryForReading(app)
         XCTAssertEqual(currentPage(app).identifier, pageID,
-                       "The original compact POI card expands the current update instead of switching posts")
+                       "Native expansion keeps the exact story page selected")
         XCTAssertEqual(currentAuthor(app).value as? String, author)
         assertOriginalPOICard(app, expanded: true)
         assertSharedHeader(app)
-        evidence(app, name: "Original POI — expanded place card with footprints")
-
-        selectPage(pageIndex + 1, app: app)
-        waitForDetent("Expanded", app: app)
-        XCTAssertNotEqual(currentPage(app).identifier, pageID)
-        XCTAssertEqual(currentAuthor(app).value as? String, author)
-        swipeCard(to: pageIndex, app: app)
-        waitForDetent("Expanded", app: app)
-        assertOriginalPOICard(app, expanded: true)
-
-        let footprint = app.buttons["experience.poi.footprint.\(authorID)"]
-        XCTAssertTrue(footprint.waitForExistence(timeout: 5))
-        for _ in 0..<4 {
-            if footprint.isHittable { break }
+        let otherVisitor = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND identifier != %@",
+            "experience.poi.footprint.", "experience.poi.footprint.\(authorID)"
+        )).firstMatch
+        for _ in 0..<2 {
+            if otherVisitor.exists { break }
             storyCard(app).coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.8)).press(
                 forDuration: 0.05,
                 thenDragTo: storyCard(app).coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.35))
             )
         }
-        XCTAssertTrue(footprint.isHittable, "The original expanded footprint avatar remains interactive")
-        footprint.tap()
-        assertCurrentPOIMedia(mediaID, app: app)
-        evidence(app, name: "Original POI footprint — exact current story slice")
-        app.buttons["experience.poi-story.close"].tap()
-        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+        XCTAssertTrue(otherVisitor.waitForExistence(timeout: 3),
+                      "The original expanded place includes existing visitors beyond the current story author")
+        XCTAssertFalse(app.buttons["maptalk.friend-story.back"].exists,
+                       "Expanding the same sheet must not push a separate place route")
+        evidence(app, name: "POI expanded — original place card and other visitors")
+
+        let grabber = app.buttons["Sheet Grabber"].firstMatch
+        XCTAssertTrue(grabber.waitForExistence(timeout: 3))
+        grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(
+            forDuration: 0.08,
+            thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.62)),
+            withVelocity: .slow,
+            thenHoldForDuration: 0.1
+        )
+        waitForDetent("Half screen", app: app)
         XCTAssertEqual(currentPage(app).identifier, pageID)
         XCTAssertEqual(currentAuthor(app).value as? String, author)
-        waitForDetent("Expanded", app: app)
         assertSharedHeader(app)
-        assertOriginalPOICard(app, expanded: true)
-
-        swipeCard(to: pageIndex + 1, app: app)
-        waitForDetent("Expanded", app: app)
-        XCTAssertNotEqual(currentPage(app).identifier, pageID)
-        evidence(app, name: "Original POI returns exactly — next item stays expanded")
+        assertOriginalPOICard(app, expanded: false)
+        XCTAssertTrue(media.isHittable)
+        evidence(app, name: "POI collapsed — exact original story media restored")
     }
 
     @MainActor
@@ -230,9 +212,7 @@ final class FriendStoryUITests: XCTestCase {
         )).firstMatch
         XCTAssertTrue(selectedPOIMarker.waitForExistence(timeout: 8),
                       "Selecting a POI keeps its original category marker instead of replacing it with the person's avatar")
-        let collapsed = app.descendants(matching: .any)["experience.poi.collapsed"].firstMatch
-        collapsed.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.15)).tap()
-        waitForDetent("Expanded", app: app)
+        expandStoryForReading(app)
         assertOriginalPOICard(app, expanded: true)
         let stage = storyCard(app)
         let author = currentAuthor(app).value as? String
@@ -329,7 +309,7 @@ final class FriendStoryUITests: XCTestCase {
 
         // Use the real position selector and original author profile.
         let expectedPage = "friend-story.page.reel:00000000-0000-0000-0000-000000009301"
-        currentPage(app).coordinate(withNormalizedOffset: CGVector(dx: 13.5 / 19.0, dy: 0.5)).tap()
+        selectPage(13, app: app)
         app.buttons["friend-story.open-author"].tap()
         let back = app.buttons["Back"].firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5))
@@ -490,6 +470,59 @@ final class FriendStoryUITests: XCTestCase {
     }
 
     @MainActor
+    func testSamePlacePagesShareOneStopAndCanReturnFromAnotherStop() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+
+        // The existing night-market visit has three media slices. Their
+        // grouping uses the same production projection as repeated visits.
+        selectPage(12, app: app)
+        XCTAssertTrue(currentPage(app).identifier.hasPrefix(
+            "friend-story.page.poi:00000000-0000-0000-0000-000000006006:"
+        ))
+        let stop = stopPosition(app)
+        selectStop(stop.index, app: app)
+        let firstPage = currentPage(app).identifier
+        let firstIndex = pagePosition(app).index
+        let firstItem = try XCTUnwrap(momentPosition(app))
+        let author = currentAuthor(app).value as? String
+        XCTAssertEqual(author, "chengsi")
+        XCTAssertEqual(firstItem.index, 0)
+        XCTAssertEqual(firstItem.count, 3)
+        XCTAssertLessThan(stop.count, pagePosition(app).count,
+                          "Several media pages at the same place share one top-level stop")
+        evidence(app, name: "Same place — one stop with three original media pages")
+
+        swipeCard(to: firstIndex + 1, app: app)
+        let secondPage = currentPage(app).identifier
+        XCTAssertNotEqual(secondPage, firstPage)
+        XCTAssertEqual(stopPosition(app).index, stop.index,
+                       "Paging inside a place does not advance its top-level progress segment")
+        XCTAssertEqual(stopPosition(app).count, stop.count)
+        XCTAssertEqual(momentPosition(app)?.index, 1)
+        XCTAssertEqual(momentPosition(app)?.count, 3)
+        XCTAssertEqual(currentAuthor(app).value as? String, author)
+
+        XCTAssertLessThan(stop.index + 1, stop.count)
+        selectStop(stop.index + 1, app: app)
+        XCTAssertNotEqual(currentPage(app).identifier, secondPage)
+        XCTAssertEqual(stopPosition(app).index, stop.index + 1)
+        XCTAssertEqual(currentAuthor(app).value as? String, author,
+                       "Tapping another stop must not change people")
+        selectStop(stop.index, app: app)
+        XCTAssertEqual(currentPage(app).identifier, firstPage,
+                       "Selecting the grouped stop again opens its first original page")
+        XCTAssertEqual(momentPosition(app)?.index, 0)
+        swipeCard(to: firstIndex + 1, app: app)
+        XCTAssertEqual(currentPage(app).identifier, secondPage)
+        XCTAssertEqual(currentAuthor(app).value as? String, author)
+        waitForDetent("Half screen", app: app)
+        evidence(app, name: "Same place — independent page swipe and exact stop re-entry")
+    }
+
+    @MainActor
     private func expandStoryForReading(_ app: XCUIApplication) {
         let grabber = app.buttons["Sheet Grabber"].firstMatch
         XCTAssertTrue(grabber.waitForExistence(timeout: 5))
@@ -530,8 +563,8 @@ final class FriendStoryUITests: XCTestCase {
         rewind(app)
         let reelID = "00000000-0000-0000-0000-000000009301"
         let expectedPage = "friend-story.page.reel:\(reelID)"
-        // The current demo fixture places Waikiki at update 14 of 19. Use the
-        // real progress selector directly, retaining discovery if seeds change.
+        // The current demo fixture places Waikiki at update 14 of 19. Select
+        // through the grouped progress and card pager, with a discovery fallback.
         if pagePosition(app).count == 19 {
             selectPage(13, app: app)
         }
@@ -779,7 +812,7 @@ final class FriendStoryUITests: XCTestCase {
     @MainActor
     private func poiCard(_ app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(NSPredicate(
-            format: "identifier IN %@", ["experience.poi.collapsed", "experience.poi.expanded"]
+            format: "identifier IN %@", ["friend-story.poi.preview", "experience.poi.collapsed", "experience.poi.expanded"]
         )).firstMatch
     }
 
@@ -792,6 +825,30 @@ final class FriendStoryUITests: XCTestCase {
 
     @MainActor
     private func assertOriginalPOICard(_ app: XCUIApplication, expanded: Bool) {
+        if !expanded, let mediaID = poiMediaID(from: currentPage(app).identifier) {
+            let preview = app.descendants(matching: .any)["friend-story.poi.preview"].firstMatch
+            XCTAssertTrue(preview.waitForExistence(timeout: 3))
+            let media = app.buttons["friend-story.poi.media.\(mediaID)"]
+            XCTAssertTrue(media.waitForExistence(timeout: 3))
+            XCTAssertGreaterThanOrEqual(media.frame.width, preview.frame.width - 2,
+                                        "The current media fills the compact POI preview's width")
+            XCTAssertGreaterThanOrEqual(media.frame.height, preview.frame.height - 2,
+                                        "The current media fills the compact POI preview's height")
+            let heading = app.descendants(matching: .any)["friend-story.poi.place-name"].firstMatch
+            XCTAssertTrue(heading.exists)
+            XCTAssertLessThan(heading.frame.maxY, preview.frame.midY,
+                              "The original place heading stays at the top of the media card")
+            let stats = app.descendants(matching: .any)["friend-story.poi.stats"].firstMatch
+            XCTAssertTrue(stats.exists, "Keep the original check-in, comment and favorite counters")
+            XCTAssertGreaterThan(stats.frame.minY, preview.frame.midY,
+                                 "Place activity stays at the bottom, separate from the top heading")
+            XCTAssertLessThanOrEqual(stats.frame.maxY, preview.frame.maxY,
+                                     "The counters stay inside the compact card")
+            XCTAssertFalse(app.buttons["friend-story.poi.place-name"].exists,
+                           "The place name is a label, not a navigation button")
+            XCTAssertFalse(app.buttons["friend-story.open-place"].exists)
+            return
+        }
         let mode = expanded ? "expanded" : "collapsed"
         let originalCard = app.descendants(matching: .any)["experience.poi.\(mode)"].firstMatch
         let exists = originalCard.waitForExistence(timeout: 3)
@@ -810,15 +867,6 @@ final class FriendStoryUITests: XCTestCase {
     }
 
     @MainActor
-    private func assertCurrentPOIMedia(_ mediaID: String, app: XCUIApplication) {
-        XCTAssertTrue(app.buttons["experience.poi-story.close"].waitForExistence(timeout: 5),
-                      "POI avatars retain the original story viewer")
-        XCTAssertTrue(app.descendants(matching: .any)["experience.poi-story.media.\(mediaID)"].firstMatch.waitForExistence(timeout: 5),
-                      "The original viewer must open the exact media slice selected by the floating bar")
-        assertStoryHeaderHidden(app)
-    }
-
-    @MainActor
     private func pagePosition(_ app: XCUIApplication) -> (index: Int, count: Int) {
         let page = currentPage(app)
         XCTAssertTrue(page.waitForExistence(timeout: 3), "The progress strip exposes the current update")
@@ -828,6 +876,33 @@ final class FriendStoryUITests: XCTestCase {
               count > 0, (1...count).contains(number) else {
             XCTFail("Expected the progress label 'Update N of M', got '\(page.label)'")
             return (0, 1)
+        }
+        return (number - 1, count)
+    }
+
+    @MainActor
+    private func stopPosition(_ app: XCUIApplication) -> (index: Int, count: Int) {
+        let value = authorNavigation(app).value as? String ?? ""
+        let words = value.split(separator: " ")
+        guard words.count == 4, words[0] == "Stop", words[2] == "of",
+              let number = Int(words[1]), let count = Int(words[3]),
+              count > 0, (1...count).contains(number) else {
+            XCTFail("Expected the grouped position 'Stop N of M', got '\(value)'")
+            return (0, 1)
+        }
+        return (number - 1, count)
+    }
+
+    @MainActor
+    private func momentPosition(_ app: XCUIApplication) -> (index: Int, count: Int)? {
+        let item = app.descendants(matching: .any)["friend-story.moment-position"].firstMatch
+        guard item.exists else { return nil }
+        let words = item.label.split(separator: " ")
+        guard words.count == 7, words[3] == "item", words[5] == "of",
+              let number = Int(words[4]), let count = Int(words[6]),
+              count > 1, (1...count).contains(number) else {
+            XCTFail("Expected 'At this place, item X of Y', got '\(item.label)'")
+            return nil
         }
         return (number - 1, count)
     }
@@ -870,21 +945,69 @@ final class FriendStoryUITests: XCTestCase {
 
     @MainActor
     private func selectPage(_ index: Int, app: XCUIApplication) {
-        let page = currentPage(app)
-        XCTAssertTrue(page.waitForExistence(timeout: 3), "The visible progress must expose the current update")
+        XCTAssertTrue(currentPage(app).waitForExistence(timeout: 3), "The visible progress must expose the current update")
         let position = pagePosition(app)
         guard (0..<position.count).contains(index) else {
             XCTFail("Cannot select update \(index + 1) of \(position.count)")
             return
         }
         guard position.index != index else { return }
+        if abs(position.index - index) == 1 {
+            swipeCard(to: index, app: app)
+            return
+        }
+
+        // The top strip now represents stops, not individual media pages.
+        // Locate the containing stop with real taps (bounded binary search),
+        // then use the original lower-card swipe for its remaining slices.
+        // This avoids either assuming equal stop sizes or swiping through
+        // every earlier post when a regression needs the author's last card.
+        var lowerStop = 0
+        var upperStop = stopPosition(app).count - 1
+        while lowerStop <= upperStop {
+            let current = pagePosition(app)
+            let stop = stopPosition(app)
+            let item = momentPosition(app) ?? (index: 0, count: 1)
+            let firstPage = current.index - item.index
+            let lastPage = firstPage + item.count - 1
+            if (firstPage...lastPage).contains(index) { break }
+            if index < firstPage { upperStop = stop.index - 1 }
+            else { lowerStop = stop.index + 1 }
+            guard lowerStop <= upperStop else {
+                XCTFail("No visible stop contains update \(index + 1)")
+                return
+            }
+            let targetStop = index == 0 ? lowerStop
+                : index == position.count - 1 ? upperStop : (lowerStop + upperStop) / 2
+            selectStop(targetStop, app: app)
+        }
+        while pagePosition(app).index != index {
+            let current = pagePosition(app).index
+            swipeCard(to: current + (index > current ? 1 : -1), app: app)
+        }
+        XCTAssertEqual(pagePosition(app).index, index)
+    }
+
+    @MainActor
+    private func selectStop(_ index: Int, app: XCUIApplication) {
+        let stop = stopPosition(app)
+        guard (0..<stop.count).contains(index) else {
+            XCTFail("Cannot select stop \(index + 1) of \(stop.count)")
+            return
+        }
+        if stop.index == index, (momentPosition(app)?.index ?? 0) == 0 { return }
+        let page = currentPage(app)
         let oldID = page.identifier
+        let author = currentAuthor(app).value as? String
         XCTAssertTrue(page.isHittable, "The visible progress strip must be directly tappable")
         page.coordinate(withNormalizedOffset: CGVector(
-            dx: (CGFloat(index) + 0.5) / CGFloat(position.count), dy: 0.5
+            dx: (CGFloat(index) + 0.5) / CGFloat(stop.count), dy: 0.5
         )).tap()
         waitForPageChange(from: oldID, app: app)
-        XCTAssertEqual(pagePosition(app).index, index, "The tapped segment selects that exact update")
+        XCTAssertEqual(stopPosition(app).index, index)
+        XCTAssertEqual(momentPosition(app)?.index ?? 0, 0,
+                       "A stop selection opens its first original media page")
+        XCTAssertEqual(currentAuthor(app).value as? String, author)
     }
 
     @MainActor

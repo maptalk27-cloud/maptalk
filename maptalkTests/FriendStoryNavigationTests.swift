@@ -514,6 +514,50 @@ struct FriendStoryNavigationTests {
     }
 
     @Test
+    func reopeningFullyReadOwnOrFriendStoryStartsAtBeginningButActiveReturnKeepsCursor() throws {
+        for authorID in [PreviewData.currentUser.id, alice] {
+            let groups = FriendStoryFeed.groups(
+                reals: [reel(id: 201, author: authorID, ago: 100),
+                        reel(id: 202, author: authorID, ago: 50)],
+                ratedPOIs: [], userProvider: { _ in nil }, now: now
+            )
+            let pages = try #require(groups.first?.pages)
+            let viewedKeys = Set(pages.map(\.readKey))
+            let nav = FriendStoryNavigation()
+            let origin = snapshot(latitude: 47.6, longitude: -122.3)
+            nav.begin(groups: groups, authorID: authorID, viewedKeys: viewedKeys, origin: origin)
+            #expect(nav.session?.currentPage?.id == pages[0].id,
+                    "All-read stories replay from the start, including the current user's own posts")
+            #expect(nav.session?.movePage(by: 1) == true)
+            nav.begin(groups: groups, authorID: authorID, viewedKeys: viewedKeys, origin: origin)
+            #expect(nav.session?.currentPage?.id == pages[1].id,
+                    "Returning during the same browsing session must preserve the exact post")
+
+            nav.clear()
+            nav.begin(groups: groups, authorID: authorID, viewedKeys: viewedKeys, origin: origin)
+            #expect(nav.session?.currentPage?.id == pages[0].id,
+                    "Closing and opening an avatar again is a new visit, not a persistent last-post cursor")
+        }
+    }
+
+    @Test
+    func newlyOpenedOwnOrFriendStoryStillPrioritizesFirstUnreadPost() throws {
+        for authorID in [PreviewData.currentUser.id, alice] {
+            let groups = FriendStoryFeed.groups(
+                reals: [reel(id: 201, author: authorID, ago: 100),
+                        reel(id: 202, author: authorID, ago: 50),
+                        reel(id: 203, author: authorID, ago: 20)],
+                ratedPOIs: [], userProvider: { _ in nil }, now: now
+            )
+            let pages = try #require(groups.first?.pages)
+            let nav = FriendStoryNavigation()
+            nav.begin(groups: groups, authorID: authorID, viewedKeys: [pages[0].readKey],
+                      origin: snapshot(latitude: 47.6, longitude: -122.3))
+            #expect(nav.session?.currentPage?.id == pages[1].id)
+        }
+    }
+
+    @Test
     func changingAuthorsRefocusesEvenAtTheSamePlaceButSameAuthorSlicesDoNot() {
         let nav = FriendStoryNavigation()
         let viewport = CGSize(width: 400, height: 800)

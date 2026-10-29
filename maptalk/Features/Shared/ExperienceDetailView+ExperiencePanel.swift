@@ -204,6 +204,32 @@ struct POITagList: View {
         }
     }
 }
+struct POIPlaceHeading: View {
+    let info: ExperienceDetailView.POIInfoModel
+    let accentColor: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: POIHeroLayout.avatarSpacing) {
+            POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
+                .alignmentGuide(.top) { $0[.top] }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(info.name)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(.white)
+                HStack(spacing: 8) {
+                    Text(info.category.displayName)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.7))
+                    ForEach(info.endorsementBadges) { badge in
+                        POIBadgeSummaryPill(badge: badge)
+                    }
+                }
+            }
+        }
+    }
+}
+
 struct POICollapsedHero: View {
     let info: ExperienceDetailView.POIInfoModel
     let stats: ExperienceDetailView.POIStatsModel?
@@ -214,24 +240,8 @@ struct POICollapsedHero: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: POIHeroLayout.avatarSpacing) {
-                POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
-                    .alignmentGuide(.top) { $0[.top] }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(info.name)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.white)
-                    HStack(spacing: 8) {
-                        Text(info.category.displayName)
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.7))
-                        ForEach(info.endorsementBadges) { badge in
-                            POIBadgeSummaryPill(badge: badge)
-                        }
-                    }
-                }
-            }
+            POIPlaceHeading(info: info, accentColor: accentColor)
+                .accessibilityIdentifier("experience.poi.collapsed.heading")
 
             if recentSharers.isEmpty == false {
                 POIRecentSharersRow(
@@ -243,10 +253,15 @@ struct POICollapsedHero: View {
                 }
             }
 
+            Spacer(minLength: 0)
+
             if let stats {
                 POIHeroStatsRow(model: stats)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("experience.poi.collapsed.stats")
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.top, POIHeroLayout.headerTopPadding)
         .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
         .padding(.vertical, POIHeroLayout.collapsedVerticalPadding)
@@ -265,24 +280,7 @@ struct POIExpandedHero: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: POIHeroLayout.avatarSpacing) {
-                POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
-                    .alignmentGuide(.top) { $0[.top] }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(info.name)
-                        .font(.headline.weight(.semibold))
-                        .foregroundStyle(.white)
-                    HStack(spacing: 8) {
-                        Text(info.category.displayName)
-                            .font(.caption)
-                            .foregroundStyle(.white.opacity(0.7))
-                        ForEach(info.endorsementBadges) { badge in
-                            POIBadgeSummaryPill(badge: badge)
-                        }
-                    }
-                }
-            }
+            POIPlaceHeading(info: info, accentColor: accentColor)
 
             if recentSharers.isEmpty == false {
                 POIRecentSharersRow(

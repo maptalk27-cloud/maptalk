@@ -1870,15 +1870,30 @@ final class BackendStore: ObservableObject {
         // batch mixing one small photo with several full video downloads.
         let images = mediaByID.values.filter { $0.mimeType != "video/mp4" }.sorted { $0.id.uuidString < $1.id.uuidString }
         let videos = mediaByID.values.filter { $0.mimeType == "video/mp4" }.sorted { $0.id.uuidString < $1.id.uuidString }
+        var firstDownloadFailure: Error?
         for media in [images, videos] {
             for start in stride(from: 0, to: media.count, by: 4) {
                 try requireActive()
                 guard contentRevision == publicContentRevision else { throw CancellationError() }
-                try await withThrowingTaskGroup(of: Void.self) { group in
+                try await withThrowingTaskGroup(of: (any Error)?.self) { group in
                     for item in media[start..<min(start + 4, media.count)] {
-                        group.addTask { try await self.prepareMedium(item, contentRevision: contentRevision) }
+                        group.addTask {
+                            do {
+                                try await self.prepareMedium(item, contentRevision: contentRevision)
+                                return nil
+                            } catch {
+                                try Task.checkCancellation()
+                                // Revoked access and cancelled views still stop
+                                // immediately. A broken download must not stop
+                                // unrelated photos or every later video batch.
+                                if Self.mustStopMediaPreparation(after: error) { throw error }
+                                return error
+                            }
+                        }
                     }
-                    try await group.waitForAll()
+                    for try await failure in group {
+                        if firstDownloadFailure == nil { firstDownloadFailure = failure }
+                    }
                 }
                 try requireActive()
                 guard contentRevision == publicContentRevision else { throw CancellationError() }
@@ -1893,6 +1908,19 @@ final class BackendStore: ObservableObject {
             if record.ownerId == user.id, let current = profileMetadata[user.id] { record.owner = current }
             if record.ownerId == user.id { ownedMemories[record.id]?.owner = record.owner }
             else { applyProfile(record.owner) }
+        }
+        // Successful assets have already reached the visible projection. Keep
+        // the failure recoverable so the next refresh retries only missing media.
+        if let firstDownloadFailure { throw firstDownloadFailure }
+    }
+
+    private nonisolated static func mustStopMediaPreparation(after error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        switch error {
+        case BackendClientError.unauthorized: return true
+        case let BackendClientError.http(status, _, _): return [401, 403, 404, 410].contains(status)
+        default: return false
         }
     }
 

@@ -7,6 +7,75 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct BackendProgressiveLoadingTests {
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func oneFailedPhotoDoesNotHideLaterBatchesOrVideoAndRetryOnlyFetchesMissingMedia(isProfile: Bool) async throws {
+        let context = try ProgressiveLoadingContext(extraPhotoCount: 4)
+        defer { context.finish() }
+        var snapshots: [BackendStore.Snapshot] = []
+        let load: () async throws -> BackendStore.Snapshot = {
+            if isProfile {
+                return try await context.store.loadProfile(userID: context.authorID) { snapshots.append($0) }
+            }
+            return try await context.store.loadMap(context.region) { snapshots.append($0) }
+        }
+        let source = try await VideoTestFixture.makeVideo()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let operation = Task { try await load() }
+        defer { operation.cancel() }
+        var requests = context.mediaRequests.makeAsyncIterator()
+        let photoIDs = [context.photoID] + context.extraPhotoIDs
+        let failedID = try #require(photoIDs.min { $0.uuidString < $1.uuidString })
+        let failedPath = "/v1/media/\(failedID.uuidString.lowercased())"
+        for _ in photoIDs {
+            let photo = try #require(await requests.next())
+            #expect(photo.request.url?.path != context.videoPath)
+            if photo.request.url?.path == failedPath { photo.respond(Data(), status: 503) }
+            else { photo.respond(context.photo, contentType: "image/png") }
+        }
+        let video = try #require(await requests.next())
+        #expect(video.request.url?.path == context.videoPath,
+                "A failed photo in the first batch cannot prevent later historical videos from loading")
+        video.respond(try Data(contentsOf: source), contentType: "video/mp4")
+        do {
+            _ = try await operation.value
+            Issue.record("The missing photo must remain a recoverable load failure")
+        } catch BackendClientError.http(let status, _, _) { #expect(status == 503) }
+        let loadedIDs = Set(snapshots.last?.reels.first?.attachments.map(\.id) ?? [])
+        #expect(loadedIDs == Set(photoIDs.filter { $0 != failedID } + [context.videoID]))
+
+        let retry = Task { try await load() }
+        defer { retry.cancel() }
+        let missing = try #require(await requests.next())
+        #expect(missing.request.url?.path == failedPath)
+        missing.respond(context.photo, contentType: "image/png")
+        let complete = try await retry.value
+        #expect(Set(complete.reels.first?.attachments.map(\.id) ?? []) == Set(photoIDs + [context.videoID]))
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [401, 403, 404, 410])
+    func mediaAccessFailureStopsBeforeStartingLaterVideos(status: Int) async throws {
+        let context = try ProgressiveLoadingContext()
+        defer { context.finish() }
+        var updates = 0
+        let operation = Task { try await context.store.loadMap(context.region) { _ in updates += 1 } }
+        defer { operation.cancel() }
+        var requests = context.mediaRequests.makeAsyncIterator()
+        let photo = try #require(await requests.next())
+        photo.respond(Data(), status: status)
+        do {
+            _ = try await operation.value
+            Issue.record("An authorization or withdrawn-media response must abort preparation")
+        } catch {
+            if status == 401 {
+                guard case BackendClientError.unauthorized = error else { throw error }
+            } else {
+                guard case let BackendClientError.http(actual, _, _) = error else { throw error }
+                #expect(actual == status)
+            }
+        }
+        #expect(updates == 1, "No later photo/video projection is published after access is rejected")
+    }
+
     @Test(.timeLimit(.minutes(1)))
     func feedStoryMetadataPrecedesMediaAndNeverChangesPageIdentityAsDownloadsArrive() async throws {
         let context = try ProgressiveLoadingContext(feedContainsRecord: true)
@@ -126,6 +195,7 @@ private final class ProgressiveLoadingContext {
     let recordID = UUID()
     let videoID = UUID()
     let photoID = UUID()
+    let extraPhotoIDs: [UUID]
     let photo = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS1cAAAAASUVORK5CYII=")!
     let region = MKCoordinateRegion(center: .init(latitude: 37.3, longitude: -122),
                                    span: .init(latitudeDelta: 0.1, longitudeDelta: 0.1))
@@ -136,8 +206,9 @@ private final class ProgressiveLoadingContext {
     var photoPath: String { "/v1/media/\(photoID.uuidString.lowercased())" }
     var videoPath: String { "/v1/media/\(videoID.uuidString.lowercased())" }
 
-    init(ownPost: Bool = false, feedContainsRecord: Bool = false) throws {
+    init(ownPost: Bool = false, feedContainsRecord: Bool = false, extraPhotoCount: Int = 0) throws {
         authorID = ownPost ? currentUserID : UUID()
+        extraPhotoIDs = (0..<extraPhotoCount).map { _ in UUID() }
         (mediaRequests, continuation) = AsyncStream.makeStream()
         let mediaContinuation = continuation
         let author = authorID, current = currentUserID
@@ -147,12 +218,16 @@ private final class ProgressiveLoadingContext {
         let publicationDate = Date.now.addingTimeInterval(-60)
         let publishedAt = publicationDate.ISO8601Format()
         let expiresAt = publicationDate.addingTimeInterval(StoryReadKeys.freshWindow).ISO8601Format()
+        let photoByteCount = photo.count
+        let extraMedia = extraPhotoIDs.map { id in
+            ",{\"id\":\"\(id)\",\"mimeType\":\"image/png\",\"byteCount\":\(photoByteCount),\"path\":\"/v1/media/\(id.uuidString.lowercased())\"}"
+        }.joined()
         let page = Data("""
         {"items":[{"id":"\(recordID)","ownerId":"\(author)",
         "owner":{"id":"\(author)","handle":"video_person"},"kind":"reel","visibility":"public",
         "location":{"latitude":37.3,"longitude":-122},"caption":"A slow video","place":null,
         "media":[{"id":"\(videoID)","mimeType":"video/mp4","byteCount":1024,"path":"/v1/media/\(videoID.uuidString.lowercased())"},
-        {"id":"\(photoID)","mimeType":"image/png","byteCount":\(photo.count),"path":"/v1/media/\(photoID.uuidString.lowercased())"}],
+        {"id":"\(photoID)","mimeType":"image/png","byteCount":\(photo.count),"path":"/v1/media/\(photoID.uuidString.lowercased())"}\(extraMedia)],
         "createdAt":"\(publishedAt)","publishedAt":"\(publishedAt)","expiresAt":"\(expiresAt)"}],"nextCursor":null}
         """.utf8)
         ProgressiveMediaProtocol.install { operation in
@@ -193,8 +268,8 @@ private final class ProgressiveMediaProtocol: URLProtocol, @unchecked Sendable {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { Self.lock.withLock { Self.handler }?(self) }
     override func stopLoading() {}
-    func respond(_ data: Data, contentType: String = "application/json") {
-        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+    func respond(_ data: Data, contentType: String = "application/json", status: Int = 200) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
             headerFields: ["Content-Type": contentType])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)

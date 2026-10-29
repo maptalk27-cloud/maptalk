@@ -145,6 +145,131 @@ struct MapTalkHistoryProjectionTests {
     }
 
     @Test
+    func activePlaceCardsAndExpandedPersonStoriesKeepHistoricalVideoWithoutAddingItToTheFeed() async throws {
+        let now = Date.now
+        let author = UUID()
+        let freshPhoto = RatedPOI.Media(kind: .photo(URL(fileURLWithPath: "/tmp/recent-place.jpg")))
+        let oldVideo = RatedPOI.Media(kind: .video(url: URL(fileURLWithPath: "/tmp/old-place.mp4"), poster: nil))
+        let freshVisit = visit(userID: author, at: now.addingTimeInterval(-hour), media: [freshPhoto])
+        let oldVisit = visit(userID: author, at: now.addingTimeInterval(-90 * hour), media: [oldVideo])
+        let history = place(visits: [oldVisit, freshVisit])
+        let fresh = place(id: history.id, visits: [freshVisit])
+        let sources = Sources()
+        sources.activePOIs.send([fresh])
+        sources.mapPOIs.send([history])
+        let model = MapTalkViewModel(environment: sources.environment())
+        await deliverRepositoryValues()
+        model.refreshFreshness(asOf: now)
+
+        let feedIDs = model.activeFeedItems.map(\.id)
+        let detailPlace = try #require(model.publicPlaceDetails(id: history.id))
+        #expect(Set(detailPlace.checkIns.map(\.id)) == [freshVisit.id, oldVisit.id])
+        let directCard = ExperienceDetailView(mode: .poi(detailPlace), isExpanded: true)
+        #expect(directCard.poiStoryContributors(for: detailPlace).flatMap(\.items).contains { $0.id == oldVideo.id })
+
+        let groups = FriendStoryFeed.groups(reals: model.activityReels, ratedPOIs: model.activityPOIs,
+            userProvider: { _ in nil }, now: now)
+        #expect(groups.flatMap(\.pages).map(\.memoryID) == [freshVisit.id])
+        let compactPlace = FriendStoryContentView.placeForCard(fresh, isExpanded: false,
+            provider: { model.publicPlaceDetails(id: $0) })
+        #expect(compactPlace.checkIns.map(\.id) == [freshVisit.id])
+        let expandedPlace = FriendStoryContentView.placeForCard(fresh, isExpanded: true,
+            provider: { model.publicPlaceDetails(id: $0) })
+        let expandedCard = ExperienceDetailView(mode: .poi(expandedPlace), isExpanded: true)
+        #expect(expandedCard.poiStoryContributors(for: expandedPlace).flatMap(\.items).contains { $0.id == oldVideo.id })
+        #expect(model.activeFeedItems.map(\.id) == feedIDs, "Detail enrichment must not reorder or insert feed cards")
+        #expect(model.activityPOIs.first?.checkIns.map(\.id) == [freshVisit.id])
+    }
+
+    @Test
+    func publicPlaceDetailNeverBorrowsPrivateMyMapVisitsAndDropsRemovedHistory() async throws {
+        let now = Date.now
+        let freshVisit = visit(at: now.addingTimeInterval(-hour))
+        let oldVisit = visit(at: now.addingTimeInterval(-90 * hour), media: [
+            .init(kind: .video(url: URL(fileURLWithPath: "/tmp/public-history.mp4"), poster: nil))
+        ])
+        let history = place(visits: [freshVisit, oldVisit])
+        let fresh = place(id: history.id, visits: [freshVisit])
+        let privateVisit = visit(at: now.addingTimeInterval(-80 * hour), media: [
+            .init(kind: .video(url: URL(fileURLWithPath: "/tmp/private-history.mp4"), poster: nil))
+        ])
+        let sources = Sources()
+        sources.archive.savePOI(place(id: history.id, visits: [privateVisit]),
+            publicVersion: nil, audience: .privateMyMap)
+        sources.activePOIs.send([fresh])
+        sources.mapPOIs.send([history])
+        let model = MapTalkViewModel(environment: sources.environment())
+        await deliverRepositoryValues()
+
+        let original = try #require(model.publicPlaceDetails(id: history.id))
+        #expect(Set(original.checkIns.map(\.id)) == [freshVisit.id, oldVisit.id])
+        #expect(!original.checkIns.contains { $0.id == privateVisit.id })
+
+        sources.mapPOIs.send([fresh])
+        await deliverRepositoryValues()
+        #expect(model.publicPlaceDetails(id: history.id)?.checkIns.map(\.id) == [freshVisit.id],
+                "Recomputing details must not retain removed public history in a second cache")
+        sources.mapPOIs.send([])
+        sources.activePOIs.send([])
+        await deliverRepositoryValues()
+        #expect(model.publicPlaceDetails(id: history.id) == nil)
+        #expect(sources.archive.privatePOIs.first?.checkIns.contains(privateVisit) == true)
+    }
+
+    @Test
+    func publicPlaceDetailKeepsReadyVideoWhenAnotherPublicProjectionHasOnlyItsMetadata() async throws {
+        let now = Date.now
+        let video = RatedPOI.Media(kind: .video(url: URL(fileURLWithPath: "/tmp/ready-place.mp4"), poster: nil))
+        let loadedVisit = visit(at: now.addingTimeInterval(-hour), media: [video])
+        var metadataVisit = loadedVisit
+        metadataVisit.media = []
+        let fresh = place(visits: [loadedVisit])
+        let metadata = place(id: fresh.id, visits: [metadataVisit])
+        let sources = Sources()
+        sources.activePOIs.send([fresh])
+        sources.mapPOIs.send([metadata])
+        let model = MapTalkViewModel(environment: sources.environment())
+        await deliverRepositoryValues()
+
+        let detail = try #require(model.publicPlaceDetails(id: fresh.id, latestPublicPlace: metadata))
+        #expect(detail.checkIns.count == 1)
+        #expect(detail.checkIns.first?.media == [video])
+        #expect(FriendStoryContentView.placeForCard(fresh, isExpanded: true,
+            provider: { _ in self.place(visits: [metadataVisit]) }) == fresh,
+            "An unrelated place must never replace the selected landmark")
+    }
+
+    @Test
+    func publicPlaceDetailPreservesPublicationOrderWhenVideoLoadsAfterItsFollowingPhoto() async throws {
+        let video = RatedPOI.Media(kind: .video(url: URL(fileURLWithPath: "/tmp/first-video.mp4"), poster: nil))
+        let photo = RatedPOI.Media(kind: .photo(URL(fileURLWithPath: "/tmp/second-photo.jpg")))
+        let completeVisit = visit(at: .now, media: [video, photo])
+        var partialVisit = completeVisit
+        partialVisit.media = [photo]
+        var complete = place(visits: [completeVisit])
+        complete.media = [video, photo]
+        var partial = place(id: complete.id, visits: [partialVisit])
+        partial.media = [photo]
+        let sources = Sources()
+        sources.activePOIs.send([complete])
+        sources.mapPOIs.send([partial])
+        let model = MapTalkViewModel(environment: sources.environment())
+        await deliverRepositoryValues()
+
+        let detail = try #require(model.publicPlaceDetails(id: complete.id))
+        #expect(detail.checkIns.first?.media == [video, photo])
+        #expect(detail.media == [video, photo])
+
+        // A later partial projection must not remove or reorder ready media.
+        sources.activePOIs.send([partial])
+        sources.mapPOIs.send([complete])
+        await deliverRepositoryValues()
+        let refreshed = try #require(model.publicPlaceDetails(id: complete.id))
+        #expect(refreshed.checkIns.first?.media == [video, photo])
+        #expect(refreshed.media == [video, photo])
+    }
+
+    @Test
     func clockExpiryMovesAFeedOnlyPlaceToHistoryWithoutAnotherSearch() async throws {
         let now = Date.now
         let recent = place(visits: [visit(at: now.addingTimeInterval(-71 * hour))])

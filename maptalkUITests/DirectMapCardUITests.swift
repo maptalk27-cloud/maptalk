@@ -114,7 +114,25 @@ final class DirectMapCardUITests: XCTestCase {
         marker.tap()
         assertNoPersonRoute(app)
         waitForNativeDetent("Half screen", app: app)
-        XCTAssertTrue(element("experience.poi.collapsed", in: app).exists)
+        let compactCard = element("experience.poi.collapsed", in: app)
+        let compactHeading = element("experience.poi.collapsed.heading", in: app)
+        let compactStats = element("experience.poi.collapsed.stats", in: app)
+        XCTAssertTrue(compactCard.waitForExistence(timeout: 5))
+        XCTAssertTrue(compactHeading.exists)
+        XCTAssertTrue(compactStats.exists)
+        let compactFrame = compactCard.frame
+        let statsFrame = compactStats.frame
+        XCTAssertGreaterThan(compactFrame.height, 0)
+        XCTAssertGreaterThan(statsFrame.height, 0)
+        XCTAssertGreaterThan(statsFrame.minY, compactFrame.midY,
+                             "The original compact POI counters belong at the bottom, not under the heading")
+        XCTAssertGreaterThan(statsFrame.minY, compactHeading.frame.maxY,
+                             "The heading and bottom statistics must remain visually separated")
+        XCTAssertGreaterThanOrEqual(statsFrame.minX, compactFrame.minX - 1)
+        XCTAssertLessThanOrEqual(statsFrame.maxX, compactFrame.maxX + 1)
+        XCTAssertLessThanOrEqual(statsFrame.maxY, compactFrame.maxY + 1,
+                                "Bottom statistics must remain inside the compact map card")
+        evidence(app, name: "Direct map POI — original heading with bottom counters")
         expandNativeCard(app)
         XCTAssertTrue(element("experience.poi.expanded", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Capitol Hill Night Market"].firstMatch.exists)
@@ -210,18 +228,120 @@ final class DirectMapCardUITests: XCTestCase {
     @MainActor
     private func selectPage(_ index: Int, app: XCUIApplication) {
         let position = pagePosition(app)
-        XCTAssertTrue((0..<position.count).contains(index))
+        guard (0..<position.count).contains(index) else {
+            XCTFail("Cannot select update \(index + 1) of \(position.count)")
+            return
+        }
         guard index != position.index else { return }
+        if abs(position.index - index) == 1 {
+            swipeStoryCard(to: index, app: app)
+            return
+        }
+
+        // Top-level segments identify stops, not flat media slices. Locate a
+        // stop with real progress taps, then page within it using the same
+        // lower-card gesture a user uses. The rail is only fixture navigation
+        // here; all direct-map assertions still begin by tapping the map pin.
+        var lowerStop = 0
+        var upperStop = stopPosition(app).count - 1
+        while lowerStop <= upperStop {
+            let current = pagePosition(app)
+            let stop = stopPosition(app)
+            let item = momentPosition(app) ?? (index: 0, count: 1)
+            let firstPage = current.index - item.index
+            let lastPage = firstPage + item.count - 1
+            if (firstPage...lastPage).contains(index) { break }
+            if index < firstPage { upperStop = stop.index - 1 }
+            else { lowerStop = stop.index + 1 }
+            guard lowerStop <= upperStop else {
+                XCTFail("No visible stop contains update \(index + 1)")
+                return
+            }
+            let targetStop = index == 0 ? lowerStop
+                : index == position.count - 1 ? upperStop : (lowerStop + upperStop) / 2
+            selectStop(targetStop, app: app)
+        }
+        while pagePosition(app).index != index {
+            let current = pagePosition(app).index
+            swipeStoryCard(to: current + (index > current ? 1 : -1), app: app)
+        }
+        XCTAssertEqual(pagePosition(app).index, index)
+    }
+
+    @MainActor
+    private func selectStop(_ index: Int, app: XCUIApplication) {
+        let stop = stopPosition(app)
+        guard (0..<stop.count).contains(index) else {
+            XCTFail("Cannot select stop \(index + 1) of \(stop.count)")
+            return
+        }
+        if stop.index == index, (momentPosition(app)?.index ?? 0) == 0 { return }
         let page = currentPage(app)
+        let oldID = page.identifier
+        let author = app.buttons["friend-story.open-author"].value as? String
         XCTAssertTrue(page.isHittable)
         page.coordinate(withNormalizedOffset: CGVector(
-            dx: (CGFloat(index) + 0.5) / CGFloat(position.count), dy: 0.5
+            dx: (CGFloat(index) + 0.5) / CGFloat(stop.count), dy: 0.5
         )).tap()
         let selected = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "label == %@", "Update \(index + 1) of \(position.count)"),
-            object: page
+            predicate: NSPredicate(format: "identifier != %@", oldID), object: currentPage(app)
         )
         XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 4), .completed)
+        XCTAssertEqual(stopPosition(app).index, index)
+        XCTAssertEqual(momentPosition(app)?.index ?? 0, 0)
+        XCTAssertEqual(app.buttons["friend-story.open-author"].value as? String, author)
+    }
+
+    @MainActor
+    private func swipeStoryCard(to index: Int, app: XCUIApplication) {
+        let position = pagePosition(app)
+        guard (0..<position.count).contains(index), abs(index - position.index) == 1 else {
+            XCTFail("A story-card swipe must select one adjacent update")
+            return
+        }
+        let author = app.buttons["friend-story.open-author"].value as? String
+        let card = element("friend-story.card", in: app)
+        XCTAssertTrue(card.isHittable)
+        let next = index > position.index
+        card.coordinate(withNormalizedOffset: CGVector(dx: next ? 0.84 : 0.16, dy: 0.15)).press(
+            forDuration: 0.05,
+            thenDragTo: card.coordinate(withNormalizedOffset: CGVector(dx: next ? 0.16 : 0.84, dy: 0.15))
+        )
+        let selected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Update \(index + 1) of \(position.count)"),
+            object: currentPage(app)
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 4), .completed)
+        XCTAssertEqual(app.buttons["friend-story.open-author"].value as? String, author)
+    }
+
+    @MainActor
+    private func stopPosition(_ app: XCUIApplication) -> (index: Int, count: Int) {
+        let row = element("friend-story.author-navigation", in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 3))
+        let value = row.value as? String ?? ""
+        let words = value.split(separator: " ")
+        guard words.count == 4, words[0] == "Stop", words[2] == "of",
+              let number = Int(words[1]), let count = Int(words[3]),
+              count > 0, (1...count).contains(number) else {
+            XCTFail("Expected 'Stop N of M', got '\(value)'")
+            return (0, 1)
+        }
+        return (number - 1, count)
+    }
+
+    @MainActor
+    private func momentPosition(_ app: XCUIApplication) -> (index: Int, count: Int)? {
+        let item = element("friend-story.moment-position", in: app)
+        guard item.exists else { return nil }
+        let words = item.label.split(separator: " ")
+        guard words.count == 7, words[3] == "item", words[5] == "of",
+              let number = Int(words[4]), let count = Int(words[6]),
+              count > 1, (1...count).contains(number) else {
+            XCTFail("Expected 'At this place, item X of Y', got '\(item.label)'")
+            return nil
+        }
+        return (number - 1, count)
     }
 
     @MainActor
