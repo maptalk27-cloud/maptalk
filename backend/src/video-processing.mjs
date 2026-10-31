@@ -114,6 +114,10 @@ export function validateVideoMetadata(metadata, { normalizationSource } = {}) {
   const audio = streams.filter(stream => stream.codec_type === 'audio');
   if (video.length !== 1 || audio.length > 1 || streams.length !== video.length + audio.length) throw unsupported();
   const track = video[0];
+  if (!/^[1-9]\d*\/[1-9]\d*$/.test(String(track.time_base))) throw unsupported();
+  const [clockNumerator, clockDenominator] = String(track.time_base).split('/').map(Number);
+  if (![clockNumerator, clockDenominator].every(value => Number.isSafeInteger(value) && value > 0
+    && value <= 2_147_483_647)) throw unsupported();
   if (track.codec_name !== 'h264' || !['yuv420p', 'yuvj420p'].includes(track.pix_fmt)
     || track.disposition?.attached_pic) throw unsupported();
   // AVAssetExport can retain a portrait display transform. This is essential
@@ -199,19 +203,36 @@ export async function normalizeVideo(bytes, mimeType) {
     // presentation end, falsely changing a valid clip's duration. Preserve the
     // already-validated picture timeline without dropping/re-encoding frames,
     // changing PTS/DTS, or touching AAC priming and audio packet durations.
-    const videoDuration = Number(original.streams.find(stream => stream.codec_type === 'video').duration);
+    const videoTrack = original.streams.find(stream => stream.codec_type === 'video');
+    const videoDuration = Number(videoTrack.duration);
+    const videoTimescale = Number(videoTrack.time_base.split('/')[1]);
     const videoFilters = `filter_units=remove_types=6,setts=pts=PTS:dts=DTS:duration='min(DURATION,max(STARTPTS+${videoDuration}/TB-PTS,0))'`;
-    await tool('ffmpeg', ['-nostdin', ...inputOptions, '-i', input,
-      '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-bsf:v', videoFilters,
-      '-map_metadata', '-1', '-map_metadata:s', '-1', '-map_chapters', '-1',
-      // The default 1 kHz movie/edit-list clock can add >1 ms on FFmpeg 5.
-      // Keep sub-millisecond source timing instead of loosening validation.
-      '-movie_timescale', '1000000', '-movflags', '+faststart',
-      '-fs', String(VIDEO_LIMITS.outputBytes + 1), '-f', 'mp4', output], 15_000);
-    const information = await stat(output);
-    if (information.size > VIDEO_LIMITS.outputBytes) throw new VideoProcessingError(413, 'video_too_large', 'Choose a video smaller than 20 MiB.');
-    const normalized = await probe(output);
-    validateVideoPreservation(original, normalized);
+    async function remux(preserveSourceClock = false) {
+      await tool('ffmpeg', ['-nostdin', ...inputOptions, '-i', input,
+        '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-bsf:v', videoFilters,
+        '-map_metadata', '-1', '-map_metadata:s', '-1', '-map_chapters', '-1',
+        ...(preserveSourceClock ? ['-video_track_timescale', String(videoTimescale)] : []),
+        // The default 1 kHz movie/edit-list clock can add >1 ms on FFmpeg 5.
+        '-movie_timescale', '1000000', '-movflags', '+faststart',
+        '-fs', String(VIDEO_LIMITS.outputBytes + 1), '-f', 'mp4', output], 15_000);
+      const information = await stat(output);
+      if (information.size > VIDEO_LIMITS.outputBytes) throw new VideoProcessingError(413, 'video_too_large', 'Choose a video smaller than 20 MiB.');
+      return probe(output);
+    }
+    let normalized = await remux();
+    try { validateVideoPreservation(original, normalized); }
+    catch (error) {
+      if (!(error instanceof VideoProcessingError) || error.code !== 'invalid_video'
+        || normalized.streams?.find(stream => stream.codec_type === 'video')?.time_base === videoTrack.time_base) throw error;
+      // FFmpeg 5 can round a partial Apple frame when selecting a new track
+      // clock. Retry once with its original clock, then apply the SAME checks.
+      // Default-first also preserves valid x264 streams whose coarse source
+      // clock triggers an older FFmpeg parser quirk. No re-encode or looser
+      // duration/packet limits; remove the first output to keep <=40 MiB temp.
+      await rm(output);
+      normalized = await remux(true);
+      validateVideoPreservation(original, normalized);
+    }
     validateVideoMetadata(normalized, { normalizationSource: original });
     const result = await readFile(output);
     validateVideoContainer(result);

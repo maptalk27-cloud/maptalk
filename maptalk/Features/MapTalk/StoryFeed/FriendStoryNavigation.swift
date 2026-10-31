@@ -115,10 +115,13 @@ final class FriendStoryNavigation: ObservableObject {
         guard groups.contains(where: { $0.authorID == authorID && !$0.pages.isEmpty })
             || session?.groups.contains(where: { $0.authorID == authorID }) == true else { return }
         if self.origin == nil { self.origin = origin }
-        if session?.groups.contains(where: { $0.authorID == authorID }) == true {
-            session?.selectAuthor(id: authorID, viewedKeys: viewedKeys)
+        // A deliberate avatar tap is a safe boundary to include newly public
+        // posts. Background reconciliation still freezes the mounted pager.
+        if let refreshed = FriendStorySession(groups: groups, authorID: authorID,
+            viewedKeys: viewedKeys, resuming: session?.resumePageIDs ?? [:]) {
+            session = refreshed
         } else {
-            session = FriendStorySession(groups: groups, authorID: authorID, viewedKeys: viewedKeys)
+            session?.selectAuthor(id: authorID, viewedKeys: viewedKeys)
         }
         routes.removeAll()
     }

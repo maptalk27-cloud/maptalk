@@ -136,7 +136,7 @@ final class BackendStore: ObservableObject {
         }
         return JourneyPost(id: cluster.id, userId: parent.ownerId, title: cluster.title, content: "",
             coordinate: .init(latitude: parent.location.latitude, longitude: parent.location.longitude),
-            createdAt: parent.createdAt, orderedMemberReferences: references,
+            createdAt: parent.activityDate, orderedMemberReferences: references,
             reels: projection.reels, pois: projection.pois, likes: [], comments: [])
     }
 
@@ -153,7 +153,7 @@ final class BackendStore: ObservableObject {
 
     private func rebuildClusterCatalogs() {
         let privateIDs = Set(archive.privateReels.map(\.id))
-        let records = currentRecords(Array(knownMemories.values)).sorted { $0.createdAt > $1.createdAt }
+        let records = currentRecords(Array(knownMemories.values)).sorted { $0.activityDate > $1.activityDate }
         archive.replaceServerBubbles(
             privateBubbles: records.filter { $0.ownerId == user.id && privateIDs.contains($0.id) }
                 .compactMap { journey(for: $0.id) },
@@ -191,7 +191,7 @@ final class BackendStore: ObservableObject {
             case let .poi(id): available = archive.privatePOIs.contains { $0.id == id }
             }
             let selected = manageableMemories(for: reference).sorted {
-                $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt > $1.createdAt
+                $0.activityDate == $1.activityDate ? $0.id.uuidString < $1.id.uuidString : $0.activityDate > $1.activityDate
             }
             guard available, !selected.isEmpty else {
                 throw BackendClientError.message("A selected memory is no longer available. Choose the cluster again.")
@@ -693,7 +693,7 @@ final class BackendStore: ObservableObject {
             case let .reel(id): return record.kind == "reel" && record.id == id
             case let .poi(id): return record.kind == "poi" && record.place?.id == id
             }
-        }.sorted { $0.createdAt > $1.createdAt }
+        }.sorted { $0.activityDate > $1.activityDate }
     }
 
     func makePrivate(memoryID: UUID) async throws {
@@ -860,7 +860,7 @@ final class BackendStore: ObservableObject {
         guard record.visibility == "public", record.moderationStatus != "local_pending" else { return record.expiresAt }
         // Normalize pre-72-hour disk snapshots too; publication, not capture,
         // starts the public clock. Queued local previews keep their own lifetime.
-        return (record.publishedAt ?? record.createdAt).addingTimeInterval(StoryReadKeys.freshWindow)
+        return record.activityDate.addingTimeInterval(StoryReadKeys.freshWindow)
     }
 
     private func currentMapRecords(_ records: [BackendMemory]) -> [BackendMemory] {
@@ -959,6 +959,7 @@ final class BackendStore: ObservableObject {
     func publish(_ draft: MapTalkPublishDraft, audience: MapPublishAudience,
                  location: CLLocation, requestID: UUID) async throws -> BackendPublishResult {
         try requireActive()
+        let publicationDate = Date()
         var urls: [URL] = []
         var contentTypes: [String] = []
         var posters: [URL?] = []
@@ -1002,7 +1003,8 @@ final class BackendStore: ObservableObject {
                 }
             }
         }
-        // Exclude changing GPS readings from retry identity. A retry uses the
+        input.capturedAt = publicationDate.ISO8601Format(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+        // Exclude changing GPS readings and the new attempt's clock from retry identity. A retry uses the
         // original sent coordinates and uploaded IDs, even after a timeout.
         let fingerprint = Self.publicationFingerprint(for: input, urls: urls, contentTypes: contentTypes)
         if let pending = pendingInputs[requestID] {
@@ -1308,7 +1310,7 @@ final class BackendStore: ObservableObject {
         let queuedIDs = Set(queued.map(\.id))
         let mine = currentRecords(localState.mine).filter { !queuedIDs.contains($0.id) } + queued.map(\.record)
         remember(mine + localState.profile + localState.feed)
-        let privateProjection = project(mine.sorted { $0.createdAt > $1.createdAt })
+        let privateProjection = project(mine.sorted { $0.activityDate > $1.activityDate })
         let publicProjection = project(currentRecords(localState.profile, publicOnly: true))
         let activeProjection = project(currentRecords(localState.feed, publicOnly: true))
         archive.replaceServerRecords(pois: privateProjection.pois, reels: privateProjection.reels)
@@ -1329,6 +1331,7 @@ final class BackendStore: ObservableObject {
         let queuedIDs = Set(localState.queued.map(\.id))
         let records = currentRecords(localState.feed, publicOnly: true)
             .filter { !queuedIDs.contains($0.id) }
+            .sorted { $0.activityDate == $1.activityDate ? $0.id.uuidString < $1.id.uuidString : $0.activityDate > $1.activityDate }
             .map { record in
                 var current = record
                 if let identity = profileMetadata[record.ownerId] { current.owner = identity }
@@ -1347,12 +1350,13 @@ final class BackendStore: ObservableObject {
         }
         isEnqueuing = true
         defer { isEnqueuing = false }
-        let capturedAt = Date()
+        let publicationDate = Date()
         let kind = if case .place = draft { "poi" } else { "reel" }
         var input = BackendMemoryInput(id: requestID, kind: kind,
             visibility: audience == .livePublic ? "public" : "private",
             location: .init(latitude: location.coordinate.latitude, longitude: location.coordinate.longitude))
-        input.capturedAt = capturedAt.ISO8601Format(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+        // Persist once before any file work or upload; retries resend this exact instant.
+        input.capturedAt = publicationDate.ISO8601Format(Date.ISO8601FormatStyle(includingFractionalSeconds: true))
         var sources: [URL] = []
         var contentTypes: [String] = []
         var posters: [URL?] = []
@@ -1404,7 +1408,7 @@ final class BackendStore: ObservableObject {
         let record = BackendMemory(id: requestID, ownerId: user.id, owner: localState.user, kind: input.kind,
             visibility: "private", location: input.location, caption: input.caption ?? "", place: place,
             media: photos.map { BackendMedia(id: $0.id, mimeType: $0.contentType, byteCount: 0, path: "/v1/media/\($0.id.uuidString.lowercased())") },
-            createdAt: capturedAt, publishedAt: nil, expiresAt: .distantFuture, moderationStatus: "local_pending",
+            createdAt: publicationDate, publishedAt: nil, expiresAt: .distantFuture, moderationStatus: "local_pending",
             cluster: cluster)
         var entry = QueuedPublication(input: input, record: record, photos: photos)
         try await stateDisk.copyMedia(sources, items: photos, posters: posters)
@@ -1532,6 +1536,7 @@ final class BackendStore: ObservableObject {
             }
             currentSyncID = id
             var reconcilingVideoUpload = false
+            var failurePhase: QueuedPublication.FailureDiagnostic.Phase = entry.cancelled ? .cancellation : .mediaUpload
             do {
                 try Task.checkCancellation()
                 try requireActive()
@@ -1552,6 +1557,7 @@ final class BackendStore: ObservableObject {
                         ? max(publicationProgress[id] ?? confirmedProgress, confirmedProgress)
                         : confirmedProgress
                     let media: BackendMedia
+                    failurePhase = .mediaUpload
                     if photo.isVideo {
                         reconcilingVideoUpload = true
                         media = try await api.uploadVideo(at: url, idempotencyKey: photo.id,
@@ -1565,6 +1571,7 @@ final class BackendStore: ObservableObject {
                                 pendingPublications[id] = .uploading
                             }, onProcessing: { [weak self] in
                                 guard let self, canUpdatePublicationProgress(id) else { return }
+                                failurePhase = .videoProcessing
                                 pendingPublications[id] = .processing
                             })
                         reconcilingVideoUpload = false
@@ -1577,6 +1584,7 @@ final class BackendStore: ObservableObject {
                     guard let index = localState.queued.firstIndex(where: { $0.id == id }),
                           let photoIndex = localState.queued[index].photos.firstIndex(where: { $0.id == photo.id }) else { throw CancellationError() }
                     localState.queued[index].photos[photoIndex].uploaded = media
+                    failurePhase = .localCommit
                     try await persistLocalState()
                     if canUpdatePublicationProgress(id) {
                         publicationProgress[id] = Double(finishedCount + 1) / Double(attachmentCount)
@@ -1590,14 +1598,17 @@ final class BackendStore: ObservableObject {
                 pendingPublications[id] = .uploading
                 localState.queued[index].input.mediaIds = localState.queued[index].photos.compactMap { $0.uploaded?.id }
                 localState.queued[index].attemptedPost = true
+                failurePhase = .localCommit
                 try await persistLocalState()
                 guard let sending = localState.queued.first(where: { $0.id == id }), !sending.cancelled else { continue }
+                failurePhase = .publication
                 let saved = try await api.publish(sending.input)
                 try requireActive()
                 if localState.queued.first(where: { $0.id == id })?.cancelled == true {
                     try await finishCancelledPublication(id)
                     continue
                 }
+                failurePhase = .localCommit
                 // Keep a cached copy after removing durable outbox files.
                 for (photo, media) in zip(sending.photos, saved.media) {
                     let url = stateDisk.mediaURL(photo)
@@ -1671,6 +1682,8 @@ final class BackendStore: ObservableObject {
                         permanent = !reconcile && [400, 403, 404, 409, 410, 413, 415, 422].contains(status)
                     } else { permanent = error is CocoaError }
                     let message = publicationFailureMessage(error)
+                    localState.queued[index].lastFailure = publicationFailureDiagnostic(error,
+                        phase: localState.queued[index].cancelled ? .cancellation : failurePhase)
                     if permanent { localState.queued[index].failure = message }
                     // Cancellation remains eligible until the server confirms
                     // its tombstone and media cleanup. Even a permanent-looking
@@ -1733,6 +1746,30 @@ final class BackendStore: ObservableObject {
             return "The saved media couldn't be read. Your post is still on this phone; check available storage and retry."
         }
         return "Couldn't publish yet. Your post is saved on this phone. Please try again."
+    }
+
+    private func publicationFailureDiagnostic(_ error: Error,
+        phase: QueuedPublication.FailureDiagnostic.Phase) -> QueuedPublication.FailureDiagnostic {
+        let status: Int?
+        let code: String?
+        switch error {
+        case let BackendClientError.http(httpStatus, _, serverCode):
+            status = httpStatus
+            // Error codes are identifiers, not a second channel for arbitrary
+            // server text. Discard unexpected values instead of persisting it.
+            code = serverCode.flatMap { value in
+                guard !value.isEmpty, value.utf8.count <= 80,
+                      value.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }) else { return nil }
+                return value
+            }
+        case BackendClientError.unauthorized:
+            status = 401
+            code = nil
+        default:
+            status = nil
+            code = nil
+        }
+        return .init(phase: phase, httpStatus: status, code: code, occurredAt: Date())
     }
 
     private func cancelQueuedPublication(id: UUID) async throws {
@@ -1963,7 +2000,8 @@ final class BackendStore: ObservableObject {
     private func project(_ records: [BackendMemory]) -> (pois: [RatedPOI], reels: [RealPost]) {
         var places: [UUID: RatedPOI] = [:]
         var reels: [RealPost] = []
-        for record in records {
+        for record in records.sorted(by: { $0.activityDate == $1.activityDate
+            ? $0.id.uuidString < $1.id.uuidString : $0.activityDate > $1.activityDate }) {
             let attachments = record.media.compactMap { media -> RealPost.Attachment? in
                 guard let url = localMedia[media.id] else { return nil }
                 return .init(id: media.id, kind: media.mimeType == "video/mp4"

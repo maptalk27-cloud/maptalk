@@ -158,6 +158,12 @@ final class PublishComposerUITests: XCTestCase {
         importFirstPhoto(in: app)
         let edit = app.buttons["maptalk.place.photo-text"]
         waitUntilHittable(edit)
+        let stage = app.descendants(matching: .any).matching(identifier: "maptalk.place.media-stage").firstMatch
+        XCTAssertTrue(stage.exists)
+        let previewFrame = stage.frame
+        let header = app.staticTexts["Place"].firstMatch
+        XCTAssertTrue(header.exists)
+        let headerToCanvas = previewFrame.minY - header.frame.midY
         edit.tap()
         let input = app.textViews["maptalk.photo-text.input"]
         waitUntilHittable(input)
@@ -165,19 +171,43 @@ final class PublishComposerUITests: XCTestCase {
         input.typeText("A quiet morning")
         let done = app.buttons["maptalk.photo-text.done"]
         waitUntilHittable(done)
-        XCTAssertTrue(app.keyboards.firstMatch.exists)
-        XCTAssertLessThan(input.frame.maxY, app.keyboards.firstMatch.frame.minY,
+        XCTAssertEqual(app.buttons.matching(identifier: "maptalk.photo-text.done").count, 1,
+                       "Photo editing must offer one clear confirmation action")
+        XCTAssertFalse(app.buttons["maptalk.photo-text.clear"].exists)
+        XCTAssertFalse(app.buttons["Clear"].exists,
+                       "Deleting words belongs to the keyboard, not a competing editing action")
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.exists)
+        XCTAssertFalse(app.staticTexts["Photo text"].exists,
+                       "Adding words must edit the existing photo, not replace it with a second titled page")
+        XCTAssertTrue(stage.exists, "The same media stage must remain present while editing")
+        XCTAssertEqual(stage.frame.minX, previewFrame.minX, accuracy: 2)
+        // UIKit raises the entire partial-height sheet for the keyboard. The
+        // canvas must stay anchored to its own header, not the screen's y=0.
+        XCTAssertEqual(stage.frame.minY - header.frame.midY, headerToCanvas, accuracy: 2)
+        XCTAssertEqual(stage.frame.width, previewFrame.width, accuracy: 2)
+        XCTAssertLessThan(input.frame.maxY, keyboard.frame.minY,
                           "Photo words must remain visible while typing")
         let canvas = app.descendants(matching: .any).matching(identifier: "maptalk.photo-text.canvas").firstMatch
         XCTAssertTrue(canvas.exists)
-        XCTAssertLessThanOrEqual(canvas.frame.height, 327,
-                                 "Inline editing must keep the composer's compact photo stage")
-        attachScreenshot(app, name: "POI photo text editor above keyboard")
+        XCTAssertGreaterThan(canvas.frame.height, 0)
+        XCTAssertTrue(stage.frame.insetBy(dx: -2, dy: -2).contains(canvas.frame),
+                      "The editable photo must remain inside the existing media stage")
+        XCTAssertLessThanOrEqual(canvas.frame.maxY, keyboard.frame.minY + 1,
+                                 "The whole editing canvas must adapt above the keyboard")
+        XCTAssertLessThanOrEqual(done.frame.maxY, keyboard.frame.minY + 1,
+                                 "Finishing an edit must not require dismissing the keyboard first")
+        XCTAssertGreaterThanOrEqual(done.frame.minY, canvas.frame.maxY - 1,
+                                    "Confirmation belongs beside the keyboard below the photo, not in another header")
+        attachScreenshot(app, name: "POI words edit on the same canvas above keyboard")
         done.tap()
         let saved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             edit.exists && edit.value as? String == "A quiet morning"
         }, object: app)
         XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 10), .completed)
+        waitUntilGone(keyboard)
+        waitForFrame(stage, matching: previewFrame)
+        XCTAssertFalse(canvas.exists, "Done must leave the editable canvas and return ordinary media controls")
         attachScreenshot(app, name: "Words rendered into POI photo preview")
         edit.tap()
         waitUntilHittable(input)
@@ -188,10 +218,21 @@ final class PublishComposerUITests: XCTestCase {
         waitUntilHittable(edit)
         XCTAssertEqual(edit.value as? String, "A quiet morning")
         edit.tap()
-        app.buttons["maptalk.photo-text.clear"].tap()
+        waitUntilHittable(input)
+        let words = try XCTUnwrap(input.value as? String)
+        XCTAssertEqual(words, "A quiet morning")
+        // The test phrase is one line. Place the native caret at its trailing
+        // edge and use the actual keyboard deletion path, not a Clear action.
+        input.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
+        input.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: words.count))
+        XCTAssertEqual(input.value as? String, "")
+        waitUntilHittable(done)
         done.tap()
         waitUntilHittable(edit)
         XCTAssertEqual(edit.value as? String, "")
+        waitUntilGone(keyboard)
+        waitForFrame(stage, matching: previewFrame)
+        XCTAssertFalse(canvas.exists)
         app.buttons["maptalk.place.retake"].tap()
         XCTAssertFalse(edit.exists)
         XCTAssertTrue(app.buttons["maptalk.place.add-media"].exists)
@@ -292,8 +333,20 @@ final class PublishComposerUITests: XCTestCase {
         openPlace(in: app)
         let publicChoice = app.buttons["maptalk.place.audience.public"]
         let privateChoice = app.buttons["maptalk.place.audience.private"]
+        let landmark = app.buttons["maptalk.place.choose-landmark"]
         waitUntilHittable(publicChoice)
         waitUntilHittable(privateChoice)
+        waitUntilHittable(landmark)
+        for control in [landmark, publicChoice, privateChoice] {
+            XCTAssertGreaterThanOrEqual(control.frame.width, 44,
+                                         "Compact controls must retain a comfortable touch width")
+            XCTAssertGreaterThanOrEqual(control.frame.height, 44,
+                                         "Compact controls must retain a comfortable touch height")
+            XCTAssertTrue(app.frame.contains(control.frame),
+                          "Location and audience must be reachable without scrolling past the media")
+        }
+        XCTAssertFalse(publicChoice.frame.intersects(privateChoice.frame),
+                       "Adjacent audience targets must not overlap")
         XCTAssertEqual(privateChoice.value as? String, "Selected")
         XCTAssertTrue(app.buttons["Add to MyMap"].exists)
         publicChoice.tap()
@@ -559,6 +612,20 @@ final class PublishComposerUITests: XCTestCase {
             predicate: NSPredicate(format: "exists == false"), object: element
         )
         XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed)
+    }
+
+    @MainActor
+    private func waitForFrame(_ element: XCUIElement, matching frame: CGRect) {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard element.exists else { return false }
+            let current = element.frame
+            return abs(current.minX - frame.minX) <= 2
+                && abs(current.minY - frame.minY) <= 2
+                && abs(current.width - frame.width) <= 2
+                && abs(current.height - frame.height) <= 2
+        }, object: element)
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed,
+                       "Finishing text editing must restore the original media frame")
     }
 
     @MainActor

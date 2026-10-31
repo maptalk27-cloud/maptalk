@@ -1,6 +1,8 @@
 import AVFoundation
+import CoreImage
 import Foundation
 import ImageIO
+import UIKit
 import UniformTypeIdentifiers
 
 /// Import once, before publishing: a bounded interoperable file is shared by
@@ -35,8 +37,9 @@ nonisolated enum PublishVideoNormalizer {
     /// The caller owns the returned file, and must delete it on discard. No
     /// source GPS, captions or timed metadata tracks are copied into the export.
     @concurrent
-    static func prepare(sourceURL: URL, timeRange: CMTimeRange? = nil) async throws -> URL {
-        do { return try await prepareFile(sourceURL: sourceURL, timeRange: timeRange) }
+    static func prepare(sourceURL: URL, timeRange: CMTimeRange? = nil,
+                        textOverlay: PhotoTextOverlay? = nil) async throws -> URL {
+        do { return try await prepareFile(sourceURL: sourceURL, timeRange: timeRange, textOverlay: textOverlay) }
         catch {
             if error is CancellationError || Task.isCancelled { throw CancellationError() }
             if let issue = error as? ImportError { throw issue }
@@ -45,7 +48,8 @@ nonisolated enum PublishVideoNormalizer {
     }
 
     @concurrent
-    private static func prepareFile(sourceURL: URL, timeRange: CMTimeRange?) async throws -> URL {
+    private static func prepareFile(sourceURL: URL, timeRange: CMTimeRange?,
+                                    textOverlay: PhotoTextOverlay?) async throws -> URL {
         try Task.checkCancellation()
         guard sourceURL.isFileURL else { throw ImportError.unreadable }
         let bytes = try sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
@@ -90,13 +94,14 @@ nonisolated enum PublishVideoNormalizer {
         if let capacity, capacity < Int64(maximumFileBytes * 3) { throw ImportError.insufficientSpace }
 
         var lastIssue: ImportError = .unsupported
+        let sanitizedText = textOverlay.map(PhotoTextOverlayRenderer.sanitized)
         for attempt in encodingAttempts(duration: duration.seconds, visibleSize: visibleBounds.size) {
             try Task.checkCancellation()
             let output = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
             do {
                 try await transcode(composition: composition, picture: picture, sound: soundTrack,
                     transform: sourceTransform, bounds: visibleBounds, duration: duration,
-                    attempt: attempt, output: output)
+                    attempt: attempt, output: output, textOverlay: sanitizedText)
                 try await validatePreparedFile(at: output)
                 let exportedAsset = AVURLAsset(url: output)
                 defer { withExtendedLifetime(exportedAsset) {} }
@@ -155,7 +160,8 @@ nonisolated enum PublishVideoNormalizer {
     @concurrent
     private static func transcode(composition: AVComposition, picture: AVCompositionTrack,
                                   sound: AVCompositionTrack?, transform: CGAffineTransform,
-                                  bounds: CGRect, duration: CMTime, attempt: EncodingAttempt, output: URL) async throws {
+                                  bounds: CGRect, duration: CMTime, attempt: EncodingAttempt, output: URL,
+                                  textOverlay: PhotoTextOverlay?) async throws {
         let reader = try AVAssetReader(asset: composition)
         let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
         writer.shouldOptimizeForNetworkUse = true
@@ -198,6 +204,15 @@ nonisolated enum PublishVideoNormalizer {
         guard reader.canAdd(videoOutput), writer.canAdd(videoInput) else { throw ImportError.unsupported }
         reader.add(videoOutput)
         writer.add(videoInput)
+        // The reader has already applied the camera orientation, sizing and
+        // HDR-to-SDR conversion. Text lives in that final, upright coordinate
+        // space, exactly like photo text; it is never rotated a second time.
+        let textCompositor: TextFrameCompositor?
+        if let textOverlay, !textOverlay.isEmpty {
+            textCompositor = try TextFrameCompositor(overlay: textOverlay, size: attempt.size, input: videoInput)
+        } else {
+            textCompositor = nil
+        }
 
         var audioOutput: AVAssetReaderTrackOutput?
         var audioInput: AVAssetWriterInput?
@@ -238,7 +253,15 @@ nonisolated enum PublishVideoNormalizer {
                 var progressed = false
                 if !videoDone, videoInput.isReadyForMoreMediaData {
                     if let sample = videoOutput.copyNextSampleBuffer() {
-                        guard videoInput.append(sample) else { throw writer.error ?? ImportError.unsupported }
+                        try autoreleasepool {
+                            if let textCompositor {
+                                guard try textCompositor.append(sample) else {
+                                    throw writer.error ?? ImportError.unsupported
+                                }
+                            } else {
+                                guard videoInput.append(sample) else { throw writer.error ?? ImportError.unsupported }
+                            }
+                        }
                     } else {
                         videoInput.markAsFinished()
                         videoDone = true
@@ -269,6 +292,58 @@ nonisolated enum PublishVideoNormalizer {
             reader.cancelReading()
             writer.cancelWriting()
             throw error
+        }
+    }
+
+    /// One transparent glyph image and one context per encoding attempt, not
+    /// per frame. Render into the writer's own pool: reader buffers may be
+    /// shared, so drawing into their base addresses would be unsafe.
+    nonisolated private struct TextFrameCompositor {
+        private let overlay: CIImage
+        private let context: CIContext
+        private let colorSpace: CGColorSpace
+        private let bounds: CGRect
+        private let adaptor: AVAssetWriterInputPixelBufferAdaptor
+
+        init(overlay draft: PhotoTextOverlay, size: CGSize, input: AVAssetWriterInput) throws {
+            guard let colorSpace = CGColorSpace(name: CGColorSpace.itur_709) else {
+                throw ImportError.unsupported
+            }
+            let glyphs: CGImage = try autoreleasepool {
+                let format = UIGraphicsImageRendererFormat()
+                format.scale = 1
+                format.opaque = false
+                format.preferredRange = .standard
+                let clearImage = UIGraphicsImageRenderer(size: size, format: format).image { _ in }
+                let rendered = try PhotoTextOverlayRenderer.render(image: clearImage, overlay: draft)
+                guard let image = rendered.cgImage else { throw ImportError.unsupported }
+                return image
+            }
+            self.overlay = CIImage(cgImage: glyphs)
+            self.colorSpace = colorSpace
+            bounds = CGRect(origin: .zero, size: size)
+            context = CIContext(options: [.cacheIntermediates: false])
+            adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input,
+                sourcePixelBufferAttributes: [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                    kCVPixelBufferWidthKey as String: Int(size.width),
+                    kCVPixelBufferHeightKey as String: Int(size.height),
+                    kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+                ])
+        }
+
+        func append(_ sample: CMSampleBuffer) throws -> Bool {
+            try Task.checkCancellation()
+            guard let source = CMSampleBufferGetImageBuffer(sample),
+                  let pool = adaptor.pixelBufferPool else { throw ImportError.unsupported }
+            var destination: CVPixelBuffer?
+            guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &destination) == kCVReturnSuccess,
+                  let destination else { throw ImportError.insufficientSpace }
+            let picture = CIImage(cvPixelBuffer: source, options: [.colorSpace: colorSpace])
+            context.render(overlay.composited(over: picture), to: destination,
+                           bounds: bounds, colorSpace: colorSpace)
+            try Task.checkCancellation()
+            return adaptor.append(destination, withPresentationTime: CMSampleBufferGetPresentationTimeStamp(sample))
         }
     }
 

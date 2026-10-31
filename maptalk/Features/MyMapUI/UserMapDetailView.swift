@@ -87,7 +87,7 @@ struct UserMapDetailView: View {
                         if lhsMode.priority != rhsMode.priority {
                             return lhsMode.priority < rhsMode.priority
                         }
-                        return lhs.createdAt > rhs.createdAt
+                        return lhs.activityDate > rhs.activityDate
                     }
 
                     ForEach(reelsForDisplay) { real in
@@ -241,7 +241,7 @@ struct UserMapDetailView: View {
 
     private var entries: [Entry] {
         let reelEntries = reels.map { real in
-            Entry(id: real.id, timestamp: real.createdAt, kind: .real(real))
+            Entry(id: real.id, timestamp: real.activityDate, kind: .real(real))
         }
         let poiEntries = footprints.map { footprint in
             Entry(
@@ -345,7 +345,7 @@ struct UserMapDetailView: View {
         let reelEvents = reels.map { real in
             TimelineEvent(
                 id: real.id,
-                date: real.createdAt,
+                date: real.activityDate,
                 coordinate: real.center,
                 kind: .reel(real, userProvider(real.userId))
             )
@@ -806,7 +806,7 @@ struct UserMapDetailView: View {
     }
 
     private func reelDisplayMode(for real: RealPost, now: Date) -> ReelDisplayMode {
-        let age = now.timeIntervalSince(real.createdAt)
+        let age = now.timeIntervalSince(real.activityDate)
         let reference = referenceDistance()
 
         if isShowingDetailedAnnotations == false {

@@ -19,7 +19,7 @@ https://{$MAPTALK_DOMAIN} {
 		header_up Host {http.request.hostport}
 		transport http {
 			dial_timeout 5s
-			# Bounded video validation can take up to 80s after upload. Keep
+			# Bounded video validation, including one clock retry, can take 105s. Keep
 			# the proxy from returning 502 while that work is still running.
 			response_header_timeout 120s
 		}

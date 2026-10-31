@@ -153,6 +153,32 @@ struct FriendStoryFeedTests {
     }
 
     @Test
+    func delayedUploadsKeepStoryOrderAndAgeFromFirstPublishTap() throws {
+        var first = reel(id: 201, author: alice, ago: 10)
+        first.publishedAt = now.addingTimeInterval(-200)
+        var second = visit(id: 101, author: alice, ago: 1_000)
+        second.publishedAt = now.addingTimeInterval(-100)
+
+        let group = try #require(groups(reals: [first], places: [place(id: 500, visits: [second])]).first)
+
+        #expect(group.pages.map(\.memoryID) == [first.id, second.id])
+        #expect(group.pages.map(\.publishedAt) == [first.activityDate, second.activityDate])
+        #expect(group.pages.map(\.expiresAt) == [first.activityDate, second.activityDate].map {
+            $0.addingTimeInterval(StoryReadKeys.freshWindow)
+        })
+    }
+
+    @Test
+    func uploadCompletingAfterSeventyTwoHoursDoesNotReviveEitherPostKind() {
+        var oldReel = reel(id: 201, author: alice, ago: 0)
+        oldReel.publishedAt = now.addingTimeInterval(-StoryReadKeys.freshWindow)
+        var oldVisit = visit(id: 101, author: alice, ago: 0)
+        oldVisit.publishedAt = now.addingTimeInterval(-StoryReadKeys.freshWindow)
+
+        #expect(groups(reals: [oldReel], places: [place(id: 500, visits: [oldVisit])]).isEmpty)
+    }
+
+    @Test
     func nineMediaReelRemainsOneOriginalCardAndBubbleIsNotFlattened() throws {
         var original = reel(id: 201, author: alice, ago: 100)
         original.attachments = (0..<9).map { .init(id: uuid(700 + $0), kind: .photo(photoURL)) }

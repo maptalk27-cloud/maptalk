@@ -119,7 +119,7 @@ private struct ConnectedPostActions: ViewModifier {
                         Menu {
                             actions(for: memory)
                         } label: {
-                            Label(memory.createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute().second()),
+                            Label(memory.activityDate.formatted(.dateTime.month(.abbreviated).day().hour().minute().second()),
                                   systemImage: memory.visibility == "public" ? "globe" : "lock")
                         }
                     }

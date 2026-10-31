@@ -336,7 +336,7 @@ struct ExperienceDetailView: View {
         case let .poi(place):
             return poiStoryCheckIns(for: place).map {
                 .init(id: $0.id, ownerID: $0.userId,
-                      title: "\($0.userId == backend.user.id ? "Your check-in" : "@\(backend.user(for: $0.userId)?.handle ?? "member")") · \($0.createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute().second()))")
+                      title: "\($0.userId == backend.user.id ? "Your check-in" : "@\(backend.user(for: $0.userId)?.handle ?? "member")") · \($0.activityDate.formatted(.dateTime.month(.abbreviated).day().hour().minute().second()))")
             }
         case .journey: return []
         }

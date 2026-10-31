@@ -85,7 +85,7 @@ struct UserMapRecord: Identifiable {
         footprints: [UserMapViewModel.Footprint]
     ) -> [UserMapRecord] {
         let reelRecords = reels.map {
-            UserMapRecord(id: $0.id, timestamp: $0.createdAt, kind: .reel($0))
+            UserMapRecord(id: $0.id, timestamp: $0.activityDate, kind: .reel($0))
         }
         let poiRecords = footprints.map {
             UserMapRecord(
@@ -2199,7 +2199,7 @@ struct UserMapHomeView: View {
             switch reference {
             case let .reel(id):
                 guard let reel = reels.first(where: { $0.id == id }) else { return nil }
-                return UserMapRecord(id: reel.id, timestamp: reel.createdAt, kind: .reel(reel))
+                return UserMapRecord(id: reel.id, timestamp: reel.activityDate, kind: .reel(reel))
 
             case let .poi(id):
                 guard let footprint = footprints.first(where: { $0.id == id }) else { return nil }

@@ -157,6 +157,77 @@ struct PhotoTextOverlayTests {
         }
     }
 
+    @Test
+    func reusableCanvasKeepsFullPhotoAndWordsInsideKeyboardSizedFrames() throws {
+        for (width, height) in [(400, 300), (300, 600), (900, 200)] {
+            let image = try stripedImage(width: width, height: height)
+            let canvas = PhotoTextCanvasView(image: image)
+            let draft = PhotoTextOverlay(text: "Keep the whole photo\n夕阳很好 🌅",
+                                         center: CGPoint(x: 0.8, y: 0.9))
+            for size in [CGSize(width: 361, height: 326), CGSize(width: 361, height: 150),
+                         CGSize(width: 190, height: 110), CGSize(width: 361, height: 326)] {
+                canvas.frame = CGRect(origin: .zero, size: size)
+                canvas.update(draft: draft, isTyping: true)
+                canvas.layoutIfNeeded()
+                let photo = try #require(canvas.subviews.compactMap { $0 as? UIImageView }.first)
+                let input = try #require(nativeTextView(in: canvas))
+                #expect(photo.image === image)
+                #expect(photo.contentMode == .scaleAspectFit)
+                #expect(canvas.bounds.insetBy(dx: -0.5, dy: -0.5).contains(photo.frame))
+                #expect(abs(photo.frame.width / photo.frame.height - CGFloat(width) / CGFloat(height)) < 0.000_1,
+                        "Keyboard resizing must not crop or stretch the photo")
+                let textRect = input.convert(input.bounds, to: canvas)
+                #expect(photo.frame.insetBy(dx: -0.5, dy: -0.5).contains(textRect),
+                        "The complete text viewport must remain inside the visible image")
+            }
+        }
+    }
+
+    @Test
+    func textDraggingTakesPriorityOnlyOverAncestorFormScrolling() throws {
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
+        let canvas = PhotoTextCanvasView(image: try stripedImage(width: 400, height: 300))
+        scroll.addSubview(canvas)
+        let textPan = try #require(canvas.gestureRecognizers?.compactMap { $0 as? UIPanGestureRecognizer }.first)
+        let tap = try #require(canvas.gestureRecognizers?.compactMap { $0 as? UITapGestureRecognizer }.first)
+        let unrelatedScroll = UIScrollView()
+        let input = try #require(nativeTextView(in: canvas))
+
+        #expect(canvas.gestureRecognizer(textPan, shouldBeRequiredToFailBy: scroll.panGestureRecognizer))
+        #expect(!canvas.gestureRecognizer(tap, shouldBeRequiredToFailBy: scroll.panGestureRecognizer))
+        #expect(!canvas.gestureRecognizer(textPan, shouldBeRequiredToFailBy: unrelatedScroll.panGestureRecognizer))
+        #expect(!canvas.gestureRecognizer(textPan, shouldBeRequiredToFailBy: input.panGestureRecognizer),
+                "Native text selection must keep its own gestures")
+    }
+
+    @Test
+    func reusableCanvasEditsOnlyDraftAndCanRestoreWithoutChangingSourcePixels() throws {
+        let original = try stripedImage(width: 400, height: 300)
+        let originalBytes = try #require(original.pngData())
+        let saved = PhotoTextOverlay(text: "Original words", center: CGPoint(x: 0.4, y: 0.6))
+        let canvas = PhotoTextCanvasView(image: original)
+        canvas.frame = CGRect(x: 0, y: 0, width: 361, height: 326)
+        var draft = saved
+        var changes = 0
+        canvas.onChange = { draft = $0; changes += 1 }
+        canvas.update(draft: draft, isTyping: true)
+        canvas.layoutIfNeeded()
+        let input = try #require(nativeTextView(in: canvas))
+        input.text = "An uncommitted change"
+        canvas.textViewDidChange(input)
+        #expect(draft.text == "An uncommitted change")
+        #expect(saved.text == "Original words")
+        #expect(changes == 1)
+
+        // The parent composer implements Cancel by restoring its saved value,
+        // not by re-rendering the photo or applying a partially typed overlay.
+        canvas.update(draft: saved, isTyping: false)
+        canvas.layoutIfNeeded()
+        #expect(input.text == "Original words")
+        #expect(changes == 1, "A parent-driven restore must not emit a fresh user edit")
+        #expect(original.pngData() == originalBytes)
+    }
+
     private func nativeTextView(in view: UIView) -> UITextView? {
         if let input = view as? UITextView { return input }
         for child in view.subviews {

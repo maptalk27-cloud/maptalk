@@ -115,6 +115,9 @@ nonisolated struct BackendMemory: Codable, Sendable {
     // Optional for pre-cluster server responses and durable offline caches.
     var cluster: BackendCluster? = nil
 
+    /// One clock for archive, feed and history; transport completion is not a publication.
+    var activityDate: Date { publishedAt ?? createdAt }
+
     /// Embedded snapshots are attachments, never independently discoverable
     /// memories. Only their media participates in the parent's hydration.
     var attachedMedia: [BackendMedia] {
@@ -155,6 +158,7 @@ nonisolated struct BackendMemoryInput: Codable, Sendable {
     var mediaIds: [UUID] = []
     var place: BackendPlaceInput? = nil
     var placeId: UUID? = nil
+    // Legacy wire name: the first publish/save action, never the asset's EXIF date.
     var capturedAt: String? = nil
     var cluster: BackendClusterInput? = nil
 }

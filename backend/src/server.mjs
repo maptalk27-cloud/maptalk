@@ -15,7 +15,8 @@ import { createResumableUploads, ResumableUploadError, UPLOAD_CHUNK_SIZE } from 
 
 const ACTIVE_FEED_WINDOW = 72 * 60 * 60 * 1000;
 // Derive activity from first publication so existing 24-hour rows follow the
-// current policy without rewriting history. Legacy rows fall back to capture.
+// current policy without rewriting history. Legacy/private rows fall back to
+// their original local publication/save time.
 const PUBLICATION_TIME_SQL = 'COALESCE(published_at, created_at)';
 const PHOTO_LIMIT = 10 * 1024 * 1024;
 const CATEGORIES = ['viewpoint', 'restaurant', 'coffee', 'nightlife', 'art', 'market', 'hotel', 'airport', 'other'];
@@ -107,8 +108,9 @@ function memoryInput(body, time) {
       'Capture time must be a valid past time (up to five minutes of clock skew).');
     requireValue(new Date(captured).toISOString().slice(0, 19) === body.capturedAt.slice(0, 19),
       'Capture time must be a valid calendar date.');
-    // Keep the supplied instant stable for retries; clamp minor clock skew only
-    // when storing created_at. Omitting this field preserves old request hashes.
+    // This legacy wire name is the first local publish/save tap, not the media's
+    // camera timestamp. Keep it stable for retries; clamp minor clock skew only
+    // when storing it. Omitting this field preserves old request hashes.
     result.capturedAt = new Date(captured).toISOString();
   }
   requireValue(result.kind === 'poi' || result.kind === 'reel', 'Kind must be poi or reel.');
@@ -431,7 +433,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       createdAt: new Date(row.created_at).toISOString(), author: userJSON(db, author) };
   }
 
-  function listMemories(where, args, { limit, cursor }, orderBy = 'created_at') {
+  function listMemories(where, args, { limit, cursor }, orderBy = PUBLICATION_TIME_SQL) {
     // Column names come only from these internal callers, never client input.
     if (cursor) {
       where += ` AND (${orderBy} < ? OR (${orderBy} = ? AND id < ?))`;
@@ -875,7 +877,14 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
           const visible = db.prepare(`SELECT 1 FROM memories WHERE place_id = ?
             AND (owner_id = ? OR (visibility = 'public' AND moderation_status = 'approved' AND ${visibilitySQL()})) LIMIT 1`)
             .get(placeID, user.id, user.id, user.id);
-          if (!visible) throw notFound();
+          // Source landmarks deliberately outlive their last check-in. A queued
+          // visit can still name that canonical ID after its last visible visit
+          // was deleted. Reuse only the bare landmark: any surviving memory,
+          // including a private, blocked or rejected one, keeps the usual access
+          // check above. This never grants access to past visits or their media.
+          const orphanedSource = !visible && db.prepare(`SELECT 1 FROM place_sources
+            WHERE place_id = ? AND NOT EXISTS (SELECT 1 FROM memories WHERE place_id = ?)`).get(placeID, placeID);
+          if (!visible && !orphanedSource) throw notFound();
           const place = db.prepare('SELECT latitude, longitude, directory_kind FROM places WHERE id = ?').get(placeID);
           requireNearbyPlace(input.location, place, place.directory_kind);
         }
@@ -902,11 +911,14 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
             }
           }
         }
-        const created = now();
+        // Upload completion is not a new publication. Offline posts retain the
+        // first tap's position and active lifetime on both Feed and MyMap.
+        const received = now();
+        const created = input.capturedAt ? Math.min(Date.parse(input.capturedAt), received) : received;
         db.prepare(`INSERT INTO memories(id, owner_id, kind, visibility, latitude, longitude,
           caption, place_id, created_at, expires_at, request_hash, published_at, moderation_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(input.id, user.id, input.kind, input.visibility, input.location.latitude, input.location.longitude,
-            input.caption, placeID, input.capturedAt ? Math.min(Date.parse(input.capturedAt), created) : created,
+            input.caption, placeID, created,
             created + ACTIVE_FEED_WINDOW, requestHash, input.visibility === 'public' ? created : null,
             'approved');
         const attach = db.prepare('INSERT INTO memory_media(memory_id, media_id, position) VALUES (?, ?, ?)');

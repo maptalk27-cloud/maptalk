@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { VIDEO_LIMITS, normalizeVideo, validateVideoContainer, validateVideoMetadata, validateVideoPreservation } from '../src/video-processing.mjs';
 import { mediaByteRange } from '../src/media-range.mjs';
-import { appleEditListVideoFixture, videoFixture } from './helpers/video.mjs';
+import { appleEditListVideoFixture, partialFrameClockVideoFixture, videoFixture } from './helpers/video.mjs';
 
 const execute = promisify(execFile);
 const rejects = code => error => error.code === code;
@@ -99,6 +99,45 @@ test('Apple edit-list video keeps every picture and AAC packet without expanding
   }
 });
 
+test('600 Hz clips preserve partial final frames and ordinary x264 B-frame timing with AAC intact', async () => {
+  for (const partialDuration of [undefined, 2.058333, 28.646667]) {
+    const input = partialDuration === undefined
+      ? await videoFixture({ duration: 2.058333, fps: 30, videoTrackTimescale: 600, motion: true })
+      : await partialFrameClockVideoFixture({ duration: partialDuration, dimensions: '160x90' });
+    const directory = await mkdtemp(join(tmpdir(), 'maptalk-clock600-check-'));
+    try {
+      const source = join(directory, 'source.mp4');
+      const output = join(directory, 'normalized.mp4');
+      await writeFile(source, input);
+      const metadata = async file => JSON.parse((await execute('ffprobe', ['-v', 'error', '-count_packets',
+        '-show_entries', 'stream=codec_type,codec_name,duration,time_base,has_b_frames,nb_read_packets', '-of', 'json', file])).stdout);
+      const before = await metadata(source);
+      const video = before.streams.find(stream => stream.codec_type === 'video');
+      assert.equal(video.time_base, '1/600');
+      assert.equal(video.codec_name, 'h264');
+      if (partialDuration === undefined) assert.ok(video.has_b_frames > 0, 'also cover FFmpeg 5/x264 B-frame duration inference');
+      else assert.ok(Math.abs(Number(video.duration) - partialDuration) < 0.000001, 'synthetic edit ends within the final frame');
+      await writeFile(output, (await normalizeVideo(input, 'video/mp4')).bytes);
+      const after = await metadata(output);
+      for (const stream of before.streams) {
+        const preserved = after.streams.find(item => item.codec_type === stream.codec_type);
+        assert.equal(preserved.codec_name, stream.codec_name);
+        assert.equal(preserved.nb_read_packets, stream.nb_read_packets, `every ${stream.codec_type} packet survives`);
+        assert.ok(Math.abs(Number(preserved.duration) - Number(stream.duration)) <= 0.001667,
+          `${stream.codec_type} presentation end must not expand to a full frame`);
+      }
+      assert.equal(after.streams.find(stream => stream.codec_type === 'audio').codec_name, 'aac');
+      const pictures = async file => (await execute('ffmpeg', ['-v', 'error', '-i', file,
+        '-map', '0:v:0', '-fps_mode', 'passthrough', '-f', 'framemd5', '-'], { maxBuffer: 1024 * 1024 })).stdout
+        .split('\n').filter(line => line && !line.startsWith('#')).map(line => line.split(',').at(-1).trim());
+      assert.deepEqual(await pictures(output), await pictures(source), 'decoded pictures and their order remain identical');
+      const audioPackets = async file => JSON.parse((await execute('ffprobe', ['-v', 'error', '-select_streams', 'a:0',
+        '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=data_hash', '-of', 'json', file])).stdout).packets;
+      assert.deepEqual(await audioPackets(output), await audioPackets(source), 'AAC packet payloads remain byte-identical');
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
+});
+
 test('remux preservation allows one bounded iPhone clock tick, never a missing packet or frame-sized duration change', () => {
   const original = { streams: [
     { codec_type: 'video', duration: '5.568333', time_base: '1/600', nb_read_packets: '167' },
@@ -156,10 +195,11 @@ test('only one video decoder runs at a time and its slot is released after compl
 
 test('video metadata rejects unusual tracks, high frame rate, dimensions, invalid duration and audio configurations', () => {
   const base = { streams: [{ codec_type: 'video', codec_name: 'h264', pix_fmt: 'yuv420p',
-    width: 1280, height: 720, duration: '10', avg_frame_rate: '30/1' }], format: { duration: '10' } };
+    width: 1280, height: 720, duration: '10', avg_frame_rate: '30/1', time_base: '1/600' }], format: { duration: '10' } };
   assert.doesNotThrow(() => validateVideoMetadata(base));
   for (const patch of [{ codec_name: 'hevc' }, { pix_fmt: 'yuv420p10le' }, { width: 4000 },
     { height: 1280 }, { avg_frame_rate: '120/1' }, { avg_frame_rate: '0/0' }, { duration: 'Infinity' },
+    ...[undefined, '', '1/0', '0/600', '-1/600', '1/1.5', '1/2147483648', '1/600/2'].map(time_base => ({ time_base })),
     { duration: '61' }, { disposition: { attached_pic: 1 } }, { side_data_list: [{ rotation: 45 }] }]) {
     assert.throws(() => validateVideoMetadata({ ...base, streams: [{ ...base.streams[0], ...patch }] }));
   }

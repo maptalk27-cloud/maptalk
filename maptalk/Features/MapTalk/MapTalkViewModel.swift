@@ -171,12 +171,22 @@ final class MapTalkViewModel: ObservableObject {
             environment.location.requestWhenInUse()
             searchMap(in: lastVisibleRegion ?? region)
             refreshFreshness()
-            if let backend = environment.backend {
-                Task { do { try await backend.refreshIfNeeded() } catch {
-                    if backend.isActive && !(error is CancellationError) { backend.issue = error.localizedDescription }
-                } }
-            }
+            refreshBackendIfNeeded()
         }
+    }
+
+    func onBecomeActive() {
+        refreshFreshness()
+        refreshBackendIfNeeded()
+    }
+
+    private func refreshBackendIfNeeded() {
+        guard case .global = scope, let backend = environment.backend else { return }
+        // The store coalesces concurrent reads and suppresses recent refreshes,
+        // including overlapping first appearance / foreground notifications.
+        Task { do { try await backend.refreshIfNeeded() } catch {
+            if backend.isActive && !(error is CancellationError) { backend.issue = error.localizedDescription }
+        } }
     }
 
     /// Refresh both map layers together, including after a long background stay.
@@ -1159,7 +1169,7 @@ final class MapTalkViewModel: ObservableObject {
                 let publicVisitorCount = Set(publicCheckIns.map(\.userId)).count
                 var seenFriendIDs = Set<UUID>()
                 let friends = publicCheckIns
-                    .sorted { $0.createdAt > $1.createdAt }
+                    .sorted { $0.activityDate > $1.activityDate }
                     .compactMap { checkIn -> User? in
                         guard let friend = friendDirectory[checkIn.userId],
                               seenFriendIDs.insert(friend.id).inserted else {

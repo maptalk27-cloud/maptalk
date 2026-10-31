@@ -157,6 +157,17 @@ struct FriendStoryContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .clipped()
+                .overlay(alignment: .bottom) {
+                    if !isExpanded,
+                       let momentIndex = group.momentIndex(containing: pageIndex),
+                       group.moments[momentIndex].placeID != nil {
+                        let range = group.moments[momentIndex].pageRange
+                        FriendStoryPlacePageDots(count: range.count,
+                            index: pageIndex - range.lowerBound)
+                            .padding(.bottom, showsFullBleedPOIPreview ? 24 : 12)
+                            .allowsHitTesting(false)
+                    }
+                }
         }
         .background(Color.black)
         // The pager itself must reach the sheet's bottom edge; a child cannot
@@ -209,26 +220,10 @@ struct FriendStoryContentView: View {
 
     private var navigationHeader: some View {
         let momentIndex = group.momentIndex(containing: pageIndex) ?? 0
-        let moment = group.moments.indices.contains(momentIndex) ? group.moments[momentIndex] : nil
         return VStack(spacing: 0) {
             HStack(spacing: 8) {
                 authorIdentity
                 Spacer(minLength: 4)
-                if let moment, moment.pageRange.count > 1 {
-                    Text("\(pageIndex - moment.pageRange.lowerBound + 1) / \(moment.pageRange.count)")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.75))
-                        .fixedSize()
-                        .accessibilityLabel("At this place, item \(pageIndex - moment.pageRange.lowerBound + 1) of \(moment.pageRange.count)")
-                        .accessibilityIdentifier("friend-story.moment-position")
-                } else if group.moments.count > 12 {
-                    Text("\(momentIndex + 1) / \(group.moments.count)")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.65))
-                        .fixedSize()
-                        .accessibilityHidden(true)
-                }
             }
             .padding(.leading, 16)
             .padding(.trailing, 16)
@@ -421,6 +416,38 @@ struct FriendStoryContentView: View {
         "\(page.id):\(canMarkViewed)"
     }
 
+}
+
+/// Position within this place, separate from the person's stops above. A small
+/// window keeps long visits quiet without hiding the currently selected slice.
+private struct FriendStoryPlacePageDots: View {
+    let count: Int
+    let index: Int
+
+    private var visibleRange: Range<Int> {
+        let start = max(0, min(index - 3, count - 7))
+        return start..<min(count, start + 7)
+    }
+
+    var body: some View {
+        if count > 1 {
+            HStack(spacing: 5) {
+                ForEach(visibleRange, id: \.self) { page in
+                    let isOverflowEdge = (page == visibleRange.lowerBound && page > 0)
+                        || (page == visibleRange.upperBound - 1 && page < count - 1)
+                    Circle()
+                        .fill(.white.opacity(page == index ? 0.95 : 0.4))
+                        .frame(width: 6, height: 6)
+                        .scaleEffect(isOverflowEdge && page != index ? 0.65 : 1)
+                }
+            }
+            .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
+            .animation(.easeOut(duration: 0.16), value: index)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("At this place, item \(index + 1) of \(count)")
+            .accessibilityIdentifier("friend-story.moment-position")
+        }
+    }
 }
 
 /// Only the person's compact POI preview changes. Native sheet expansion,

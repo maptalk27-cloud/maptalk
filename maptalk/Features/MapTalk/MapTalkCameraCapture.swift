@@ -16,6 +16,7 @@ internal struct MapTalkInlineCameraView: View {
     let onOpenLibrary: @MainActor () -> Void
     let onIssue: @MainActor (String) -> Void
     var onCaptureActivityChanged: @MainActor (Bool) -> Void = { _ in }
+    var showsControls = true
 
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = MapTalkInlineCameraModel()
@@ -52,74 +53,76 @@ internal struct MapTalkInlineCameraView: View {
                 ProgressView().tint(.white)
             }
 
-            VStack(spacing: 0) {
-                if let recordingStartedAt = camera.recordingStartedAt {
-                    TimelineView(.periodic(from: recordingStartedAt, by: 0.25)) { context in
-                        HStack(spacing: 6) {
-                            Circle().fill(.red).frame(width: 6, height: 6)
-                            Text(MapTalkInlineCameraPolicy.elapsedLabel(
-                                seconds: context.date.timeIntervalSince(recordingStartedAt)
-                            ))
-                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+            if showsControls {
+                VStack(spacing: 0) {
+                    if let recordingStartedAt = camera.recordingStartedAt {
+                        TimelineView(.periodic(from: recordingStartedAt, by: 0.25)) { context in
+                            HStack(spacing: 6) {
+                                Circle().fill(.red).frame(width: 6, height: 6)
+                                Text(MapTalkInlineCameraPolicy.elapsedLabel(
+                                    seconds: context.date.timeIntervalSince(recordingStartedAt)
+                                ))
+                                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(.black.opacity(0.45), in: Capsule())
                         }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(.black.opacity(0.45), in: Capsule())
+                        .accessibilityIdentifier("maptalk.place.recording-time")
+                        .padding(.top, 18)
                     }
-                    .accessibilityIdentifier("maptalk.place.recording-time")
-                    .padding(.top, 18)
+                    Spacer(minLength: 16)
+                    HStack {
+                        Button(action: onOpenLibrary) {
+                            Image(systemName: "photo.on.rectangle")
+                                .font(.system(size: 22, weight: .medium))
+                                .frame(width: 48, height: 52)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(camera.captureInProgress)
+                        .accessibilityLabel("Choose from library")
+                        .accessibilityIdentifier("maptalk.place.library")
+
+                        Spacer()
+                        MapTalkPressShutter(
+                            allowsNewCapture: camera.canBeginCapture,
+                            isRecording: camera.isRecordingVideo,
+                            isFinishing: camera.isFinishing,
+                            onPhoto: camera.capturePhoto,
+                            onHold: camera.beginHeldRecording,
+                            onRelease: camera.endHeldRecording
+                        )
+                        .frame(width: 64, height: 64)
+
+                        Spacer()
+                        Button {
+                            camera.flip()
+                        } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath.camera")
+                                .font(.system(size: 23, weight: .regular))
+                                .frame(width: 48, height: 52)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(camera.canFlip == false || camera.captureInProgress || camera.isReady == false)
+                        .opacity(camera.canFlip ? 1 : 0.4)
+                        .accessibilityLabel("Switch camera")
+                        .accessibilityIdentifier("maptalk.place.flip-camera")
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 4)
+
+                    Text(camera.shutterHint)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .frame(height: 16)
+                        .opacity(camera.isReady || camera.captureInProgress ? 1 : 0)
+                        .padding(.bottom, 10)
+                        .accessibilityIdentifier("maptalk.place.shutter-hint")
                 }
-                Spacer(minLength: 16)
-                HStack {
-                    Button(action: onOpenLibrary) {
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.system(size: 22, weight: .medium))
-                            .frame(width: 48, height: 52)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(camera.captureInProgress)
-                    .accessibilityLabel("Choose from library")
-                    .accessibilityIdentifier("maptalk.place.library")
-
-                    Spacer()
-                    MapTalkPressShutter(
-                        allowsNewCapture: camera.canBeginCapture,
-                        isRecording: camera.isRecordingVideo,
-                        isFinishing: camera.isFinishing,
-                        onPhoto: camera.capturePhoto,
-                        onHold: camera.beginHeldRecording,
-                        onRelease: camera.endHeldRecording
-                    )
-                    .frame(width: 64, height: 64)
-
-                    Spacer()
-                    Button {
-                        camera.flip()
-                    } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath.camera")
-                            .font(.system(size: 23, weight: .regular))
-                            .frame(width: 48, height: 52)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(camera.canFlip == false || camera.captureInProgress || camera.isReady == false)
-                    .opacity(camera.canFlip ? 1 : 0.4)
-                    .accessibilityLabel("Switch camera")
-                    .accessibilityIdentifier("maptalk.place.flip-camera")
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 24)
-                .padding(.bottom, 4)
-
-                Text(camera.shutterHint)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.8))
-                    .frame(height: 16)
-                    .opacity(camera.isReady || camera.captureInProgress ? 1 : 0)
-                    .padding(.bottom, 10)
-                    .accessibilityIdentifier("maptalk.place.shutter-hint")
             }
         }
         .onAppear {

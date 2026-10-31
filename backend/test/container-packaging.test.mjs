@@ -170,7 +170,7 @@ test('Caddy uses real public HTTPS and preserves the host allowlist', async () =
   assert.match(caddy, /admin off/);
   assert.match(caddy, /header_up Host \{http\.request\.hostport\}/);
   assert.match(caddy, /reverse_proxy api:8787/);
-  // Video probe/decode/remux/probe has a combined 80-second bound.
+  // Video validation, including one source-clock retry, has a 105-second bound.
   assert.match(caddy, /response_header_timeout 120s/);
   assert.doesNotMatch(caddy, /^\s*(?:tls internal|auto_https off|log)\b/m);
 });

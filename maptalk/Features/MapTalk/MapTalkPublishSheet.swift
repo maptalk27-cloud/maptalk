@@ -16,7 +16,7 @@ enum MapTalkPublishDestination: Identifiable, Hashable {
     var id: Self { self }
 }
 
-/// A POI has no separate authored caption. Optional photo text is rendered
+/// A POI has no separate authored caption. Optional photo/video text is rendered
 /// into its media before this draft is handed to the durable publishing queue.
 struct MapTalkPlaceDraft {
     enum Target {
@@ -152,9 +152,13 @@ struct MapTalkPublishComposer: View {
 
     @State private var mediaPickerItem: PhotosPickerItem?
     @State private var selectedMedia: ComposerMediaAsset?
-    @State private var placePhotoText = PhotoTextOverlay()
-    @State private var editedPlacePhoto: ComposerMediaAsset?
-    @State private var isShowingPhotoTextEditor = false
+    @State private var placeMediaText = PhotoTextOverlay()
+    @State private var editedPlaceMedia: ComposerMediaAsset?
+    @State private var isShowingMediaTextEditor = false
+    @State private var editingMediaText = PhotoTextOverlay()
+    @State private var isTypingMediaText = false
+    @State private var mediaTextEditorImage: UIImage?
+    @State private var isApplyingMediaText = false
     @State private var isLoadingMedia = false
     @State private var mediaImportToken = UUID()
     @State private var mediaImportTask: Task<Void, Never>?
@@ -323,7 +327,7 @@ struct MapTalkPublishComposer: View {
         .accessibilityIdentifier("maptalk.publish-composer")
         .disabled(isSubmitting)
         .allowsHitTesting(isSubmitting == false)
-        .interactiveDismissDisabled(isSubmitting)
+        .interactiveDismissDisabled(isSubmitting || isApplyingMediaText)
         .onAppear {
             configureInitialSelection()
         }
@@ -403,19 +407,12 @@ struct MapTalkPublishComposer: View {
     private var placeComposer: some View {
         ZStack {
             placeCaptureStep
-                .opacity(isShowingNearbyPlaceChoices || isShowingPhotoTextEditor || isChoosingVideoClip ? 0 : 1)
-                .disabled(isShowingNearbyPlaceChoices || isShowingPhotoTextEditor || isChoosingVideoClip)
-                .accessibilityHidden(isShowingNearbyPlaceChoices || isShowingPhotoTextEditor || isChoosingVideoClip)
+                .opacity(isShowingNearbyPlaceChoices ? 0 : 1)
+                .disabled(isShowingNearbyPlaceChoices)
+                .accessibilityHidden(isShowingNearbyPlaceChoices)
             if isShowingNearbyPlaceChoices {
                 placePickerStep
                     .transition(.move(edge: .trailing))
-            }
-            if isShowingPhotoTextEditor, case let .photo(_, _, image) = selectedMedia {
-                MapTalkPhotoTextEditor(image: image, draft: placePhotoText, embedded: true,
-                    onCancel: { isShowingPhotoTextEditor = false }, onDone: applyPlacePhotoText)
-            }
-            if isChoosingVideoClip {
-                placeVideoClipEditor
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -425,41 +422,64 @@ struct MapTalkPublishComposer: View {
     }
 
     private var placeCaptureStep: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 8) {
             placeHeader
+            // The same canvas stays in place for capture, review, text and
+            // trimming. Keyboard space changes its size, never the page.
+            placeMediaStage
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 12)
+                .layoutPriority(1)
 
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    placeMediaSection
-                        .padding(.horizontal, 16)
-                        .padding(.top, 10)
-
-                    placeDetails
-                        .padding(.horizontal, 20)
-                        .padding(.top, 18)
-                        .disabled(isPlaceCameraBusy)
-
-                    if let submissionIssue {
-                        Text(submissionIssue)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Color.red.opacity(0.82))
-                            .padding(.horizontal, 20)
-                            .padding(.top, 12)
+            Group {
+                if isShowingMediaTextEditor {
+                    VStack(spacing: 4) {
+                        MapTalkPhotoTextTools(isTyping: isTypingMediaText) {
+                            // Commit the native keyboard's marked text or
+                            // autocorrection before reading the bound draft.
+                            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                                            to: nil, from: nil, for: nil)
+                            isTypingMediaText = false
+                            applyPlaceMediaText(editingMediaText)
+                        }
+                        if let submissionIssue {
+                            Text(submissionIssue)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("maptalk.place.text.issue")
+                        }
                     }
+                } else if isChoosingVideoClip {
+                    placeVideoClipControls
+                } else {
+                    placePublishingControls
                 }
-                .frame(maxWidth: .infinity)
-                .disabled(hasUnconfirmedSubmission)
-                .padding(.bottom, 14)
             }
-            .scrollDismissesKeyboard(.interactively)
-            .scrollDisabled(isPlaceCameraBusy)
-
-            placeSubmitButton
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
+            .frame(minHeight: isShowingMediaTextEditor ? 44 : 108, alignment: .top)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
         }
         .padding(.top, 6)
+    }
+
+    private var placePublishingControls: some View {
+        VStack(spacing: 8) {
+            placeLandmarkSection
+                .disabled(hasUnconfirmedSubmission)
+            HStack(spacing: 12) {
+                placeAudienceSelector
+                    .disabled(hasUnconfirmedSubmission)
+                Spacer(minLength: 0)
+                placeSubmitButton
+            }
+            if let submissionIssue {
+                Text(submissionIssue)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.red.opacity(0.82))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .disabled(isPlaceCameraBusy)
     }
 
     private var placePickerStep: some View {
@@ -1169,26 +1189,40 @@ struct MapTalkPublishComposer: View {
                 .foregroundStyle(.black)
 
             HStack {
-                Button(action: cancelComposer) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.black)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                if isShowingMediaTextEditor {
+                    Button("Cancel") {
+                        isTypingMediaText = false
+                        isShowingMediaTextEditor = false
+                        submissionIssue = nil
+                    }
+                    .accessibilityIdentifier("maptalk.photo-text.cancel")
+                } else if isChoosingVideoClip {
+                    Button("Cancel") { clearPendingMedia() }
+                        .accessibilityIdentifier("maptalk.place.clip.cancel")
+                } else {
+                    Button(action: cancelComposer) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("Cancel publishing")
+                    .accessibilityIdentifier("maptalk.publish.cancel")
+                    .disabled(isPlaceCameraBusy)
                 }
-                .buttonStyle(ComposerPressStyle())
-                .accessibilityLabel("Cancel publishing")
-                .accessibilityIdentifier("maptalk.publish.cancel")
-
                 Spacer()
+                if isChoosingVideoClip {
+                    Button("Use clip", action: useSelectedVideoClip)
+                        .fontWeight(.semibold)
+                        .accessibilityIdentifier("maptalk.place.clip.use")
+                }
             }
+            .font(.system(size: 15))
+            .foregroundStyle(.black)
+            .buttonStyle(ComposerHeaderButtonStyle())
         }
         .padding(.horizontal, 12)
         .frame(height: 46)
-    }
-
-    private var placeMediaSection: some View {
-        placeMediaStage
     }
 
     private var placeMediaStage: some View {
@@ -1202,19 +1236,43 @@ struct MapTalkPublishComposer: View {
                             && pendingMediaItem == nil && pendingVideoURL == nil
                             && !isLoadingMedia && !isShowingPlaceLibrary
                             && !isShowingNearbyPlaceChoices && !isSubmitting
-                            && !isShowingPhotoTextEditor && !isChoosingVideoClip
+                            && !isShowingMediaTextEditor && !isChoosingVideoClip
                             && !hasUnconfirmedSubmission,
                         onCapture: importPlaceCameraCapture,
                         onOpenLibrary: presentPlaceLibrary,
                         onIssue: { submissionIssue = $0 },
-                        onCaptureActivityChanged: { isPlaceCameraBusy = $0 }
+                        onCaptureActivityChanged: { isPlaceCameraBusy = $0 },
+                        showsControls: (selectedMedia == nil || isRetakingPlace)
+                            && pendingMediaItem == nil && pendingVideoURL == nil
+                            && !isLoadingMedia && !isShowingMediaTextEditor
                     )
                     .opacity(selectedMedia == nil || isRetakingPlace ? 1 : 0)
                     .disabled((selectedMedia != nil && !isRetakingPlace)
                         || pendingMediaItem != nil || pendingVideoURL != nil || isLoadingMedia)
                     .accessibilityHidden((selectedMedia != nil && !isRetakingPlace)
                         || pendingMediaItem != nil || pendingVideoURL != nil)
-                if selectedMedia != nil && !isRetakingPlace {
+                if isShowingMediaTextEditor, let image = mediaTextEditorImage {
+                    MapTalkPhotoTextCanvas(image: image, draft: $editingMediaText, isTyping: $isTypingMediaText)
+                        .accessibilityIdentifier("maptalk.photo-text.canvas")
+                } else if isApplyingMediaText, let image = mediaTextEditorImage {
+                    MapTalkPhotoTextCanvas(image: image, draft: .constant(editingMediaText), isTyping: .constant(false))
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                    VStack {
+                        Spacer()
+                        HStack(spacing: 8) {
+                            ProgressView().tint(.white)
+                            Text("Saving text…")
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(12)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(.bottom, 12)
+                    }
+                    .accessibilityIdentifier("maptalk.place.saving-text")
+                } else if selectedMedia != nil && !isRetakingPlace
+                            && pendingMediaItem == nil && pendingVideoURL == nil {
                     placeMediaVisual
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .clipped()
@@ -1232,20 +1290,17 @@ struct MapTalkPublishComposer: View {
 
                             Spacer(minLength: 0)
 
-                            if selectedMedia?.isVideo == false {
-                                Button {
-                                    guard !isLoadingMedia, !hasUnconfirmedSubmission,
-                                          pendingMediaItem == nil, pendingVideoURL == nil else { return }
-                                    isShowingPhotoTextEditor = true
-                                } label: {
+                            if selectedMedia != nil {
+                                Button(action: beginPlaceMediaText) {
                                     Text("Aa")
                                         .font(.system(size: 20, weight: .semibold))
                                         .frame(width: 44, height: 44)
                                 }
                                 .buttonStyle(ComposerPressStyle())
-                                .accessibilityLabel("Add text to photo")
-                                .accessibilityValue(placePhotoText.text)
+                                .accessibilityLabel(selectedMedia?.isVideo == true ? "Add text to video" : "Add text to photo")
+                                .accessibilityValue(placeMediaText.text)
                                 .accessibilityIdentifier("maptalk.place.photo-text")
+                                .disabled(isLoadingMedia)
                             }
 
                             Button(action: presentPlaceLibrary) {
@@ -1288,39 +1343,21 @@ struct MapTalkPublishComposer: View {
                     .padding(10)
                 }
 
-                VStack {
-                    HStack {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(hasLiveLocation ? Theme.neonPrimary : Color.white.opacity(0.72))
-                                .frame(width: 6, height: 6)
-                            Text(hasLiveLocation ? "Current location" : (locationAccessIsDenied ? "Location off" : "Locating"))
-                                .font(.system(size: 13, weight: .semibold))
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(.black.opacity(0.28), in: Capsule())
-                        .accessibilityLabel("Uses your live location")
-                        .accessibilityIdentifier("maptalk.publish-live-location")
-                        Spacer(minLength: 0)
-                    }
-                    .padding(12)
-                    Spacer(minLength: 0)
-                }
-                .allowsHitTesting(false)
-
-                if !isChoosingVideoClip && (pendingMediaItem != nil || pendingVideoURL != nil) {
+                if isChoosingVideoClip, let pendingVideoPlayer {
+                    MapTalkComposerVideoPreview(player: pendingVideoPlayer,
+                        startTime: videoClipStart, isActive: !isShowingNearbyPlaceChoices && !isShowingPlaceLibrary)
+                } else if pendingMediaItem != nil || pendingVideoURL != nil {
                     pendingPlaceMediaPreview
-                } else if isLoadingMedia {
+                } else if isLoadingMedia && !isApplyingMediaText {
                     ProgressView().tint(.white)
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 326)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("maptalk.place.media-stage")
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(Color.black.opacity(0.08), lineWidth: 1)
@@ -1330,15 +1367,15 @@ struct MapTalkPublishComposer: View {
 
     @ViewBuilder
     private var placeMediaVisual: some View {
-        switch editedPlacePhoto ?? selectedMedia {
+        switch editedPlaceMedia ?? selectedMedia {
         case let .photo(_, _, preview):
             Image(uiImage: preview)
                 .resizable()
                 .scaledToFit()
         case let .video(_, _, preview):
             if let placeVideoPlayer {
-                VideoPlayer(player: placeVideoPlayer)
-                    .accessibilityLabel("Video preview")
+                MapTalkComposerVideoPreview(player: placeVideoPlayer,
+                    isActive: !isShowingNearbyPlaceChoices && !isShowingPlaceLibrary && !isSubmitting)
             } else if let preview {
                 Image(uiImage: preview.image)
                     .resizable()
@@ -1359,12 +1396,12 @@ struct MapTalkPublishComposer: View {
         ZStack {
             Color.black
             if let pendingVideoPlayer {
-                VideoPlayer(player: pendingVideoPlayer)
-                    .accessibilityLabel("Selected video preview")
+                MapTalkComposerVideoPreview(player: pendingVideoPlayer,
+                    startTime: pendingClipRange?.start.seconds ?? pendingVideoStart,
+                    isActive: !isShowingNearbyPlaceChoices && !isShowingPlaceLibrary && !isSubmitting)
             }
             VStack {
                 HStack {
-                    Spacer()
                     Button {
                         clearPendingMedia()
                     } label: {
@@ -1375,6 +1412,7 @@ struct MapTalkPublishComposer: View {
                     }
                     .accessibilityLabel("Cancel adding media")
                     .accessibilityIdentifier("maptalk.place.import.cancel")
+                    Spacer()
                 }
                 Spacer()
                 VStack(spacing: 10) {
@@ -1412,90 +1450,69 @@ struct MapTalkPublishComposer: View {
         .accessibilityIdentifier("maptalk.place.import.preview")
     }
 
-    private var placeVideoClipEditor: some View {
-        VStack(spacing: 18) {
-            HStack {
-                Button("Cancel") { clearPendingMedia() }
-                    .accessibilityIdentifier("maptalk.place.clip.cancel")
-                Spacer()
-                Text("Choose a clip").font(.system(size: 17, weight: .semibold))
-                Spacer()
-                Button("Use clip") {
-                    isChoosingVideoClip = false
-                    pendingVideoPlayer?.pause()
-                    startPlaceImport(timeRange: CMTimeRange(
-                        start: CMTime(seconds: videoClipStart, preferredTimescale: 600),
-                        duration: CMTime(seconds: min(60, pendingVideoDuration - videoClipStart), preferredTimescale: 600)))
-                }
-                .fontWeight(.semibold)
-                .accessibilityIdentifier("maptalk.place.clip.use")
+    private var placeVideoClipControls: some View {
+        VStack(spacing: 6) {
+            if let pendingVideoURL {
+                MapTalkVideoClipStrip(url: pendingVideoURL,
+                    sourceRange: CMTimeRange(
+                        start: CMTime(seconds: pendingVideoStart, preferredTimescale: 600),
+                        duration: CMTime(seconds: pendingVideoDuration - pendingVideoStart, preferredTimescale: 600)),
+                    selectionStart: $videoClipStart) { start, dragging in
+                        pendingVideoPlayer?.pause()
+                        pendingVideoPlayer?.currentItem?.forwardPlaybackEndTime = CMTime(seconds: start + 60, preferredTimescale: 600)
+                        // Coalesce in-flight seeks during a scrub; ask for the
+                        // precise selected frame only when the finger lifts.
+                        let tolerance = dragging ? CMTime(seconds: 0.15, preferredTimescale: 600) : .zero
+                        pendingVideoPlayer?.seek(to: CMTime(seconds: start, preferredTimescale: 600),
+                                                 toleranceBefore: tolerance, toleranceAfter: tolerance)
+                    }
             }
-            .font(.system(size: 15))
-            .frame(height: 46)
-
-            if let pendingVideoPlayer {
-                VideoPlayer(player: pendingVideoPlayer)
-                    .frame(maxHeight: 326)
-                    .clipShape(RoundedRectangle(cornerRadius: 20))
-            }
-            Text("Choose the 60 seconds you want to share.")
-                .font(.system(size: 15, weight: .medium))
-            Slider(value: $videoClipStart, in: pendingVideoStart...max(pendingVideoStart + 0.01, pendingVideoDuration - 60)) { editing in
-                if !editing {
-                    pendingVideoPlayer?.seek(to: CMTime(seconds: videoClipStart, preferredTimescale: 600),
-                                             toleranceBefore: .zero, toleranceAfter: .zero)
-                    pendingVideoPlayer?.currentItem?.forwardPlaybackEndTime = CMTime(seconds: videoClipStart + 60, preferredTimescale: 600)
-                }
-            }
-            .tint(.black)
-            .accessibilityLabel("Clip start")
-            .accessibilityIdentifier("maptalk.place.clip.start")
-            Text("\(Int(videoClipStart))s – \(Int(min(pendingVideoDuration, videoClipStart + 60)))s")
-                .font(.system(size: 13, weight: .medium).monospacedDigit())
+            Text("Choose 60 seconds · original stays unchanged")
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Text("Your original video stays unchanged.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .background(.white)
-        .foregroundStyle(.black)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("maptalk.place.clip-editor")
     }
 
-    private var placeDetails: some View {
-        VStack(spacing: 0) {
-            placeLandmarkSection
-
-            placeRowDivider
-
-            placeAudienceSelector
-        }
+    private func useSelectedVideoClip() {
+        isChoosingVideoClip = false
+        pendingVideoPlayer?.pause()
+        pendingVideoPlayer?.seek(to: CMTime(seconds: videoClipStart, preferredTimescale: 600),
+                                 toleranceBefore: .zero, toleranceAfter: .zero)
+        startPlaceImport(timeRange: CMTimeRange(
+            start: CMTime(seconds: videoClipStart, preferredTimescale: 600),
+            duration: CMTime(seconds: min(60, pendingVideoDuration - videoClipStart), preferredTimescale: 600)))
     }
 
-    @ViewBuilder
     private var placeLandmarkSection: some View {
-        VStack(spacing: 0) {
-            Button(action: toggleNearbyPlaceChoices) {
-                placeSettingRow(
-                    title: "Place",
-                    value: selectedNearbyPOI?.poi.name
-                        ?? (isCreatingLandmark ? trimmedLandmarkName : "Choose a place"),
-                    showsChevron: true
-                )
+        Button(action: toggleNearbyPlaceChoices) {
+            HStack(spacing: 10) {
+                Image(systemName: selectedNearbyPOI?.poi.category.symbolName
+                      ?? (isCreatingLandmark ? landmarkCategory.symbolName : "mappin.and.ellipse"))
+                    .font(.system(size: 17, weight: .medium))
+                    .frame(width: 24)
+                Text(selectedNearbyPOI?.poi.name
+                     ?? (isCreatingLandmark ? trimmedLandmarkName : "Choose a place"))
+                    .font(.system(size: 15, weight: .medium))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Place")
-            .accessibilityValue(
-                selectedNearbyPOI?.poi.name
-                    ?? (isCreatingLandmark ? trimmedLandmarkName : "Not selected")
-            )
-            .accessibilityHint("Opens nearby place selection")
-            .accessibilityIdentifier("maptalk.place.choose-landmark")
+            .foregroundStyle(.black)
+            .frame(minHeight: 46)
+            .padding(.horizontal, 10)
+            .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+            .contentShape(Rectangle())
         }
+        .buttonStyle(ComposerPressStyle())
+        .accessibilityLabel("Place")
+        .accessibilityValue(selectedNearbyPOI?.poi.name
+            ?? (isCreatingLandmark ? trimmedLandmarkName : "Not selected"))
+        .accessibilityHint("Choose a nearby landmark. Publishing uses your current location.")
+        .accessibilityIdentifier("maptalk.place.choose-landmark")
     }
 
     private var nearbyPlaceChoices: some View {
@@ -1688,23 +1705,12 @@ struct MapTalkPublishComposer: View {
     }
 
     private var placeAudienceSelector: some View {
-        placeAudienceMenu
-    }
-
-    private var placeAudienceMenu: some View {
-        HStack(spacing: 12) {
-            Text("Who can see")
-                .font(.system(size: 15))
-                .foregroundStyle(.black)
-            Spacer(minLength: 0)
-            HStack(spacing: 2) {
-                placeAudienceChoice(.privateMyMap, title: "Only me")
-                placeAudienceChoice(.livePublic, title: publicAudienceTitle)
-            }
-            .padding(3)
-            .background(Color.black.opacity(0.045), in: Capsule())
+        HStack(spacing: 2) {
+            placeAudienceChoice(.privateMyMap, title: "Only me")
+            placeAudienceChoice(.livePublic, title: publicAudienceTitle)
         }
-        .frame(minHeight: 62)
+        .padding(2)
+        .background(Color.black.opacity(0.04), in: Capsule())
     }
 
     private func placeAudienceChoice(_ audience: MapPublishAudience, title: String) -> some View {
@@ -1713,50 +1719,15 @@ struct MapTalkPublishComposer: View {
         } label: {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(placeAudience == audience ? .white : .black)
-                .padding(.horizontal, 12)
-                .frame(minHeight: 38)
-                .background(placeAudience == audience ? Color.black : .clear, in: Capsule())
+                .foregroundStyle(placeAudience == audience ? Color.black : Color.secondary)
+                .padding(.horizontal, 11)
+                .frame(minHeight: 46)
+                .background(placeAudience == audience ? Color.white : .clear, in: Capsule())
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityValue(placeAudience == audience ? "Selected" : "")
         .accessibilityIdentifier(audience == .livePublic ? "maptalk.place.audience.public" : "maptalk.place.audience.private")
-    }
-
-    private func placeSettingRow(
-        title: String,
-        value: String,
-        showsChevron: Bool = false,
-        chevronName: String = "chevron.right"
-    ) -> some View {
-        HStack(spacing: 10) {
-            Text(title)
-                .font(.system(size: 16, weight: .regular))
-                .foregroundStyle(.black)
-
-            Spacer(minLength: 12)
-
-            Text(value)
-                .font(.system(size: 15, weight: .regular))
-                .foregroundStyle(Color.black.opacity(0.46))
-                .lineLimit(1)
-
-            if showsChevron {
-                Image(systemName: chevronName)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.black.opacity(0.28))
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 54)
-        .contentShape(Rectangle())
-    }
-
-    private var placeRowDivider: some View {
-        Rectangle()
-            .fill(Color.black.opacity(0.085))
-            .frame(height: 1)
     }
 
     private var placePickerDivider: some View {
@@ -1774,18 +1745,18 @@ struct MapTalkPublishComposer: View {
                     ProgressView()
                         .tint(.white)
                 } else {
-                    Text(placeAudience == .livePublic ? "Post" : "Add to MyMap")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
+                    Text(placeAudience == .livePublic ? "Post" : "Save")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(canSubmit ? .white : Color.black.opacity(0.4))
                 }
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 52)
-            .background(Color.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .frame(minWidth: 78, minHeight: 48)
+            .padding(.horizontal, 10)
+            .background(canSubmit || isSubmitting ? Color.black : Color.black.opacity(0.07), in: Capsule())
         }
         .buttonStyle(ComposerPressStyle())
         .disabled(canSubmit == false)
-        .opacity(canSubmit || isSubmitting ? 1 : 0.22)
+        .accessibilityLabel(placeAudience == .livePublic ? "Post" : "Add to MyMap")
         .accessibilityIdentifier("maptalk.place.publish")
         .accessibilityHint(selectedMedia == nil ? "Save a check-in without a photo or video" : "")
     }
@@ -2628,7 +2599,7 @@ struct MapTalkPublishComposer: View {
                 guard isCreatingLandmark, trimmedLandmarkName.isEmpty == false else { return }
                 target = .new(name: trimmedLandmarkName, category: landmarkCategory)
             }
-            draft = .place(.init(target: target, media: (editedPlacePhoto ?? selectedMedia)?.ratedPOIMedia))
+            draft = .place(.init(target: target, media: (editedPlaceMedia ?? selectedMedia)?.ratedPOIMedia))
 
         case .reel:
             guard canSubmit else { return }
@@ -2653,7 +2624,7 @@ struct MapTalkPublishComposer: View {
                 if isConnected {
                     placeVideoPlayer?.pause()
                     selectedMedia.map(discard)
-                    editedPlacePhoto.map(discard)
+                    editedPlaceMedia.map(discard)
                     reelAssets.forEach(discard)
                 }
             } catch {
@@ -2690,6 +2661,8 @@ struct MapTalkPublishComposer: View {
         if selectedMedia != nil || pendingMediaItem != nil || pendingVideoURL != nil || isLoadingMedia
             || !reelAssets.isEmpty || !trimmedReelText.isEmpty || didChooseLandmarkManually
             || !newLandmarkNameDraft.isEmpty || selectedBubbleSource != nil {
+            placeVideoPlayer?.pause()
+            pendingVideoPlayer?.pause()
             isConfirmingDiscard = true
         } else {
             discardComposer()
@@ -2698,13 +2671,18 @@ struct MapTalkPublishComposer: View {
 
     private func discardComposer() {
         guard !isSubmitting, !isPlaceCameraBusy else { return }
+        let inFlightMedia = mediaImportTask
+        let mediaToDiscard = [selectedMedia, editedPlaceMedia].compactMap { $0 } + reelAssets
         clearPendingMedia()
         mediaImportToken = UUID()
         reelImportToken = UUID()
         placeVideoPlayer?.pause()
-        selectedMedia.map(discard)
-        editedPlacePhoto.map(discard)
-        reelAssets.forEach(discard)
+        Task {
+            // A video text export may still be unwinding its reader. Never
+            // remove the original while that reader owns it.
+            await inFlightMedia?.value
+            mediaToDiscard.forEach(discard)
+        }
         onCancel()
     }
 
@@ -2713,7 +2691,7 @@ struct MapTalkPublishComposer: View {
         if let selectedMedia, selectedMedia.id != asset.id {
             discard(selectedMedia)
         }
-        resetPlacePhotoText()
+        resetPlaceMediaText()
         selectedMedia = asset
         isRetakingPlace = false
         submissionIssue = nil
@@ -2724,53 +2702,117 @@ struct MapTalkPublishComposer: View {
         }
     }
 
-    private func resetPlacePhotoText() {
-        editedPlacePhoto.map(discard)
-        editedPlacePhoto = nil
-        placePhotoText = PhotoTextOverlay()
-        isShowingPhotoTextEditor = false
+    private func resetPlaceMediaText() {
+        editedPlaceMedia.map(discard)
+        editedPlaceMedia = nil
+        placeMediaText = PhotoTextOverlay()
+        isShowingMediaTextEditor = false
+        mediaTextEditorImage = nil
+        isApplyingMediaText = false
     }
 
-    private func applyPlacePhotoText(_ overlay: PhotoTextOverlay) {
-        guard case let .photo(sourceID, sourceURL, _) = selectedMedia,
-              !isLoadingMedia, !isSubmitting, !hasUnconfirmedSubmission else { return }
-        isShowingPhotoTextEditor = false
-        let overlay = PhotoTextOverlayRenderer.sanitized(overlay)
-        guard !overlay.isEmpty else {
-            resetPlacePhotoText()
+    private func beginPlaceMediaText() {
+        guard let selectedMedia, !isLoadingMedia, !isSubmitting, !hasUnconfirmedSubmission,
+              pendingMediaItem == nil, pendingVideoURL == nil else { return }
+        placeVideoPlayer?.pause()
+        submissionIssue = nil
+        editingMediaText = placeMediaText
+        if let image = selectedMedia.previewImage {
+            mediaTextEditorImage = image
+            isTypingMediaText = true
+            isShowingMediaTextEditor = true
             return
         }
+        // A missing cached poster must not make Aa silently do nothing.
+        guard case let .video(sourceID, url, _) = selectedMedia else { return }
         let token = UUID()
         mediaImportToken = token
         isLoadingMedia = true
         submissionIssue = nil
-        Task { @MainActor in
+        mediaImportTask = Task { @MainActor in
             do {
-                // Always render from the original app-owned photo. Editing or
-                // clearing the words must never bake a second layer over them.
-                let imported = try await Task.detached(priority: .userInitiated) {
-                    guard let image = UIImage(contentsOfFile: sourceURL.path) else {
-                        throw ComposerMediaImportError.unreadable
-                    }
-                    let rendered = try PhotoTextOverlayRenderer.render(image: image, overlay: overlay)
-                    let photo = try PublishPhotoNormalizer.prepare(cameraImage: rendered)
-                    let url = try MapTalkMediaStorage.persist(photo.jpegData, fileExtension: "jpg")
-                    return ImportedComposerPhoto(url: url, preview: photo.preview)
-                }.value
-                guard mediaImportToken == token, selectedMedia?.id == sourceID else {
-                    try? FileManager.default.removeItem(at: imported.url)
+                let source = AVURLAsset(url: url)
+                defer { withExtendedLifetime(source) {} }
+                let generator = AVAssetImageGenerator(asset: source)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 960, height: 960)
+                let frame = try await generator.image(at: .zero)
+                guard mediaImportToken == token, self.selectedMedia?.id == sourceID, !Task.isCancelled else { return }
+                mediaTextEditorImage = UIImage(cgImage: frame.image)
+                isLoadingMedia = false
+                isTypingMediaText = true
+                isShowingMediaTextEditor = true
+            } catch {
+                guard mediaImportToken == token, !Task.isCancelled else { return }
+                isLoadingMedia = false
+                submissionIssue = "Couldn't open the video for text. Your video is still here; try again."
+            }
+        }
+    }
+
+    private func applyPlaceMediaText(_ overlay: PhotoTextOverlay) {
+        guard let source = selectedMedia,
+              !isLoadingMedia, !isSubmitting, !hasUnconfirmedSubmission else { return }
+        isShowingMediaTextEditor = false
+        let overlay = PhotoTextOverlayRenderer.sanitized(overlay)
+        guard !overlay.isEmpty else {
+            placeVideoPlayer?.pause()
+            if case let .video(_, url, _) = source { placeVideoPlayer = AVPlayer(url: url) }
+            resetPlaceMediaText()
+            return
+        }
+        guard overlay != placeMediaText else { return }
+        let token = UUID()
+        mediaImportToken = token
+        isLoadingMedia = true
+        isApplyingMediaText = true
+        submissionIssue = nil
+        mediaImportTask = Task { @MainActor in
+            do {
+                // Both media types start from the untouched selected asset.
+                // Editing words never encodes another layer over the last edit.
+                let edited = try await renderPlaceMediaText(overlay, source: source)
+                guard mediaImportToken == token, selectedMedia?.id == source.id, !Task.isCancelled else {
+                    discard(edited)
                     return
                 }
-                editedPlacePhoto.map(discard)
-                editedPlacePhoto = .photo(id: UUID(), url: imported.url,
-                    preview: UIImage(cgImage: imported.preview.image))
-                placePhotoText = overlay
+                placeVideoPlayer?.pause()
+                if case let .video(_, url, _) = edited { placeVideoPlayer = AVPlayer(url: url) }
+                editedPlaceMedia.map(discard)
+                editedPlaceMedia = edited
+                placeMediaText = overlay
                 isLoadingMedia = false
+                isApplyingMediaText = false
             } catch {
-                guard mediaImportToken == token else { return }
+                guard mediaImportToken == token, !Task.isCancelled else { return }
                 isLoadingMedia = false
-                submissionIssue = "Couldn't save the text. Your original photo is still here; try again."
+                isApplyingMediaText = false
+                // Keep the exact words on screen so a failed export can be
+                // retried with Done; don't silently lose the person's edit.
+                isShowingMediaTextEditor = true
+                isTypingMediaText = false
+                submissionIssue = "Couldn't save the text. Your original is still here; try again."
             }
+        }
+    }
+
+    private func renderPlaceMediaText(_ overlay: PhotoTextOverlay, source: ComposerMediaAsset) async throws -> ComposerMediaAsset {
+        switch source {
+        case let .photo(_, sourceURL, _):
+            let imported = try await Task.detached(priority: .userInitiated) {
+                guard let image = UIImage(contentsOfFile: sourceURL.path) else {
+                    throw ComposerMediaImportError.unreadable
+                }
+                let rendered = try PhotoTextOverlayRenderer.render(image: image, overlay: overlay)
+                let photo = try PublishPhotoNormalizer.prepare(cameraImage: rendered)
+                let url = try MapTalkMediaStorage.persist(photo.jpegData, fileExtension: "jpg")
+                return ImportedComposerPhoto(url: url, preview: photo.preview)
+            }.value
+            return .photo(id: UUID(), url: imported.url, preview: UIImage(cgImage: imported.preview.image))
+        case let .video(_, sourceURL, _):
+            let url = try await PublishVideoNormalizer.prepare(sourceURL: sourceURL, textOverlay: overlay)
+            let preview = try? await makeVideoPreview(for: url)
+            return .video(id: UUID(), url: url, preview: preview)
         }
     }
 
@@ -2861,6 +2903,8 @@ struct MapTalkPublishComposer: View {
                     pendingVideoStart = max(0, range.start.seconds)
                     videoClipStart = max(0, range.start.seconds)
                     pendingVideoPlayer?.currentItem?.forwardPlaybackEndTime = CMTime(seconds: videoClipStart + 60, preferredTimescale: 600)
+                    pendingVideoPlayer?.seek(to: CMTime(seconds: videoClipStart, preferredTimescale: 600),
+                                             toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: { _ in })
                     isLoadingMedia = false
                     isChoosingVideoClip = true
                     return
@@ -3189,6 +3233,15 @@ private func makeVideoPreview(for movieURL: URL) async throws -> VideoPreview {
         .appendingPathExtension("jpg")
     try data.write(to: url, options: .atomic)
     return VideoPreview(image: image, url: url)
+}
+
+private struct ComposerHeaderButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.55 : 1)
+    }
 }
 
 private struct ComposerPressStyle: ButtonStyle {

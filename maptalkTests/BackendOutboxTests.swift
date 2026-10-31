@@ -243,6 +243,62 @@ struct BackendOutboxTests {
         #expect(context.fixture.savedMemoryCount == 1)
         #expect(restored.pendingPublications.isEmpty)
         #expect(restored.feedReels.value.map(\.id) == [id])
+        let feedPost = try #require(restored.feedReels.value.first)
+        let archivePost = try #require(restored.archive.privateReels.first { $0.id == id })
+        #expect(feedPost.activityDate == decodedDate)
+        #expect(archivePost.cardDisplayDate == feedPost.cardDisplayDate)
+        #expect(abs(archivePost.activityDate.timeIntervalSince(savedTime)) < 0.002)
+        #expect(feedPost.expiresAt == decodedDate.addingTimeInterval(StoryReadKeys.freshWindow))
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [404, 422])
+    func restoredPostRefusalWaitsForExplicitRetryAndKeepsTheExactIntent(status: Int) async throws {
+        let code = status == 404 ? "not_found" : "invalid_category"
+        let context = try OutboxTestContext(postOutcomes: [.http(status, code), .success])
+        defer { context.finish() }
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let id = UUID()
+        let source = try context.photo()
+        _ = try await store.enqueuePublish(.place(.init(target: .new(name: "Original place", category: .coffee),
+            media: .init(kind: .photo(source)))), audience: .livePublic, location: location, requestID: id)
+        let queued = try #require(try context.state().queued.first)
+        #expect(queued.lastFailure == nil, "Queues without diagnostic metadata must remain decodable")
+        let durablePhoto = context.directory.appendingPathComponent(try #require(queued.photos.first).id.uuidString)
+            .appendingPathExtension("jpg")
+        let bytes = try Data(contentsOf: durablePhoto)
+        await store.syncPendingPublications()
+        guard case let .failed(reason) = store.pendingPublications[id] else {
+            Issue.record("The server refusal must wait for an explicit retry"); return
+        }
+        let refused = try #require(try context.state().queued.first)
+        #expect(refused.lastFailure?.phase == .publication)
+        #expect(refused.lastFailure?.httpStatus == status)
+        #expect(refused.lastFailure?.code == code)
+        #expect(refused.attemptedPost)
+        #expect(context.fixture.savedMemoryCount == 0)
+        try FileManager.default.removeItem(at: source)
+
+        let restored = context.makeStore()
+        #expect(await restored.restoreCachedState())
+        restored.resumeVerifiedConnection()
+        await restored.syncPendingPublications()
+        #expect(restored.pendingPublications[id] == .failed(reason))
+        #expect(context.fixture.inputs.count == 1, "Reconnection must not silently retry a permanent refusal")
+        #expect(try Data(contentsOf: durablePhoto) == bytes)
+        restored.retryPendingPublications(id: id)
+        await restored.syncPendingPublications()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let inputs = context.fixture.inputs
+        #expect(inputs.count == 2)
+        #expect(try encoder.encode(inputs[0]) == encoder.encode(inputs[1]))
+        #expect(inputs.map(\.id) == [id, id])
+        #expect(context.fixture.uploads.count == 1, "Confirmed media is reused, not uploaded under a new key")
+        #expect(context.fixture.savedMemoryCount == 1)
+        #expect(restored.pendingPublications.isEmpty)
+        #expect(try context.state().queued.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: durablePhoto.path))
     }
 
     @Test(.timeLimit(.minutes(1)), arguments: [false, true])
@@ -268,6 +324,7 @@ struct BackendOutboxTests {
         #expect(restored.archive.privateReels.isEmpty)
         context.fixture.setOffline(false)
         restored.resumeVerifiedConnection()
+        restored.retryPendingPublications()
         await restored.syncPendingPublications()
         #expect(context.fixture.inputs.count == postsBeforeDelete)
         #expect(context.fixture.cancelledIDs == [id])
@@ -560,6 +617,14 @@ struct BackendOutboxTests {
         #expect(reason == "Couldn't publish yet. Your post is saved on this phone. Please try again.")
         #expect(!reason.contains(code))
         #expect(store.feedReels.value.isEmpty, "Local preview must not pretend the post is public")
+        let refused = try #require(try context.state().queued.first)
+        #expect(refused.lastFailure?.phase == .videoProcessing)
+        #expect(refused.lastFailure?.httpStatus == 422)
+        #expect(refused.lastFailure?.code == code)
+        #expect(refused.lastFailure?.occurredAt != nil)
+        #expect(!refused.attemptedPost)
+        let chunks = context.fixture.chunkOffsets
+        let uploadID = try #require(refused.photos.first?.id)
 
         context.fixture.setOffline(true)
         let restored = context.makeStore()
@@ -573,6 +638,37 @@ struct BackendOutboxTests {
         #expect(try Data(contentsOf: url) == Data(contentsOf: source))
         #expect(FileManager.default.fileExists(atPath: try #require(poster).path))
         #expect(context.fixture.inputs.isEmpty)
+
+        context.fixture.setOffline(false)
+        restored.resumeVerifiedConnection()
+        await restored.syncPendingPublications()
+        #expect(context.fixture.uploadStarts == [uploadID], "Restart must not retry a refused video automatically")
+        restored.retryPendingPublications(id: id)
+        await restored.syncPendingPublications()
+        #expect(context.fixture.uploadStarts == [uploadID, uploadID])
+        #expect(context.fixture.chunkOffsets == chunks, "Already staged video bytes must not be resent")
+        #expect(context.fixture.inputs.map(\.id) == [id])
+        #expect(context.fixture.savedMemoryCount == 1)
+        #expect(context.fixture.savedMediaCount == 1)
+        #expect(restored.pendingPublications.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: ["private server message", "https://private.invalid/token", String(repeating: "x", count: 81)])
+    func failureDiagnosticsDoNotPersistArbitraryServerText(code: String) async throws {
+        let context = try OutboxTestContext(postOutcomes: [.http(422, code)])
+        defer { context.finish() }
+        let store = context.makeStore()
+        try await store.cacheVerifiedIdentity()
+        let id = UUID()
+        _ = try await store.enqueuePublish(draft("Keep my intent"),
+            audience: .livePublic, location: location, requestID: id)
+        await store.syncPendingPublications()
+        let diagnostic = try #require(try context.state().queued.first?.lastFailure)
+        #expect(diagnostic.phase == .publication)
+        #expect(diagnostic.httpStatus == 422)
+        #expect(diagnostic.code == nil)
+        #expect(try !String(decoding: JSONEncoder().encode(diagnostic), as: UTF8.self).contains(code))
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -852,6 +948,11 @@ private final class OutboxTestContext {
         return file
     }
 
+    func state() throws -> BackendLocalState {
+        try JSONDecoder().decode(BackendLocalState.self,
+            from: Data(contentsOf: directory.appendingPathComponent("state.json")))
+    }
+
     func finish() {
         stores.forEach { $0.clearLocalMedia() }
         session.invalidateAndCancel()
@@ -1065,17 +1166,24 @@ private final class OutboxFixture: @unchecked Sendable {
                     return
                 }
                 let (saved, outcome) = lock.withLock {
+                    let outcome = postOutcomes.isEmpty ? Outcome.success : postOutcomes.removeFirst()
                     let photos = input.mediaIds.compactMap { id in media.values.first { $0.id == id } }
                     let saved = memories[input.id] ?? BackendMemory(id: input.id, ownerId: userID,
                         owner: .init(id: userID, handle: "server_person"), kind: input.kind, visibility: input.visibility,
                         location: input.location, caption: input.caption ?? "", place: place, media: photos,
-                        createdAt: captured, publishedAt: input.visibility == "public" ? Date() : nil,
-                        expiresAt: Date().addingTimeInterval(86_400), moderationStatus: "approved")
-                    memories[input.id] = saved
-                    return (saved, postOutcomes.isEmpty ? Outcome.success : postOutcomes.removeFirst())
+                        createdAt: captured, publishedAt: input.visibility == "public" ? captured : nil,
+                        expiresAt: captured.addingTimeInterval(StoryReadKeys.freshWindow), moderationStatus: "approved")
+                    switch outcome {
+                    case .success, .lostResponse: memories[input.id] = saved
+                    case .interruptedBeforeCommit, .http: break
+                    }
+                    return (saved, outcome)
                 }
-                if case .lostResponse = outcome { operation.fail(URLError(.networkConnectionLost)); return }
-                operation.respond(status: 201, data: try encode(saved))
+                switch outcome {
+                case .lostResponse, .interruptedBeforeCommit: operation.fail(URLError(.networkConnectionLost))
+                case let .http(status, code): operation.respond(status: status, data: errorData(code))
+                case .success: operation.respond(status: 201, data: try encode(saved))
+                }
             } else if method == "DELETE", path.hasPrefix("/v1/memories/"),
                       let id = UUID(uuidString: String(path.dropFirst("/v1/memories/".count))) {
                 let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -1106,7 +1214,12 @@ private final class OutboxFixture: @unchecked Sendable {
 
     private func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
+        // Match the API's millisecond timestamps rather than dropping the
+        // fractional first-tap time in this simulated response.
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(date.ISO8601Format(Date.ISO8601FormatStyle(includingFractionalSeconds: true)))
+        }
         return try encoder.encode(value)
     }
 

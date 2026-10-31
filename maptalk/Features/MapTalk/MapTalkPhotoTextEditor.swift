@@ -230,25 +230,12 @@ struct MapTalkPhotoTextEditor: View {
     }
 
     private var canvas: some View {
-        PhotoTextEditingCanvas(image: image, draft: $draft, isTyping: $isTyping)
-            .accessibilityIdentifier("maptalk.photo-text.canvas")
+        MapTalkPhotoTextCanvas(image: image, draft: $draft, isTyping: $isTyping)
     }
 
     private func editingFooter(color: Color) -> some View {
-        HStack {
-            Text(isTyping ? "Tap photo to place text" : "Drag to move · tap to edit")
-                .font(.system(size: 12))
-                .foregroundStyle(color.opacity(0.6))
-            Spacer()
-            Button("Clear") {
-                draft.text = ""
-                isTyping = true
-            }
-            .font(.system(size: 13, weight: .medium))
-            .frame(minHeight: embedded ? 44 : 0)
-            .disabled(draft.isEmpty)
-            .accessibilityIdentifier("maptalk.photo-text.clear")
-        }
+        MapTalkPhotoTextTools(isTyping: isTyping,
+            foregroundColor: color, minimumHeight: embedded ? 44 : 0)
     }
 
     private func finishEditing() {
@@ -331,6 +318,48 @@ struct MapTalkPhotoTextEditor: View {
     }
 }
 
+/// The composer owns the draft and commits it only on Done. This canvas edits
+/// that value without rendering into, replacing, or saving the original image.
+struct MapTalkPhotoTextCanvas: View {
+    let image: UIImage
+    @Binding var draft: PhotoTextOverlay
+    @Binding var isTyping: Bool
+
+    var body: some View {
+        PhotoTextEditingCanvas(image: image, draft: $draft, isTyping: $isTyping)
+            .accessibilityIdentifier("maptalk.photo-text.canvas")
+    }
+}
+
+struct MapTalkPhotoTextTools: View {
+    let isTyping: Bool
+    var foregroundColor: Color = .primary
+    var minimumHeight: CGFloat = 44
+    var onDone: (() -> Void)? = nil
+
+    var body: some View {
+        HStack {
+            if !isTyping {
+                Text("Drag to move · tap to edit")
+                    .font(.system(size: 12))
+                    .foregroundStyle(foregroundColor.opacity(0.6))
+            }
+            Spacer()
+            if let onDone {
+                Button("Done", action: onDone)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .frame(minHeight: max(44, minimumHeight))
+                    .background(.black, in: Capsule())
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("maptalk.photo-text.done")
+            }
+        }
+        .frame(minHeight: minimumHeight)
+    }
+}
+
 private struct PhotoTextEditingCanvas: UIViewRepresentable {
     let image: UIImage
     @Binding var draft: PhotoTextOverlay
@@ -365,6 +394,7 @@ final class PhotoTextCanvasView: UIView, UITextViewDelegate, UIGestureRecognizer
     private var activeLayout: PhotoTextOverlayRenderer.Layout?
     private var dragStart = CGPoint.zero
     private var focusScheduled = false
+    private let textDragRecognizer = UIPanGestureRecognizer()
 
     init(image: UIImage) {
         imageView = UIImageView(image: image)
@@ -397,16 +427,16 @@ final class PhotoTextCanvasView: UIView, UITextViewDelegate, UIGestureRecognizer
         textView.isScrollEnabled = false
         textView.autocapitalizationType = .sentences
         textView.keyboardAppearance = .dark
-        textView.accessibilityLabel = "Text on photo"
+        textView.accessibilityLabel = "Text on media"
         textView.accessibilityIdentifier = "maptalk.photo-text.input"
         addSubview(textViewport)
         textViewport.addSubview(textView)
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
         tap.delegate = self
         addGestureRecognizer(tap)
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(dragged(_:)))
-        pan.delegate = self
-        addGestureRecognizer(pan)
+        textDragRecognizer.addTarget(self, action: #selector(dragged(_:)))
+        textDragRecognizer.delegate = self
+        addGestureRecognizer(textDragRecognizer)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -506,6 +536,16 @@ final class PhotoTextCanvasView: UIView, UITextViewDelegate, UIGestureRecognizer
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         // Native caret/selection interactions own taps inside the input field.
         !(textView.isFirstResponder && touch.view?.isDescendant(of: textView) == true)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // Only a drag beginning on the text can win. Everywhere else our
+        // shouldBegin returns false, so the surrounding form scrolls normally.
+        guard gestureRecognizer === textDragRecognizer,
+              let scroll = otherGestureRecognizer.view as? UIScrollView,
+              otherGestureRecognizer === scroll.panGestureRecognizer else { return false }
+        return isDescendant(of: scroll)
     }
 
     private var textHitRect: CGRect {

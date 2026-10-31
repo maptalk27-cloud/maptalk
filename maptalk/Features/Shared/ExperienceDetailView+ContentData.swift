@@ -1,9 +1,9 @@
 import SwiftUI
 
 extension RealPost {
-    /// Public cards describe when a post was shared, not when its photo was
-    /// captured. Private memories keep the original time in their archive.
-    var cardDisplayDate: Date { visibility == .privateOnly ? createdAt : activityDate }
+    /// Feed and archive cards use the same first-publication clock. A memory
+    /// that has never been published falls back to its original saved time.
+    var cardDisplayDate: Date { activityDate }
 }
 
 // MARK: - Content data

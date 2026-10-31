@@ -147,6 +147,8 @@ struct BackendPublishRetryTests {
         #expect(sent.count == 2)
         #expect(sent.map(\.id) == [id, id])
         #expect(sent.map(\.caption) == ["Keep this caption", "Keep this caption"])
+        #expect(sent.first?.capturedAt != nil)
+        #expect(sent.first?.capturedAt == sent.last?.capturedAt)
         #expect(sent.last?.location.latitude == originalLocation.coordinate.latitude)
         #expect(sent.last?.location.longitude == originalLocation.coordinate.longitude)
     }
@@ -181,6 +183,7 @@ private struct PublishRetryInput: Decodable {
     let visibility: String
     let caption: String?
     let location: Coordinate
+    let capturedAt: String?
 }
 
 private final class PublishRetryFixture: @unchecked Sendable {

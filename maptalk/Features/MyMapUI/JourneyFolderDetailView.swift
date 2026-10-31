@@ -134,7 +134,7 @@ struct JourneyFolderDetailView: View {
             switch reference {
             case let .reel(id):
                 guard let reel = reels.first(where: { $0.id == id }) else { return nil }
-                return UserMapRecord(id: reel.id, timestamp: reel.createdAt, kind: .reel(reel))
+                return UserMapRecord(id: reel.id, timestamp: reel.activityDate, kind: .reel(reel))
             case let .poi(id):
                 guard let footprint = footprints.first(where: { $0.id == id }) else { return nil }
                 return UserMapRecord(
@@ -353,7 +353,7 @@ struct JourneyCollectionsSheet: View {
             switch reference {
             case let .reel(id):
                 guard let reel = reels.first(where: { $0.id == id }) else { return nil }
-                return UserMapRecord(id: reel.id, timestamp: reel.createdAt, kind: .reel(reel))
+                return UserMapRecord(id: reel.id, timestamp: reel.activityDate, kind: .reel(reel))
             case let .poi(id):
                 guard let footprint = footprints.first(where: { $0.id == id }) else { return nil }
                 return UserMapRecord(

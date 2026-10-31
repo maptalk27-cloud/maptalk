@@ -279,7 +279,7 @@ struct JourneyAvatarStack: View {
                 reference: JourneyFolder.MemberReference.reel(reel.id),
                 event: JourneyStackEvent(
                     id: reel.id,
-                    date: reel.createdAt,
+                    date: reel.activityDate,
                     kind: .reel(reel, userProvider(reel.userId))
                 )
             )
@@ -289,7 +289,7 @@ struct JourneyAvatarStack: View {
                 reference: JourneyFolder.MemberReference.poi(poi.id),
                 event: JourneyStackEvent(
                     id: poi.id,
-                    date: poi.checkIns.map(\.createdAt).max() ?? journey.createdAt,
+                    date: poi.checkIns.map(\.activityDate).max() ?? journey.createdAt,
                     kind: .poi(poi)
                 )
             )

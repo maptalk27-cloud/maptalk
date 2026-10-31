@@ -558,6 +558,64 @@ struct FriendStoryNavigationTests {
     }
 
     @Test
+    func explicitAvatarReopenIncludesNewSamePlaceVisitWithoutResettingCurrentPage() throws {
+        for authorID in [PreviewData.currentUser.id, alice] {
+            let video = URL(fileURLWithPath: "/tmp/friend-story-visit.mp4")
+            let first = RatedPOI.CheckIn(id: UUID(), userId: authorID,
+                createdAt: now.addingTimeInterval(-100),
+                media: [.init(id: UUID(), kind: .video(url: video, poster: nil))])
+            let second = RatedPOI.CheckIn(id: UUID(), userId: authorID,
+                createdAt: now.addingTimeInterval(-20),
+                media: [.init(id: UUID(), kind: .video(url: video, poster: nil))])
+            var place = RatedPOI(
+                poi: .init(id: UUID(), name: "Four Seasons", coordinate: .init(latitude: 20.7, longitude: -156.9),
+                           category: .other), highlight: nil, secondary: nil, media: [], checkIns: [first],
+                comments: [], endorsements: .init(hype: 0, solid: 0, meh: 0, questionable: 0), tags: [],
+                isFavoritedByCurrentUser: false, favoritesCount: 0)
+            let initial = FriendStoryFeed.groups(reals: [], ratedPOIs: [place], userProvider: { _ in nil }, now: now)
+            let nav = FriendStoryNavigation()
+            let origin = snapshot(latitude: 47.6, longitude: -122.3)
+            nav.begin(groups: initial, authorID: authorID, viewedKeys: [], origin: origin)
+            let selected = try #require(nav.session?.currentPage?.id)
+
+            place.checkIns.append(second)
+            let refreshed = FriendStoryFeed.groups(reals: [], ratedPOIs: [place], userProvider: { _ in nil }, now: now)
+            nav.session?.reconcile(with: refreshed, now: now)
+            #expect(nav.session?.currentGroup?.pages.count == 1,
+                    "Background updates must not insert a page during a swipe")
+            nav.begin(groups: refreshed, authorID: authorID, viewedKeys: [],
+                      origin: snapshot(latitude: 20.7, longitude: -156.9))
+            #expect(nav.session?.currentGroup?.pages.count == 2)
+            #expect(nav.session?.currentGroup?.moments.count == 1)
+            #expect(nav.session?.currentPage?.id == selected)
+            #expect(nav.origin?.region?.center.latitude == origin.region?.center.latitude)
+            #expect(nav.session?.movePage(by: 1) == true)
+            #expect(nav.session?.currentPage?.memoryID == second.id)
+
+            nav.begin(groups: refreshed, authorID: authorID, viewedKeys: [], origin: origin)
+            #expect(nav.session?.currentPage?.memoryID == second.id,
+                    "Reopening an unchanged group preserves the active cursor")
+        }
+    }
+
+    @Test
+    func explicitAvatarRefreshDoesNotRestoreACursorForARemovedPost() throws {
+        let first = reel(id: 201, author: alice, ago: 100)
+        let removed = reel(id: 202, author: alice, ago: 50)
+        let added = reel(id: 203, author: alice, ago: 10)
+        let initial = FriendStoryFeed.groups(reals: [first, removed], ratedPOIs: [], userProvider: { _ in nil }, now: now)
+        let nav = FriendStoryNavigation()
+        let origin = snapshot(latitude: 47.6, longitude: -122.3)
+        nav.begin(groups: initial, authorID: alice, viewedKeys: [], origin: origin)
+        #expect(nav.session?.movePage(by: 1) == true)
+        let firstReadKey = try #require(initial.first?.pages.first?.readKey)
+        let refreshed = FriendStoryFeed.groups(reals: [first, added], ratedPOIs: [], userProvider: { _ in nil }, now: now)
+        nav.begin(groups: refreshed, authorID: alice, viewedKeys: [firstReadKey], origin: origin)
+        #expect(nav.session?.currentPage?.memoryID == added.id)
+        #expect(nav.session?.groups.flatMap(\.pages).contains { $0.memoryID == removed.id } == false)
+    }
+
+    @Test
     func changingAuthorsRefocusesEvenAtTheSamePlaceButSameAuthorSlicesDoNot() {
         let nav = FriendStoryNavigation()
         let viewport = CGSize(width: 400, height: 800)

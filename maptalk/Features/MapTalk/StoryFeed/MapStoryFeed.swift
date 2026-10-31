@@ -76,7 +76,7 @@ enum MapStoryFeed {
         return RealStoriesRow.POIStoryGroup(
             ratedPOI: rated,
             sharers: sharers,
-            latestTimestamp: sharers.first?.timestamp ?? (rated.checkIns.map(\.createdAt).max() ?? now)
+            latestTimestamp: sharers.first?.timestamp ?? (rated.checkIns.map(\.activityDate).max() ?? now)
         )
     }
 }

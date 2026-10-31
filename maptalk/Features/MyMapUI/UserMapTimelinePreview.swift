@@ -172,7 +172,7 @@ struct UserMapTimelinePreview: View {
         let reelEvents = reels.map { real in
             TimelineEvent(
                 id: real.id,
-                date: real.createdAt,
+                date: real.activityDate,
                 coordinate: real.center,
                 kind: .reel(real, userProvider(real.userId))
             )

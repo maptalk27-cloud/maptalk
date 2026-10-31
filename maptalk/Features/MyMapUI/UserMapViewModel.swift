@@ -65,7 +65,7 @@ final class UserMapViewModel: ObservableObject {
         var name: String { ratedPOI.poi.name }
         var category: POICategory { ratedPOI.poi.category }
         var coordinate: CLLocationCoordinate2D { ratedPOI.poi.coordinate }
-        var latestVisit: Date? { visits.max(by: { $0.createdAt < $1.createdAt })?.createdAt }
+        var latestVisit: Date? { visits.map(\.activityDate).max() }
         var totalVisits: Int { visits.count }
     }
 
@@ -274,7 +274,7 @@ final class UserMapViewModel: ObservableObject {
             return Footprint(ratedPOI: personalPlace, visits: visits)
         }
         .sorted { ($0.latestVisit ?? .distantPast) > ($1.latestVisit ?? .distantPast) }
-        self.reels = reels.filter { $0.userId == ownerID }.sorted { $0.createdAt > $1.createdAt }
+        self.reels = reels.filter { $0.userId == ownerID }.sorted { $0.activityDate > $1.activityDate }
         journeyCatalog = self.reels.compactMap { reel in
             reel.capsuleId.flatMap { environment.backend?.journey(for: $0, publicOnly: true) }
         }
@@ -347,7 +347,7 @@ final class UserMapViewModel: ObservableObject {
             (isSilentLumen ? PreviewData.silentLumenReals(user: user) : [])
         )
             .filter { $0.userId == user.id }
-            .sorted { $0.createdAt > $1.createdAt }
+            .sorted { $0.activityDate > $1.activityDate }
         reels = personalReals
         journeyCatalog = []
         journeyFolders = []
@@ -399,7 +399,7 @@ final class UserMapViewModel: ObservableObject {
 
         footprints = matchedFootprints
             .sorted { ($0.latestVisit ?? .distantPast) > ($1.latestVisit ?? .distantPast) }
-        self.reels = reels.sorted { $0.createdAt > $1.createdAt }
+        self.reels = reels.sorted { $0.activityDate > $1.activityDate }
         journeyCatalog = bubbles + environment.myMapArchive.legacyJourneyCatalog
         journeyFolders = folders
 

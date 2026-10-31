@@ -332,12 +332,22 @@ struct FriendStorySession {
         return group.pages.firstIndex { $0.id == page.id }
     }
 
-    init?(groups: [FriendStoryGroup], authorID: UUID, viewedKeys: Set<String> = []) {
+    init?(groups: [FriendStoryGroup], authorID: UUID, viewedKeys: Set<String> = [],
+          resuming pageIDs: [UUID: String] = [:]) {
         var seenAuthors = Set<UUID>()
         self.groups = groups.filter { !$0.pages.isEmpty && seenAuthors.insert($0.authorID).inserted }
         guard let group = self.groups.first(where: { $0.authorID == authorID }) else { return nil }
+        // Explicit avatar selection may adopt a newer feed snapshot. Keep
+        // cursors only for pages still present in that author's fresh group.
+        for group in self.groups {
+            if let id = pageIDs[group.authorID], group.pages.contains(where: { $0.id == id }) {
+                resumePageIDs[group.authorID] = id
+            }
+        }
         selectedAuthorID = authorID
-        resumePageIDs[authorID] = Self.initialPage(in: group, viewedKeys: viewedKeys)?.id
+        if resumePageIDs[authorID] == nil {
+            resumePageIDs[authorID] = Self.initialPage(in: group, viewedKeys: viewedKeys)?.id
+        }
     }
 
     @discardableResult

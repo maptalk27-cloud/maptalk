@@ -1077,7 +1077,7 @@ struct MapTalkView: View {
             }
             .onChangeCompat(of: scenePhase) { phase in
                 if phase == .active {
-                    viewModel.refreshFreshness()
+                    viewModel.onBecomeActive()
                     reconcileFriendStories(geometry: geometry)
                 }
             }
@@ -1636,12 +1636,12 @@ private extension MapTalkView {
         let reelRecords = archive.privateReels
             .filter { $0.userId == ownerID }
             .map { reel in
-                UserMapRecord(id: reel.id, timestamp: reel.createdAt, kind: .reel(reel))
+                UserMapRecord(id: reel.id, timestamp: reel.activityDate, kind: .reel(reel))
             }
 
         let placeRecords = archive.privatePOIs.compactMap { rated -> UserMapRecord? in
             let personalVisits = rated.checkIns.filter { $0.userId == ownerID }
-            guard let latestVisit = personalVisits.map(\.createdAt).max() else { return nil }
+            guard let latestVisit = personalVisits.map(\.activityDate).max() else { return nil }
 
             var personalPlace = rated
             personalPlace.media = []

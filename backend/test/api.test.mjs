@@ -560,19 +560,25 @@ test('canceling an upload key before a partial image body completes prevents orp
     headers: { 'content-type': 'image/png', 'idempotency-key': key } }), 410);
 });
 
-test('queued posts keep capture time while the feed lifetime begins on actual publication', async t => {
+test('queued posts retain the first publish tap and cannot restart an expired feed lifetime', async t => {
   let time = Date.parse('2026-10-20T12:00:00Z');
   const api = await fixture(t, { now: () => time });
   const alice = await register(api, 'alice');
   const draft = reel({ capturedAt: '2026-10-17T12:00:00.000Z' });
   const saved = await publish(api, alice, draft);
   assert.equal(saved.createdAt, draft.capturedAt);
-  assert.equal(saved.publishedAt, '2026-10-20T12:00:00.000Z');
-  assert.equal(saved.expiresAt, '2026-10-23T12:00:00.000Z');
-  assert.deepEqual((await listAll(api, alice, '/v1/feed')).map(item => item.id), [saved.id]);
+  assert.equal(saved.publishedAt, draft.capturedAt);
+  assert.equal(saved.expiresAt, '2026-10-20T12:00:00.000Z');
+  assert.deepEqual(await listAll(api, alice, '/v1/feed'), [], 'an upload completing at 72 hours is already expired');
+  assert.deepEqual(await listAll(api, alice, '/v1/map/memories?west=-123&east=-121&south=37&north=38'), []);
+  assert.deepEqual((await listAll(api, alice, '/v1/me/memories')).map(item => item.id), [saved.id]);
   await api.restart();
   time += 600_000;
   assert.deepEqual(expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200), saved);
+  const edited = expectStatus(await api.call(`/v1/memories/${saved.id}`, { method: 'PATCH', token: alice.token,
+    json: { caption: 'The original afternoon, uploaded later.' } }), 200);
+  for (const key of ['createdAt', 'publishedAt', 'expiresAt']) assert.equal(edited[key], saved[key], key);
+  assert.deepEqual(await listAll(api, alice, '/v1/feed'), [], 'retry and caption edits cannot refresh the clock');
   expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token,
     json: { ...draft, capturedAt: '2026-10-16T12:00:00Z' } }), 409);
   for (const capturedAt of [null, 1, '', 'not-a-date', '2026-10-20', '2026-99-01T00:00:00Z',
@@ -581,6 +587,8 @@ test('queued posts keep capture time while the feed lifetime begins on actual pu
   }
   const slightlyFast = await publish(api, alice, reel({ capturedAt: new Date(time + 60_000).toISOString() }));
   assert.equal(slightlyFast.createdAt, new Date(time).toISOString(), 'clock skew cannot push a post into the future');
+  assert.equal(slightlyFast.publishedAt, slightlyFast.createdAt);
+  assert.equal(slightlyFast.expiresAt, new Date(time + 72 * 60 * 60 * 1000).toISOString());
   const privateDraft = reel({ visibility: 'private', capturedAt: '2026-10-17T12:00:00Z' });
   const privatePost = await publish(api, alice, privateDraft);
   assert.equal(privatePost.publishedAt, null);
@@ -590,6 +598,36 @@ test('queued posts keep capture time while the feed lifetime begins on actual pu
   assert.equal(published.createdAt, privatePost.createdAt);
   assert.equal(published.publishedAt, new Date(time).toISOString());
   assert.equal(published.expiresAt, new Date(time + 72 * 60 * 60 * 1000).toISOString());
+});
+
+test('delayed public uploads sort by first tap across feed, MyMap, map, profile and place history', async t => {
+  let time = Date.parse('2026-10-20T12:00:00Z');
+  const api = await fixture(t, { now: () => time });
+  const alice = await register(api, 'alice');
+  const recent = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    capturedAt: '2026-10-20T11:00:00Z', place: { name: 'Coffee stop', category: 'coffee' } });
+  const delayed = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    capturedAt: '2026-10-19T12:00:00Z', placeId: recent.place.id });
+  const middle = await publish(api, alice, reel({ capturedAt: '2026-10-20T10:00:00Z' }));
+  const expected = [recent.id, middle.id, delayed.id];
+  for (const path of ['/v1/feed', '/v1/me/memories', '/v1/map/memories?west=-123&east=-121&south=37&north=38',
+    `/v1/users/${alice.user.id}/memories`]) {
+    assert.deepEqual((await listAll(api, alice, path, 1)).map(item => item.id), expected, path);
+  }
+  assert.deepEqual((await listAll(api, alice, `/v1/places/${recent.place.id}/memories`, 1)).map(item => item.id),
+    [recent.id, delayed.id]);
+
+  const oldVisit = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    capturedAt: '2026-10-16T12:00:00Z', placeId: recent.place.id });
+  assert.equal(oldVisit.publishedAt, '2026-10-16T12:00:00.000Z');
+  assert.equal(oldVisit.expiresAt, '2026-10-19T12:00:00.000Z');
+  assert.deepEqual((await listAll(api, alice, '/v1/feed')).map(item => item.id), expected);
+  for (const path of ['/v1/me/memories', '/v1/map/memories?west=-123&east=-121&south=37&north=38',
+    `/v1/users/${alice.user.id}/memories`]) {
+    assert.deepEqual((await listAll(api, alice, path, 1)).map(item => item.id), [...expected, oldVisit.id], path);
+  }
+  assert.deepEqual((await listAll(api, alice, `/v1/places/${recent.place.id}/memories`, 1)).map(item => item.id),
+    [recent.id, delayed.id, oldVisit.id], 'late POIs remain in place history, without becoming active');
 });
 
 test('pending cancellation is durable before a late post arrives and cannot cancel another owner records', async t => {
@@ -782,7 +820,7 @@ test('first publication starts feed time without changing capture time or refres
   const feed = await listAll(api, bob, '/v1/feed', 1);
   assert.deepEqual(feed.map((item) => item.id), [saved.id, laterCapture.id]);
   const archive = await listAll(api, alice, '/v1/me/memories', 1);
-  assert.deepEqual(archive.map((item) => item.id), [laterCapture.id, saved.id]);
+  assert.deepEqual(archive.map((item) => item.id), [saved.id, laterCapture.id], 'archive and feed share the publication order');
 
   time += 60 * 60 * 1000;
   const hidden = expectStatus(await api.call(`/v1/memories/${saved.id}`, {
@@ -957,6 +995,9 @@ test('existing 24-hour rows use 72-hour publication expiry without mutating stor
   let stored;
   try {
     schemaVersion = db.prepare('PRAGMA user_version').get().user_version;
+    // Simulate the former server behavior on an existing delayed upload. A
+    // read must not silently rewrite history or confuse it with a later share.
+    db.prepare('UPDATE memories SET published_at = ? WHERE id = ?').run(publicationTime, capturedEarlier.id);
     db.prepare('UPDATE memories SET expires_at = ?').run(publicationTime + 24 * 60 * 60 * 1000);
     db.prepare('UPDATE memories SET published_at = NULL, created_at = ? WHERE id = ?').run(publicationTime - 1000, legacy.id);
     stored = db.prepare('SELECT id, created_at, published_at, expires_at FROM memories ORDER BY id').all();
@@ -1237,6 +1278,89 @@ test('Apple source identity deduplicates landmarks without leaking private visit
   });
   assert.deepEqual(recreated.place, hidden.place, 'deleting all visits must not change external place identity');
   expectStatus(await api.call(photo.path, { token: bob.token }), 404);
+});
+
+test('queued place IDs reuse an orphaned source landmark without reviving old visits or private media', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'orphan_alice');
+  const bob = await register(api, 'orphan_bob');
+  const photo = await upload(api, alice);
+  const privateCopy = await publish(api, alice, reel({ visibility: 'private', mediaIds: [photo.id] }));
+  const originalDraft = { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Stable directory landmark', category: 'coffee', sourceId: randomUUID(), coordinate: LOCATION },
+    mediaIds: [photo.id] };
+  const original = await publish(api, alice, originalDraft);
+  const nextPhoto = await upload(api, bob);
+  const queued = { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    placeId: original.place.id, mediaIds: [nextPhoto.id], capturedAt: new Date(Date.now() - 60_000).toISOString() };
+  expectStatus(await api.call(`/v1/memories/${original.id}`, { method: 'DELETE', token: alice.token }), 204);
+  await api.restart();
+  expectStatus(await api.call(`/v1/places/${original.place.id}/memories`, { token: bob.token }), 404);
+  expectStatus(await api.call(`/v1/places/${original.place.id}/comments`, { token: bob.token }), 404);
+
+  const saved = await publish(api, bob, queued);
+  assert.deepEqual(saved.place, original.place, 'the source alias and canonical center remain unchanged');
+  assert.equal(saved.ownerId, bob.user.id);
+  assert.equal(saved.createdAt, queued.capturedAt, 'retry preserves the original capture time');
+  assert.deepEqual(saved.media, [nextPhoto], 'only the caller-selected media is attached');
+  assert.deepEqual(expectStatus(await api.call('/v1/memories', { method: 'POST', token: bob.token, json: queued }), 200), saved);
+  assert.deepEqual((await listAll(api, bob, `/v1/places/${original.place.id}/memories`)).map(item => item.id), [saved.id]);
+  expectStatus(await api.call(`/v1/memories/${original.id}`, { token: bob.token }), 404);
+  expectStatus(await api.call(`/v1/memories/${privateCopy.id}`, { token: bob.token }), 404);
+  expectStatus(await api.call(photo.path, { token: bob.token }), 404);
+  expectStatus(await api.call(photo.path, { token: alice.token }), 200);
+  expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: originalDraft }), 410);
+});
+
+test('orphaned source fallback never bypasses a surviving private, blocked or rejected visit', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'restricted_alice');
+  const bob = await register(api, 'restricted_bob');
+  const original = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'private', location: LOCATION,
+    place: { name: 'Private source landmark', category: 'coffee', sourceId: randomUUID(), coordinate: LOCATION } });
+  const attempt = () => api.call('/v1/memories', { method: 'POST', token: bob.token,
+    json: { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION, placeId: original.place.id } });
+  expectStatus(await attempt(), 404);
+  expectStatus(await api.call(`/v1/memories/${original.id}`, { method: 'PATCH', token: alice.token,
+    json: { visibility: 'public' } }), 200);
+  expectStatus(await api.call('/v1/blocks', { method: 'POST', token: alice.token, json: { userId: bob.user.id } }), 204);
+  expectStatus(await attempt(), 404);
+  expectStatus(await api.call(`/v1/blocks/${bob.user.id}`, { method: 'DELETE', token: alice.token }), 204);
+  const db = new DatabaseSync(api.databasePath);
+  try { db.prepare("UPDATE memories SET moderation_status = 'rejected' WHERE id = ?").run(original.id); }
+  finally { db.close(); }
+  expectStatus(await attempt(), 404);
+  assert.equal((await listAll(api, bob, '/v1/me/memories')).length, 0);
+});
+
+test('orphaned source IDs retain ordinary and airport proximity checks and require an alias', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'nearby_orphan');
+  const atDistance = meters => ({ latitude: LOCATION.latitude + meters / 111_194.9266, longitude: LOCATION.longitude });
+  for (const directoryKind of [undefined, 'airport']) {
+    const original = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+      place: { name: 'Unchanged landmark', category: 'other', sourceId: randomUUID(), coordinate: LOCATION,
+        ...(directoryKind ? { directoryKind } : {}) } });
+    expectStatus(await api.call(`/v1/memories/${original.id}`, { method: 'DELETE', token: alice.token }), 204);
+    const radius = directoryKind ? 2000 : 150;
+    const draft = { id: randomUUID(), kind: 'poi', visibility: 'private', location: atDistance(radius + 10),
+      placeId: original.place.id };
+    expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 422);
+    expectStatus(await api.call(`/v1/memories/${draft.id}`, { token: alice.token }), 404);
+    const saved = await publish(api, alice, { ...draft, location: atDistance(radius - 10) });
+    assert.deepEqual(saved.place, original.place);
+    assert.deepEqual(saved.location, atDistance(radius - 10));
+  }
+  const unlinkedID = randomUUID();
+  const db = new DatabaseSync(api.databasePath);
+  try {
+    db.prepare('INSERT INTO places(id, name, category, latitude, longitude) VALUES (?, ?, ?, ?, ?)')
+      .run(unlinkedID, 'Unlinked orphan', 'other', LOCATION.latitude, LOCATION.longitude);
+  } finally { db.close(); }
+  for (const placeId of [unlinkedID, randomUUID()]) {
+    expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token,
+      json: { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION, placeId } }), 404);
+  }
 });
 
 test('new and reused Apple places must remain near the submitted location', async (t) => {

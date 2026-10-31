@@ -113,7 +113,7 @@ final class UserProfileViewModel: ObservableObject {
                 kind: .reel(real),
                 title: real.message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "Reel",
                 subtitle: locationLabel(for: real.id, coordinate: real.center),
-                timestamp: real.createdAt,
+                timestamp: real.activityDate,
                 preview: preview(for: real),
                 timelineSegmentId: timelineSegmentId(for: real.id)
             )
@@ -253,7 +253,7 @@ final class UserProfileViewModel: ObservableObject {
         let reelEvents = reels.map { real in
             TimelineEvent(
                 id: real.id,
-                date: real.createdAt,
+                date: real.activityDate,
                 coordinate: real.center,
                 kind: .reel(real, userProvider(for: real.userId))
             )

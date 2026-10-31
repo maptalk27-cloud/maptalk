@@ -236,8 +236,9 @@ struct PublishVideoNormalizerTests {
 /// network access, external video files, or a physical camera.
 nonisolated enum VideoTestFixture {
     @concurrent
-    static func makeVideoWithAudio() async throws -> URL {
-        let videoURL = try await makeVideo(frameRate: 30)
+    static func makeVideoWithAudio(transform: CGAffineTransform = .identity,
+                                   size: CGSize = CGSize(width: 64, height: 48)) async throws -> URL {
+        let videoURL = try await makeVideo(transform: transform, frameRate: 30, size: size)
         let audioURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("m4a")
         defer {
             try? FileManager.default.removeItem(at: videoURL)
@@ -268,6 +269,7 @@ nonisolated enum VideoTestFixture {
             let destination = try #require(composition.addMutableTrack(withMediaType: mediaType,
                 preferredTrackID: kCMPersistentTrackID_Invalid))
             try destination.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: source, at: .zero)
+            if mediaType == .video { destination.preferredTransform = try await source.load(.preferredTransform) }
         }
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
         let exporter = try #require(AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough))
@@ -277,7 +279,8 @@ nonisolated enum VideoTestFixture {
 
     @concurrent
     static func makeVideo(duration: Double = 1, transform: CGAffineTransform = .identity,
-                          useHEVC: Bool = false, frameRate: Int? = nil, hdr: Bool = false) async throws -> URL {
+                          useHEVC: Bool = false, frameRate: Int? = nil, hdr: Bool = false,
+                          size: CGSize = CGSize(width: 64, height: 48)) async throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mp4")
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         let metadata = AVMutableMetadataItem()
@@ -286,8 +289,8 @@ nonisolated enum VideoTestFixture {
         writer.metadata = [metadata]
         var settings: [String: Any] = [
             AVVideoCodecKey: useHEVC ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
-            AVVideoWidthKey: 64,
-            AVVideoHeightKey: 48
+            AVVideoWidthKey: Int(size.width),
+            AVVideoHeightKey: Int(size.height)
         ]
         if hdr {
             settings[AVVideoCompressionPropertiesKey] = [AVVideoProfileLevelKey: kVTProfileLevel_HEVC_Main10_AutoLevel]
@@ -302,12 +305,12 @@ nonisolated enum VideoTestFixture {
         input.transform = transform
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input,
             sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
-                kCVPixelBufferWidthKey as String: 64, kCVPixelBufferHeightKey as String: 48])
+                kCVPixelBufferWidthKey as String: Int(size.width), kCVPixelBufferHeightKey as String: Int(size.height)])
         writer.add(input)
         guard writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
         writer.startSession(atSourceTime: .zero)
         var buffer: CVPixelBuffer?
-        guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 48, pixelFormat, nil, &buffer) == kCVReturnSuccess,
+        guard CVPixelBufferCreate(kCFAllocatorDefault, Int(size.width), Int(size.height), pixelFormat, nil, &buffer) == kCVReturnSuccess,
               let buffer else { throw CocoaError(.fileWriteUnknown) }
         CVPixelBufferLockBaseAddress(buffer, [])
         if hdr {

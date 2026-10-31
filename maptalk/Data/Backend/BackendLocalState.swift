@@ -8,6 +8,15 @@ enum PendingPublicationStatus: Equatable {
 }
 
 nonisolated struct QueuedPublication: Codable, Sendable, Identifiable {
+    struct FailureDiagnostic: Codable, Sendable, Equatable {
+        enum Phase: String, Codable, Sendable {
+            case mediaUpload, videoProcessing, publication, localCommit, cancellation
+        }
+        let phase: Phase
+        let httpStatus: Int?
+        let code: String?
+        let occurredAt: Date
+    }
     struct Photo: Codable, Sendable {
         let id: UUID
         var uploaded: BackendMedia?
@@ -28,6 +37,10 @@ nonisolated struct QueuedPublication: Codable, Sendable, Identifiable {
     var attemptedPost = false
     var cancelled = false
     var failure: String?
+    // Separate safe support metadata from the human-facing message. Optional
+    // for old queues; never retain server messages, captions, URLs or tokens.
+    // Keep the last failure during an explicit retry until this intent resolves.
+    var lastFailure: FailureDiagnostic? = nil
     // Optional so every pre-cluster queue remains decodable. These are local
     // preview copies of selected sources, never another upload or quota charge.
     var clusterPreviews: [ClusterPreview]? = nil
