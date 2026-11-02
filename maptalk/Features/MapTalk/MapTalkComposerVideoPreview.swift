@@ -7,14 +7,16 @@ struct MapTalkComposerVideoPreview: View {
     let player: AVPlayer
     var startTime: Double = 0
     var isActive = true
+    var poster: UIImage?
     @Environment(\.scenePhase) private var scenePhase
     @State private var isPlaying = false
     @State private var wantsSound = true
     @State private var audioOwner = UUID()
+    @State private var generatedPoster: UIImage?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            ComposerPlayerLayer(player: player)
+            ComposerPlayerLayer(player: player, poster: poster ?? generatedPoster)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
             Button(action: togglePlayback) {
@@ -54,7 +56,16 @@ struct MapTalkComposerVideoPreview: View {
             .accessibilityIdentifier("maptalk.place.video.sound")
             .padding(8)
         }
-        .background(.black)
+        .task(id: ObjectIdentifier(player)) {
+            generatedPoster = nil
+            guard poster == nil,
+                  let source = player.currentItem?.asset as? AVURLAsset else { return }
+            // The raw capture can be reviewed while its upload copy is being
+            // prepared. A small in-memory poster bridges player warm-up.
+            let image = try? await makeComposerVideoPoster(at: source.url, startTime: startTime)
+            guard !Task.isCancelled, let image else { return }
+            generatedPoster = UIImage(cgImage: image.image)
+        }
         .onAppear { player.isMuted = true }
         .onReceive(player.publisher(for: \.timeControlStatus)) { status in
             isPlaying = status != .paused
@@ -103,28 +114,95 @@ struct MapTalkComposerVideoPreview: View {
 
 private struct ComposerPlayerLayer: UIViewRepresentable {
     let player: AVPlayer
+    let poster: UIImage?
 
     func makeUIView(context: Context) -> Surface { Surface() }
 
     func updateUIView(_ view: Surface, context: Context) {
-        if view.playerLayer.player !== player { view.playerLayer.player = player }
+        view.configure(player: player, poster: poster)
     }
 
     static func dismantleUIView(_ view: Surface, coordinator: ()) {
-        view.playerLayer.player = nil
+        view.cleanup()
     }
 
     final class Surface: UIView {
-        override class var layerClass: AnyClass { AVPlayerLayer.self }
-        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        private let playerLayer = AVPlayerLayer()
+        private let posterView = UIImageView()
+        private var readyObservation: NSKeyValueObservation?
+        private var hasReadyFrame = false
 
         override init(frame: CGRect) {
             super.init(frame: frame)
-            backgroundColor = .black
+            backgroundColor = .clear
             playerLayer.videoGravity = .resizeAspect
+            playerLayer.backgroundColor = UIColor.black.cgColor
+            playerLayer.opacity = 0
+            layer.addSublayer(playerLayer)
+            posterView.contentMode = .scaleAspectFit
+            posterView.backgroundColor = .black
+            posterView.isHidden = true
+            addSubview(posterView)
             isUserInteractionEnabled = false
+        }
+
+        func configure(player: AVPlayer, poster: UIImage?) {
+            if playerLayer.player !== player {
+                cleanup()
+                playerLayer.player = player
+                let playerID = ObjectIdentifier(player)
+                readyObservation = playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak self] layer, _ in
+                    guard layer.isReadyForDisplay else { return }
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, let activePlayer = self.playerLayer.player,
+                              ObjectIdentifier(activePlayer) == playerID else { return }
+                        self.hasReadyFrame = true
+                        CATransaction.begin()
+                        CATransaction.setDisableActions(true)
+                        self.playerLayer.opacity = 1
+                        self.posterView.isHidden = true
+                        CATransaction.commit()
+                    }
+                }
+            }
+            posterView.image = poster
+            posterView.isHidden = hasReadyFrame || poster == nil
+        }
+
+        func cleanup() {
+            readyObservation?.invalidate()
+            readyObservation = nil
+            hasReadyFrame = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            playerLayer.opacity = 0
+            playerLayer.player = nil
+            CATransaction.commit()
+            posterView.image = nil
+            posterView.isHidden = true
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            playerLayer.frame = bounds
+            posterView.frame = bounds
+            CATransaction.commit()
         }
 
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     }
+}
+
+@concurrent
+nonisolated private func makeComposerVideoPoster(at url: URL, startTime: Double) async throws -> LocalMapDecodedImage {
+    let asset = AVURLAsset(url: url)
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: 960, height: 960)
+    let time = CMTime(seconds: max(0, startTime), preferredTimescale: 600)
+    let frame = try await generator.image(at: time)
+    try Task.checkCancellation()
+    return LocalMapDecodedImage(frame.image)
 }

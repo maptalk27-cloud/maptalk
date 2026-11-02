@@ -163,6 +163,7 @@ struct MapTalkPublishComposer: View {
     @State private var mediaImportToken = UUID()
     @State private var mediaImportTask: Task<Void, Never>?
     @State private var pendingMediaItem: PhotosPickerItem?
+    @State private var pendingCameraPhoto: UIImage?
     @State private var pendingVideoURL: URL?
     @State private var pendingVideoPlayer: AVPlayer?
     @State private var mediaImportIssue: String?
@@ -1346,7 +1347,7 @@ struct MapTalkPublishComposer: View {
                 if isChoosingVideoClip, let pendingVideoPlayer {
                     MapTalkComposerVideoPreview(player: pendingVideoPlayer,
                         startTime: videoClipStart, isActive: !isShowingNearbyPlaceChoices && !isShowingPlaceLibrary)
-                } else if pendingMediaItem != nil || pendingVideoURL != nil {
+                } else if pendingMediaItem != nil || pendingVideoURL != nil || pendingCameraPhoto != nil {
                     pendingPlaceMediaPreview
                 } else if isLoadingMedia && !isApplyingMediaText {
                     ProgressView().tint(.white)
@@ -1375,7 +1376,8 @@ struct MapTalkPublishComposer: View {
         case let .video(_, _, preview):
             if let placeVideoPlayer {
                 MapTalkComposerVideoPreview(player: placeVideoPlayer,
-                    isActive: !isShowingNearbyPlaceChoices && !isShowingPlaceLibrary && !isSubmitting)
+                    isActive: !isShowingNearbyPlaceChoices && !isShowingPlaceLibrary && !isSubmitting,
+                    poster: preview?.image)
             } else if let preview {
                 Image(uiImage: preview.image)
                     .resizable()
@@ -1394,8 +1396,17 @@ struct MapTalkPublishComposer: View {
 
     private var pendingPlaceMediaPreview: some View {
         ZStack {
-            Color.black
-            if let pendingVideoPlayer {
+            // Keep the last camera/review frame visible until the raw video's
+            // poster or player is ready, instead of inserting a black frame.
+            if pendingVideoPlayer == nil { Color.black }
+            if let pendingCameraPhoto {
+                // Show the captured frame immediately while normalization and
+                // persistence run; it is not a publishable asset yet.
+                Image(uiImage: pendingCameraPhoto)
+                    .resizable()
+                    .scaledToFit()
+                    .accessibilityIdentifier("maptalk.place.capture-preview")
+            } else if let pendingVideoPlayer {
                 MapTalkComposerVideoPreview(player: pendingVideoPlayer,
                     startTime: pendingClipRange?.start.seconds ?? pendingVideoStart,
                     isActive: !isShowingNearbyPlaceChoices && !isShowingPlaceLibrary && !isSubmitting)
@@ -1415,33 +1426,42 @@ struct MapTalkPublishComposer: View {
                     Spacer()
                 }
                 Spacer()
-                VStack(spacing: 10) {
-                    if isLoadingMedia {
-                        HStack(spacing: 10) {
-                            ProgressView().tint(.white)
-                            Text(pendingVideoURL == nil ? "Opening selection…" : "Preparing video…")
-                                .font(.system(size: 14, weight: .medium))
-                        }
-                    } else if let mediaImportIssue {
-                        Text(mediaImportIssue)
-                            .font(.system(size: 14, weight: .medium))
-                            .multilineTextAlignment(.center)
-                            .accessibilityIdentifier("maptalk.place.import.issue")
-                        HStack(spacing: 24) {
-                            Button("Try again") { startPlaceImport() }
-                                .accessibilityIdentifier("maptalk.place.import.retry")
-                            Button("Choose another") {
-                                clearPendingMedia()
-                                presentPlaceLibrary()
+                if pendingCameraPhoto != nil {
+                    ProgressView()
+                        .tint(.white)
+                        .padding(12)
+                        .background(.black.opacity(0.45), in: Circle())
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .accessibilityLabel("Preparing photo")
+                } else {
+                    VStack(spacing: 10) {
+                        if isLoadingMedia {
+                            HStack(spacing: 10) {
+                                ProgressView().tint(.white)
+                                Text(pendingVideoURL == nil ? "Opening selection…" : "Preparing video…")
+                                    .font(.system(size: 14, weight: .medium))
                             }
+                        } else if let mediaImportIssue {
+                            Text(mediaImportIssue)
+                                .font(.system(size: 14, weight: .medium))
+                                .multilineTextAlignment(.center)
+                                .accessibilityIdentifier("maptalk.place.import.issue")
+                            HStack(spacing: 24) {
+                                Button("Try again") { startPlaceImport() }
+                                    .accessibilityIdentifier("maptalk.place.import.retry")
+                                Button("Choose another") {
+                                    clearPendingMedia()
+                                    presentPlaceLibrary()
+                                }
+                            }
+                            .font(.system(size: 14, weight: .semibold))
+                            .frame(minHeight: 44)
                         }
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(minHeight: 44)
                     }
+                    .padding(16)
+                    .frame(maxWidth: .infinity)
+                    .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity)
-                .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 14))
             }
             .padding(12)
             .foregroundStyle(.white)
@@ -2544,8 +2564,9 @@ struct MapTalkPublishComposer: View {
 
         switch result {
         case let .photo(image):
+            pendingCameraPhoto = image
             let payload = SendableComposerImage(image)
-            Task { @MainActor in
+            mediaImportTask = Task { @MainActor in
                 let imported = await Task.detached(priority: .userInitiated) {
                     guard let photo = try? PublishPhotoNormalizer.prepare(cameraImage: payload.image),
                           let url = try? MapTalkMediaStorage.persist(photo.jpegData, fileExtension: "jpg") else {
@@ -2554,17 +2575,20 @@ struct MapTalkPublishComposer: View {
                     return ImportedComposerPhoto(url: url, preview: photo.preview)
                 }.value
 
-                guard mediaImportToken == token else {
+                guard mediaImportToken == token, !Task.isCancelled else {
                     if let imported { try? FileManager.default.removeItem(at: imported.url) }
                     return
                 }
                 guard let imported else {
+                    pendingCameraPhoto = nil
+                    mediaImportTask = nil
                     isLoadingMedia = false
                     submissionIssue = "Couldn't prepare this photo. Please try again."
                     return
                 }
                 replacePlaceMedia(with: .photo(id: UUID(), url: imported.url,
                     preview: UIImage(cgImage: imported.preview.image)))
+                mediaImportTask = nil
                 isLoadingMedia = false
             }
 
@@ -2687,6 +2711,7 @@ struct MapTalkPublishComposer: View {
     }
 
     private func replacePlaceMedia(with asset: ComposerMediaAsset) {
+        pendingCameraPhoto = nil
         placeVideoPlayer?.pause()
         if let selectedMedia, selectedMedia.id != asset.id {
             discard(selectedMedia)
@@ -2832,6 +2857,7 @@ struct MapTalkPublishComposer: View {
         pendingVideoPlayer = nil
         pendingVideoURL = nil
         pendingMediaItem = nil
+        pendingCameraPhoto = nil
         mediaImportIssue = nil
         isLoadingMedia = false
         isChoosingVideoClip = false
@@ -3135,7 +3161,9 @@ private struct ReelAssetVisual: View {
     }
 }
 
-private struct VideoPreview {
+/// Both fields are immutable; the UIImage is created off-main and never drawn
+/// into again. Passing this preview does not move UIKit view state across actors.
+nonisolated private struct VideoPreview: @unchecked Sendable {
     let image: UIImage
     let url: URL
 }
@@ -3219,11 +3247,14 @@ private enum MapTalkMediaStorage {
     }
 }
 
-private func makeVideoPreview(for movieURL: URL) async throws -> VideoPreview {
+@concurrent
+nonisolated private func makeVideoPreview(for movieURL: URL) async throws -> VideoPreview {
+    try Task.checkCancellation()
     let generator = AVAssetImageGenerator(asset: AVURLAsset(url: movieURL))
     generator.appliesPreferredTrackTransform = true
     generator.maximumSize = CGSize(width: 960, height: 960)
     let generated = try await generator.image(at: .zero)
+    try Task.checkCancellation()
     let image = UIImage(cgImage: generated.image)
     guard let data = image.jpegData(compressionQuality: 0.86) else {
         throw CocoaError(.fileWriteUnknown)

@@ -60,7 +60,9 @@ extension ExperienceDetailView {
                     onPOIContributorViewed: onPOIContributorViewed,
                     isPOIContributorUnseen: isPOIContributorUnseen,
                     isPlaybackActive: isMediaPlaybackActive,
-                    commentTarget: currentMode.commentTarget
+                    commentTarget: currentMode.commentTarget,
+                    featuredPOIMedia: expandedPOIMedia,
+                    featuredPOIMediaContent: expandedPOIMediaContent
                 )
             }
         }

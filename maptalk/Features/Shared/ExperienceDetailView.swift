@@ -150,6 +150,11 @@ struct ExperienceDetailView: View {
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
     let poiStorySelection: POIStorySelection?
+    // A featured story slice does not filter the shared place's visitor history.
+    let expandedPOIMedia: RatedPOI.Media?
+    // Person stories can supply their one existing pager as the media slot.
+    // The place heading, statistics and discussion remain outside that pager.
+    let expandedPOIMediaContent: AnyView?
     let onCollapsedTap: (() -> Void)?
     let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
     let journeyProvider: (UUID) -> JourneyPost?
@@ -171,6 +176,8 @@ struct ExperienceDetailView: View {
         mode: Mode,
         isExpanded: Bool = true,
         poiStorySelection: POIStorySelection? = nil,
+        expandedPOIMedia: RatedPOI.Media? = nil,
+        expandedPOIMediaContent: AnyView? = nil,
         onCollapsedTap: (() -> Void)? = nil,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         journeyProvider: @escaping (UUID) -> JourneyPost? = { _ in nil },
@@ -187,6 +194,8 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.poiStorySelection = poiStorySelection
+        self.expandedPOIMedia = expandedPOIMedia
+        self.expandedPOIMediaContent = expandedPOIMediaContent
         self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.journeyProvider = journeyProvider
@@ -210,6 +219,8 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.poiStorySelection = nil
+        self.expandedPOIMedia = nil
+        self.expandedPOIMediaContent = nil
         self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.journeyProvider = journeyProvider
@@ -234,6 +245,8 @@ struct ExperienceDetailView: View {
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
         self.poiStorySelection = nil
+        self.expandedPOIMedia = nil
+        self.expandedPOIMediaContent = nil
         self.onCollapsedTap = onCollapsedTap
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.journeyProvider = journeyProvider

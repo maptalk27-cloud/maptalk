@@ -86,6 +86,25 @@ struct POIStorySelectionTests {
     }
 
     @Test
+    func featuredStoryMediaKeepsOriginalPlaceHistory() {
+        let selectedMedia = photo(101)
+        let visits = [visit(201, author: alice, media: [selectedMedia], secondsAgo: 30),
+                      visit(202, author: bob, media: [photo(102)], secondsAgo: 10)]
+        let place = rated(visits)
+        let detail = ExperienceDetailView(mode: .poi(place), isExpanded: true,
+            expandedPOIMedia: selectedMedia, userProvider: user)
+        let data = detail.contentData(for: .poi(place))
+
+        #expect(detail.expandedPOIMedia == selectedMedia)
+        #expect(detail.poiStorySelection == nil)
+        #expect(detail.poiStoryCheckIns(for: place) == visits)
+        #expect(Set(data.engagement.storyContributors.map(\.userId)) == Set([alice, bob]))
+        #expect(data.poiStats?.commentTarget == .place(place.id))
+        #expect(data.engagement.friendComments.map(\.id) == place.comments.map(\.id))
+        #expect(ExperienceDetailView(ratedPOI: place, isExpanded: true).expandedPOIMedia == nil)
+    }
+
+    @Test
     func directMapCardKeepsHistoricalPlaybackAfterFeedExpiry() throws {
         let oldPhoto = photo(101)
         let oldVisit = visit(201, author: alice, media: [oldPhoto], secondsAgo: 30 * 86_400)

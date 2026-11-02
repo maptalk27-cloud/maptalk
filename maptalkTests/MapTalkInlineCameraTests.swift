@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Testing
+import UIKit
 @testable import maptalk
 
 struct MapTalkInlineCameraTests {
@@ -30,6 +31,122 @@ struct MapTalkInlineCameraTests {
         #expect(MapTalkInlineCameraPolicy.shutterHint(
             isRecording: true, isFinishing: true, microphoneJustGranted: false)
             == "Saving…")
+        #expect(MapTalkInlineCameraPolicy.shutterHint(
+            isRecording: false, isFinishing: false, microphoneJustGranted: false, isStarting: true)
+            == "Starting… · release to finish")
+        #expect(MapTalkInlineCameraPolicy.shutterHint(
+            isRecording: false, isFinishing: true, microphoneJustGranted: false, isStarting: true)
+            == "Saving…")
+    }
+
+    @Test @MainActor
+    func shutterRespondsOnTouchDownAndToleratesSmallFingerDriftForOnePhoto() {
+        let shutter = MapTalkShutterControl(frame: CGRect(x: 0, y: 0, width: 64, height: 64))
+        shutter.allowsNewCapture = true
+        var photos = 0
+        var starts = 0
+        var finishes = 0
+        shutter.onPhoto = { photos += 1 }
+        shutter.onHold = { starts += 1 }
+        shutter.onRelease = { finishes += 1 }
+
+        #expect(shutter.beginPress())
+        #expect(shutter.isHighlighted, "Feedback must not wait for the hold threshold or camera callback")
+        let slightDrift = CGPoint(x: 80, y: 32)
+        #expect(MapTalkShutterPressState.containsRelease(slightDrift, in: shutter.bounds))
+        #expect(shutter.continuePress(at: slightDrift))
+        shutter.endPress(at: slightDrift)
+        shutter.endPress(at: slightDrift)
+        shutter.recognizeHold()
+
+        #expect(!shutter.isHighlighted)
+        #expect(photos == 1)
+        #expect(starts == 0)
+        #expect(finishes == 0)
+    }
+
+    @Test @MainActor
+    func draggingFarAwayCancelsTheTapAndALateHoldCannotCapture() {
+        let shutter = MapTalkShutterControl(frame: CGRect(x: 0, y: 0, width: 64, height: 64))
+        shutter.allowsNewCapture = true
+        var photos = 0
+        var starts = 0
+        var finishes = 0
+        shutter.onPhoto = { photos += 1 }
+        shutter.onHold = { starts += 1 }
+        shutter.onRelease = { finishes += 1 }
+
+        #expect(shutter.beginPress())
+        #expect(!shutter.continuePress(at: CGPoint(x: 100, y: 32)))
+        #expect(!shutter.isHighlighted)
+        shutter.recognizeHold()
+        shutter.endPress(at: CGPoint(x: 32, y: 32))
+
+        #expect(shutter.beginPress(), "Cancellation must permit the next genuine touch")
+        shutter.cancelPress()
+        shutter.recognizeHold()
+        shutter.endPress(at: CGPoint(x: 32, y: 32))
+        #expect(photos == 0)
+        #expect(starts == 0)
+        #expect(finishes == 0)
+    }
+
+    @Test @MainActor
+    func heldShutterStillFinishesOnceWhenFingerReleasesFarOutside() {
+        let shutter = MapTalkShutterControl(frame: CGRect(x: 0, y: 0, width: 64, height: 64))
+        shutter.allowsNewCapture = true
+        var photos = 0
+        var starts = 0
+        var finishes = 0
+        shutter.onPhoto = { photos += 1 }
+        shutter.onHold = { starts += 1 }
+        shutter.onRelease = { finishes += 1 }
+
+        #expect(shutter.beginPress())
+        shutter.recognizeHold()
+        shutter.recognizeHold()
+        let outside = CGPoint(x: 200, y: -100)
+        #expect(shutter.continuePress(at: outside), "A recording must retain its release outside the shutter")
+        shutter.endPress(at: outside)
+        shutter.cancelPress()
+        shutter.endPress(at: outside)
+
+        #expect(starts == 1)
+        #expect(finishes == 1)
+        #expect(photos == 0)
+        #expect(!shutter.isHighlighted)
+    }
+
+    @Test @MainActor
+    func busyAppearanceUpdatesDoNotDisableTheHeldTouchOrLoseItsRelease() {
+        let shutter = MapTalkShutterControl(frame: CGRect(x: 0, y: 0, width: 64, height: 64))
+        shutter.allowsNewCapture = true
+        var photos = 0
+        var starts = 0
+        var finishes = 0
+        shutter.onPhoto = { photos += 1 }
+        shutter.onHold = { starts += 1 }
+        shutter.onRelease = { finishes += 1 }
+
+        #expect(shutter.beginPress())
+        shutter.recognizeHold()
+        shutter.allowsNewCapture = false
+        shutter.isStarting = true
+        shutter.updateAppearance()
+        #expect(shutter.isEnabled)
+        #expect(shutter.isHighlighted)
+        #expect(!shutter.beginPress(), "A busy redraw must not admit a second touch")
+        shutter.isStarting = false
+        shutter.isFinishing = true
+        shutter.updateAppearance()
+        #expect(shutter.isEnabled)
+        shutter.endPress(at: nil)
+        shutter.cancelPress()
+
+        #expect(starts == 1)
+        #expect(finishes == 1)
+        #expect(photos == 0)
+        #expect(!shutter.isHighlighted)
     }
 
     @Test

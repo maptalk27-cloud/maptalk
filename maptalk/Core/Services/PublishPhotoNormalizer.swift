@@ -27,6 +27,28 @@ nonisolated enum PublishPhotoNormalizer {
         }
     }
 
+    /// Decode the camera JPEG before crossing to the UI. UIImage(data:) is lazy:
+    /// displaying it can otherwise decode the full sensor image on the main thread.
+    /// This uses the same size limit as the final photo and applies orientation.
+    static func cameraPreview(from data: Data) throws -> LocalMapDecodedImage {
+        guard !data.isEmpty, data.count <= maximumSourceFileBytes,
+              let source = CGImageSourceCreateWithData(data as CFData,
+                [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue else {
+            throw ImportError.unreadable
+        }
+        try validate(width: width, height: height)
+        guard let pixels = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize
+        ] as CFDictionary) else { throw ImportError.unreadable }
+        return LocalMapDecodedImage(pixels)
+    }
+
     /// ImageIO downsamples directly from the picker-owned file; it does not first
     /// allocate a full-resolution UIImage (a 48 MP image can otherwise use 192 MB).
     static func prepare(at url: URL) throws -> Photo {

@@ -14,6 +14,8 @@ struct ExperiencePanel: View {
     let isPOIContributorUnseen: ([String]) -> Bool
     var isPlaybackActive = true
     var commentTarget: BackendCommentTarget? = nil
+    var featuredPOIMedia: RatedPOI.Media? = nil
+    var featuredPOIMediaContent: AnyView? = nil
     @Environment(\.appEnv) private var environment
     @State private var contentNeedsScrolling = false
 
@@ -93,7 +95,7 @@ struct ExperiencePanel: View {
                 }
         }
         .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
-        .padding(.top, isSingleVideoHero ? 0 : 40)
+        .padding(.top, isSingleVideoHero || featuredPOIMedia != nil ? 0 : 40)
         .padding(.bottom, 60)
     }
 
@@ -119,7 +121,10 @@ struct ExperiencePanel: View {
                     onRecentSharerSelected: { index in
                         onRecentSharerSelected?(index, data)
                     },
-                    isContributorUnseen: isPOIContributorUnseen
+                    isContributorUnseen: isPOIContributorUnseen,
+                    featuredMedia: featuredPOIMedia,
+                    featuredMediaContent: featuredPOIMediaContent,
+                    isPlaybackActive: isPlaybackActive
                 )
                 .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
 
@@ -277,30 +282,101 @@ struct POIExpandedHero: View {
     let recentSharers: [ExperienceDetailView.POIStoryContributor]
     let onRecentSharerSelected: ((Int) -> Void)?
     let isContributorUnseen: ([String]) -> Bool
+    var featuredMedia: RatedPOI.Media? = nil
+    var featuredMediaContent: AnyView? = nil
+    var isPlaybackActive = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            POIPlaceHeading(info: info, accentColor: accentColor)
+        Group {
+            if let featuredMedia {
+                VStack(alignment: .leading, spacing: 16) {
+                    featuredStage(media: featuredMedia)
 
-            if recentSharers.isEmpty == false {
-                POIRecentSharersRow(
-                    sharers: recentSharers,
-                    accentColor: accentColor,
-                    isContributorUnseen: isContributorUnseen
-                ) { index in
-                    onRecentSharerSelected?(index)
+                    if !recentSharers.isEmpty {
+                        recentSharersRow
+                            .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
+                            .padding(.bottom, POIHeroLayout.collapsedVerticalPadding)
+                    }
                 }
-            }
+            } else {
+                // The direct-map place page keeps its original layout.
+                VStack(alignment: .leading, spacing: 6) {
+                    POIPlaceHeading(info: info, accentColor: accentColor)
+                        .accessibilityIdentifier("experience.poi.expanded.heading")
 
-            if let stats {
-                POIHeroStatsRow(model: stats)
+                    if !recentSharers.isEmpty {
+                        recentSharersRow
+                    }
+
+                    if let stats {
+                        POIHeroStatsRow(model: stats)
+                    }
+                }
+                .padding(.top, POIHeroLayout.headerTopPadding)
+                .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
+                .padding(.vertical, POIHeroLayout.collapsedVerticalPadding)
             }
         }
-        .padding(.top, POIHeroLayout.headerTopPadding)
-        .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
-        .padding(.vertical, POIHeroLayout.collapsedVerticalPadding)
+        .background {
+            if let featuredMedia {
+                POIMediaBackdrop(media: featuredMedia)
+                    .padding(.horizontal, -ExperienceSheetLayout.detailContentInset)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("experience.poi.expanded")
+    }
+
+    private func featuredStage(media: RatedPOI.Media) -> some View {
+        ZStack {
+            if let featuredMediaContent {
+                featuredMediaContent
+            } else {
+                POIFeaturedMedia(media: media, accentColor: accentColor,
+                                 isPlaybackActive: isPlaybackActive)
+            }
+        }
+        .overlay(alignment: .top) {
+            LinearGradient(colors: [.black.opacity(0.72), .clear],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: 140)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .overlay(alignment: .topLeading) {
+            POIPlaceHeading(info: info, accentColor: accentColor)
+                .padding(.horizontal, 20)
+                .padding(.top, 28)
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("experience.poi.expanded.heading")
+        }
+        .overlay(alignment: .bottom) {
+            LinearGradient(colors: [.clear, .black.opacity(0.5)],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: 100)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if let stats {
+                POIHeroStatsRow(model: stats)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 32)
+                    .allowsHitTesting(false)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("experience.poi.expanded.stats")
+            }
+        }
+    }
+
+    private var recentSharersRow: some View {
+        POIRecentSharersRow(
+            sharers: recentSharers,
+            accentColor: accentColor,
+            isContributorUnseen: isContributorUnseen
+        ) { index in
+            onRecentSharerSelected?(index)
+        }
     }
 }
 struct POIHeroStatsRow: View {

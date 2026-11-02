@@ -89,6 +89,7 @@ internal struct MapTalkInlineCameraView: View {
                         MapTalkPressShutter(
                             allowsNewCapture: camera.canBeginCapture,
                             isRecording: camera.isRecordingVideo,
+                            isStarting: camera.isRecordingVideo && camera.recordingStartedAt == nil,
                             isFinishing: camera.isFinishing,
                             onPhoto: camera.capturePhoto,
                             onHold: camera.beginHeldRecording,
@@ -152,7 +153,13 @@ nonisolated internal struct MapTalkShutterPressState {
     private enum Phase { case idle, pressed, holding }
     private var phase = Phase.idle
     static let holdDuration: TimeInterval = 0.3
+    static let releaseTolerance: CGFloat = 20
+    var isPressed: Bool { phase != .idle }
     var isHolding: Bool { phase == .holding }
+
+    static func containsRelease(_ point: CGPoint, in bounds: CGRect) -> Bool {
+        bounds.insetBy(dx: -releaseTolerance, dy: -releaseTolerance).contains(point)
+    }
 
     mutating func began(acceptsNewCapture: Bool) -> Bool {
         guard acceptsNewCapture, phase == .idle else { return false }
@@ -211,8 +218,10 @@ nonisolated internal enum MapTalkInlineCameraPolicy {
         connectionSupports && formatSupportsStandard ? .standard : .off
     }
 
-    static func shutterHint(isRecording: Bool, isFinishing: Bool, microphoneJustGranted: Bool) -> String {
+    static func shutterHint(isRecording: Bool, isFinishing: Bool, microphoneJustGranted: Bool,
+                            isStarting: Bool = false) -> String {
         if isFinishing { return "Saving…" }
+        if isStarting { return "Starting… · release to finish" }
         if isRecording { return "Release to finish" }
         if microphoneJustGranted { return "Microphone ready · hold to record" }
         return "Tap for photo · hold for video"
@@ -255,7 +264,8 @@ private final class MapTalkInlineCameraModel: ObservableObject {
 
     var shutterHint: String {
         MapTalkInlineCameraPolicy.shutterHint(isRecording: isRecordingVideo,
-            isFinishing: isFinishing, microphoneJustGranted: microphoneJustGranted)
+            isFinishing: isFinishing, microphoneJustGranted: microphoneJustGranted,
+            isStarting: isRecordingVideo && recordingStartedAt == nil)
     }
 
     private func prepareEngineIfNeeded() {
@@ -350,6 +360,7 @@ private final class MapTalkInlineCameraModel: ObservableObject {
                 // The permission alert ends the original touch. A visible hint
                 // explains why that first hold did not start recording.
                 self.microphoneJustGranted = true
+                self.engine?.prepareRecordingResources()
             } else {
                 self.onIssue?("Allow microphone access in Settings to record video with sound.")
             }
@@ -437,13 +448,9 @@ private final class MapTalkInlineCameraModel: ObservableObject {
             }
         case .finishing:
             isFinishing = true
-        case let .photo(data):
+        case let .photo(preview):
             resetCapture()
-            guard let image = UIImage(data: data) else {
-                onIssue?("Couldn't save this photo. Please try again.")
-                return
-            }
-            onCapture?(.photo(image))
+            onCapture?(.photo(UIImage(cgImage: preview.image)))
         case let .video(url):
             resetCapture()
             onCapture?(.video(url))
@@ -462,7 +469,7 @@ nonisolated private enum MapTalkInlineCameraEvent: Sendable {
     case unavailable(String)
     case recording(Date)
     case finishing
-    case photo(Data)
+    case photo(LocalMapDecodedImage)
     case video(URL)
     case failed(String)
     case cancelled
@@ -479,6 +486,8 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
     private let movieOutput = AVCaptureMovieFileOutput()
     private var videoInput: AVCaptureDeviceInput?
     private var audioInput: AVCaptureDeviceInput?
+    private var preparedMicrophone: AVCaptureDeviceInput?
+    private var recordingDirectory: URL?
     private var configured = false
     private var wantsActive = false
     private var activePhotoID: Int64?
@@ -550,6 +559,7 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
             do {
                 if configured == false { try configure() }
                 resumeIfNeeded()
+                prepareRecordingResourcesOnQueue()
             } catch {
                 onEvent(.unavailable("Camera is unavailable right now. You can still use your library."))
             }
@@ -597,6 +607,11 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
             )
             if connection.preferredVideoStabilizationMode != mode {
                 connection.preferredVideoStabilizationMode = mode
+            }
+            // Configure the encoder with the session, not at the hold threshold.
+            if movieOutput.availableVideoCodecTypes.contains(.h264),
+               movieOutput.outputSettings(for: connection)[AVVideoCodecKey] as? String != AVVideoCodecType.h264.rawValue {
+                movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.h264], for: connection)
             }
         }
     }
@@ -662,10 +677,6 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
                 discardCapture = false
                 recordingURL = url
                 recordingStop.begin()
-                if let connection = movieOutput.connection(with: .video),
-                   movieOutput.availableVideoCodecTypes.contains(.h264) {
-                    movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.h264], for: connection)
-                }
                 movieOutput.startRecording(to: url, recordingDelegate: self)
             } catch {
                 removeMicrophoneOnQueue()
@@ -678,7 +689,7 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
         guard audioInput == nil else { return }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
               let microphone = AVCaptureDevice.default(for: .audio) else { throw CameraError.unavailable }
-        let input = try AVCaptureDeviceInput(device: microphone)
+        let input = try preparedMicrophone ?? AVCaptureDeviceInput(device: microphone)
         session.beginConfiguration()
         defer {
             session.commitConfiguration()
@@ -689,12 +700,34 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
         audioInput = input
     }
 
+    func prepareRecordingResources() {
+        queue.async { [self] in prepareRecordingResourcesOnQueue() }
+    }
+
+    private func prepareRecordingResourcesOnQueue() {
+        guard wantsActive, configured, recordingURL == nil else { return }
+        // Allocate only: this input is NOT attached to the running session, so
+        // opening the photo camera still does not start microphone capture.
+        if preparedMicrophone == nil,
+           AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+           let microphone = AVCaptureDevice.default(for: .audio) {
+            preparedMicrophone = try? AVCaptureDeviceInput(device: microphone)
+        }
+        if recordingDirectory == nil { recordingDirectory = try? makeRecordingDirectory() }
+    }
+
     private func makeRecordingURL() throws -> URL {
+        let directory = try recordingDirectory ?? makeRecordingDirectory()
+        recordingDirectory = directory
+        return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
+    }
+
+    private func makeRecordingDirectory() throws -> URL {
         let directory = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
         ).appendingPathComponent("MapTalkMedia", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(UUID().uuidString).appendingPathExtension("mov")
+        return directory
     }
 
     private func removeMicrophoneOnQueue() {
@@ -725,8 +758,8 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
             activePhotoID = nil
             if discardCapture {
                 onEvent(.cancelled)
-            } else if let data {
-                onEvent(.photo(data))
+            } else if let data, let preview = try? PublishPhotoNormalizer.cameraPreview(from: data) {
+                onEvent(.photo(preview))
             } else {
                 onEvent(.failed("Couldn't save this photo. Please try again."))
             }
@@ -760,8 +793,8 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
         queue.async { [self] in
             guard recordingURL == outputFileURL else { return }
             recordingURL = nil
-            // The microphone is needed only for an explicitly started recording,
-            // not while the user is deciding what to photograph next.
+            // Release the recording input before preview playback can acquire
+            // the shared audio session. Otherwise a quick Play tap can race it.
             removeMicrophoneOnQueue()
             let size = (try? outputFileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             if MapTalkInlineCameraPolicy.shouldKeepRecording(
@@ -782,6 +815,7 @@ nonisolated private final class MapTalkInlineCameraEngine: NSObject, @unchecked 
 private struct MapTalkPressShutter: UIViewRepresentable {
     let allowsNewCapture: Bool
     let isRecording: Bool
+    let isStarting: Bool
     let isFinishing: Bool
     let onPhoto: () -> Void
     let onHold: () -> Void
@@ -792,6 +826,7 @@ private struct MapTalkPressShutter: UIViewRepresentable {
     func updateUIView(_ view: MapTalkShutterControl, context: Context) {
         view.allowsNewCapture = allowsNewCapture
         view.isRecording = isRecording
+        view.isStarting = isStarting
         view.isFinishing = isFinishing
         view.onPhoto = onPhoto
         view.onHold = onHold
@@ -807,9 +842,10 @@ private struct MapTalkPressShutter: UIViewRepresentable {
 /// One UIKit tracking sequence owns both gestures. SwiftUI button/long-press
 /// combinations can fire the photo on release or lose touch-up while busy.
 @MainActor
-private final class MapTalkShutterControl: UIControl {
+internal final class MapTalkShutterControl: UIControl {
     var allowsNewCapture = false
     var isRecording = false
+    var isStarting = false
     var isFinishing = false
     var onPhoto: (() -> Void)?
     var onHold: (() -> Void)?
@@ -819,6 +855,7 @@ private final class MapTalkShutterControl: UIControl {
     private let rim = CALayer()
     private let shutterFill = CALayer()
     private let spinner = UIActivityIndicatorView(style: .medium)
+    private let feedback = UIImpactFeedbackGenerator(style: .light)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -839,12 +876,24 @@ private final class MapTalkShutterControl: UIControl {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        renderShutter(animated: false)
+    }
+
+    private func renderShutter(animated: Bool) {
         CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        rim.frame = bounds
+        CATransaction.setDisableActions(!animated || window == nil || UIAccessibility.isReduceMotionEnabled)
+        CATransaction.setAnimationDuration(0.16)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
+        rim.bounds = CGRect(origin: .zero, size: bounds.size)
+        rim.position = CGPoint(x: bounds.midX, y: bounds.midY)
         rim.cornerRadius = bounds.width / 2
-        shutterFill.frame = bounds.insetBy(dx: isRecording ? 18 : 6, dy: isRecording ? 18 : 6)
+        let ringScale: CGFloat = isRecording ? 1.1 : isHighlighted ? 1.04 : 1
+        rim.setAffineTransform(CGAffineTransform(scaleX: ringScale, y: ringScale))
+        let inset: CGFloat = isRecording ? 18 : isHighlighted ? 10 : 6
+        shutterFill.frame = bounds.insetBy(dx: inset, dy: inset)
         shutterFill.cornerRadius = isRecording ? 6 : shutterFill.bounds.width / 2
+        shutterFill.backgroundColor = (isRecording ? UIColor.systemRed : .white).cgColor
+        shutterFill.opacity = isFinishing ? 0 : 1
         spinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
         CATransaction.commit()
     }
@@ -852,13 +901,11 @@ private final class MapTalkShutterControl: UIControl {
     func updateAppearance() {
         // Starting/finalizing must not disable the tracking touch: its release
         // is what stops the recording, including before didStart arrives.
-        isEnabled = allowsNewCapture || isRecording || isFinishing || isTracking
+        isEnabled = allowsNewCapture || isRecording || isFinishing || press.isPressed
         alpha = isEnabled ? 1 : 0.45
-        shutterFill.backgroundColor = (isRecording ? UIColor.systemRed : .white).cgColor
-        shutterFill.isHidden = isFinishing
         if isFinishing { spinner.startAnimating() } else { spinner.stopAnimating() }
         accessibilityLabel = isRecording ? "Stop recording" : "Take photo"
-        accessibilityValue = isFinishing ? "Saving" : isRecording ? "Recording" : nil
+        accessibilityValue = isFinishing ? "Saving" : isStarting ? "Starting recording" : isRecording ? "Recording" : nil
         accessibilityTraits = allowsNewCapture || isRecording ? [.button] : [.button, .notEnabled]
         accessibilityCustomActions = [UIAccessibilityCustomAction(
             name: isRecording ? "Stop recording" : "Record video"
@@ -869,15 +916,23 @@ private final class MapTalkShutterControl: UIControl {
             else { return false }
             return true
         }]
-        setNeedsLayout()
+        renderShutter(animated: true)
     }
 
     override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
+        beginPress()
+    }
+
+    @discardableResult
+    func beginPress() -> Bool {
         guard press.began(acceptsNewCapture: allowsNewCapture) else { return false }
+        // Feedback belongs to touch-down, not the later SwiftUI/camera callback.
+        isHighlighted = true
+        feedback.prepare()
+        updateAppearance()
         let timer = Timer(timeInterval: MapTalkShutterPressState.holdDuration, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
-                self.perform(self.press.held())
+                self?.recognizeHold()
             }
         }
         holdTimer = timer
@@ -886,26 +941,53 @@ private final class MapTalkShutterControl: UIControl {
     }
 
     override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-        if !press.isHolding, !bounds.insetBy(dx: -20, dy: -20).contains(touch.location(in: self)) {
-            cancelTracking(with: event)
+        continuePress(at: touch.location(in: self))
+    }
+
+    func continuePress(at point: CGPoint) -> Bool {
+        if !press.isHolding, !MapTalkShutterPressState.containsRelease(point, in: bounds) {
+            cancelPress()
             return false
         }
         return true
     }
 
     override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
-        holdTimer?.invalidate()
-        holdTimer = nil
-        let inside = touch.map { bounds.contains($0.location(in: self)) } ?? false
-        perform(press.ended(inside: inside))
+        endPress(at: touch?.location(in: self))
         super.endTracking(touch, with: event)
     }
 
-    override func cancelTracking(with event: UIEvent?) {
+    func endPress(at point: CGPoint?) {
         holdTimer?.invalidate()
         holdTimer = nil
-        perform(press.ended(inside: false, cancelled: true))
+        isHighlighted = false
+        let inside = point.map { MapTalkShutterPressState.containsRelease($0, in: bounds) } ?? false
+        perform(press.ended(inside: inside))
+        updateAppearance()
+    }
+
+    override func cancelTracking(with event: UIEvent?) {
+        cancelPress()
         super.cancelTracking(with: event)
+    }
+
+    func cancelPress() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        isHighlighted = false
+        perform(press.ended(inside: false, cancelled: true))
+        updateAppearance()
+    }
+
+    func recognizeHold() {
+        holdTimer?.invalidate()
+        holdTimer = nil
+        perform(press.held())
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { cancelPress() }
     }
 
     override func accessibilityActivate() -> Bool {
@@ -919,8 +1001,12 @@ private final class MapTalkShutterControl: UIControl {
     private func perform(_ action: MapTalkShutterPressState.Action) {
         switch action {
         case .none: break
-        case .photo: onPhoto?()
-        case .startVideo: onHold?()
+        case .photo:
+            feedback.impactOccurred(intensity: 0.6)
+            onPhoto?()
+        case .startVideo:
+            feedback.impactOccurred(intensity: 0.8)
+            onHold?()
         case .finishVideo: onRelease?()
         }
     }

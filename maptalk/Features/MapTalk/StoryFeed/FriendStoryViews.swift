@@ -295,13 +295,68 @@ struct FriendStoryContentView: View {
         })
     }
 
+    @ViewBuilder
     private var postPager: some View {
-        // Keep one stable native sequence through person boundaries. Let the
-        // pager manage its neighboring pages; replacing offscreen card bodies
-        // during a swipe can disturb its interactive transition.
+        if case let .poi(place, _, media) = page.content, let media {
+            // A place is the container, not a different card for every visit.
+            // Only the media belongs to the horizontal pager; the place shell
+            // stays mounted while its exact selected slice changes.
+            if isExpanded {
+                ExperienceDetailView(
+                    mode: .poi(Self.placeForCard(place, isExpanded: true, provider: placeProvider)),
+                    isExpanded: true,
+                    expandedPOIMedia: media,
+                    expandedPOIMediaContent: AnyView(
+                        nativePostPager(mediaOnly: true)
+                            .aspectRatio(ExperienceDetailView.POIFeaturedMedia.viewportAspectRatio, contentMode: .fit)
+                            .overlay(alignment: .bottom) {
+                                placePageDots.padding(.bottom, 24)
+                            }
+                    ),
+                    onJourneyAvatarStackTap: onJourney,
+                    journeyProvider: journeyProvider,
+                    userProvider: userProvider,
+                    onPOIContributorViewed: { keys in keys.forEach(onReadReady) },
+                    isPOIContributorUnseen: { keys in keys.contains { !viewedKeys.contains($0) } }
+                )
+                .id("story-place:\(page.authorID.uuidString):\(place.id.uuidString)")
+                .environment(\.friendStoryPlaybackEnabled, playbackEnabled)
+                .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
+            } else {
+                nativePostPager(mediaOnly: true)
+                    .overlay { FriendStoryPOIChrome(place: place) }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("friend-story.poi.preview")
+            }
+        } else {
+            nativePostPager(mediaOnly: false)
+        }
+    }
+
+    @ViewBuilder
+    private var placePageDots: some View {
+        if let momentIndex = group.momentIndex(containing: pageIndex),
+           group.moments[momentIndex].placeID != nil {
+            let range = group.moments[momentIndex].pageRange
+            FriendStoryPlacePageDots(count: range.count, index: pageIndex - range.lowerBound)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func childPresentationChanged(_ id: UUID, _ presented: Bool) {
+        if presented { activeChildPresentations.insert(id) }
+        else { activeChildPresentations.remove(id) }
+    }
+
+    private func nativePostPager(mediaOnly: Bool) -> some View {
+        // The same global sequence and binding still own boundaries between
+        // places and people. There is never an inner and outer horizontal pager.
         TabView(selection: pageSelection) {
             ForEach(pagerPages) { candidate in
-                content(for: candidate)
+                Group {
+                    if mediaOnly { mediaPage(for: candidate) }
+                    else { content(for: candidate) }
+                }
                     .background(ExperiencePagerVerticalBounceGuard())
                     // Native paging keeps adjacent cards mounted. Only the
                     // selected card may play, mark read or present a child.
@@ -318,6 +373,28 @@ struct FriendStoryContentView: View {
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
+        .accessibilityIdentifier("friend-story.post-pager")
+    }
+
+    @ViewBuilder
+    private func mediaPage(for candidate: FriendStoryPage) -> some View {
+        if case let .poi(place, _, media) = candidate.content, let media {
+            if isExpanded {
+                ExperienceDetailView.POIFeaturedMedia(media: media,
+                    accentColor: place.poi.category.accentColor,
+                    isPlaybackActive: playbackEnabled && candidate.id == page.id,
+                    fillsContainer: true)
+            } else {
+                FriendStoryPOIPreview(place: place, media: media,
+                    isPlaybackActive: playbackEnabled && candidate.id == page.id,
+                    showsPlaceChrome: false)
+            }
+        } else {
+            // The adjacent original card remains in the same native sequence.
+            // Completing the boundary swipe selects it through the original
+            // navigation binding, which also preserves map flight.
+            content(for: candidate)
+        }
     }
 
     @ViewBuilder
@@ -349,12 +426,13 @@ struct FriendStoryContentView: View {
                     FriendStoryPOIPreview(place: place, media: media,
                         isPlaybackActive: playbackEnabled && candidate.id == page.id)
                 } else {
-                    // Expanding returns to the original shared place card,
-                    // including other visitors, not a replacement timeline.
+                    // Keep the original place page; feature this exact slice
+                    // inside it without filtering other visitors or history.
                     ExperienceDetailView(
                         mode: .poi(Self.placeForCard(place, isExpanded: isExpanded, provider: placeProvider)),
                         isExpanded: isExpanded,
                         poiStorySelection: isExpanded ? nil : .init(checkIn: checkIn, media: media),
+                        expandedPOIMedia: isExpanded ? media : nil,
                         onCollapsedTap: onExpand,
                         onJourneyAvatarStackTap: onJourney,
                         journeyProvider: journeyProvider,
@@ -456,6 +534,7 @@ private struct FriendStoryPOIPreview: View {
     let place: RatedPOI
     let media: RatedPOI.Media
     let isPlaybackActive: Bool
+    var showsPlaceChrome = true
     @State private var isLightboxPresented = false
     @State private var childPresentationID = UUID()
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
@@ -481,40 +560,8 @@ private struct FriendStoryPOIPreview: View {
                         isPlaybackActive: isPlaybackActive && !isLightboxPresented)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
-                        .overlay(alignment: .top) {
-                            LinearGradient(colors: [.black.opacity(0.72), .clear],
-                                startPoint: .top, endPoint: .bottom)
-                                .frame(height: 140)
-                                .allowsHitTesting(false)
-                        }
-                        .overlay(alignment: .topLeading) {
-                            ExperienceDetailView.POIPlaceHeading(
-                                info: .init(name: place.poi.name, category: place.poi.category,
-                                    endorsementBadges: ExperienceDetailView.poiEndorsementBadges(for: place)),
-                                accentColor: place.poi.category.accentColor)
-                                .padding(.horizontal, 20)
-                                .padding(.top, 28)
-                                .accessibilityIdentifier("friend-story.poi.place-name")
-                                .allowsHitTesting(false)
-                        }
-                        .overlay(alignment: .bottom) {
-                            LinearGradient(colors: [.clear, .black.opacity(0.5)],
-                                startPoint: .top, endPoint: .bottom)
-                                .frame(height: 100)
-                                .allowsHitTesting(false)
-                        }
-                        .overlay(alignment: .bottomTrailing) {
-                            ExperienceDetailView.POIHeroStatsRow(model: .init(
-                                checkIns: place.checkInPersonCount,
-                                comments: place.comments.count,
-                                favorites: place.favoritesCount,
-                                endorsements: place.endorsements,
-                                commentTarget: .place(place.id)))
-                                .padding(.horizontal, 20)
-                                .padding(.bottom, 32)
-                                .accessibilityElement(children: .contain)
-                                .accessibilityIdentifier("friend-story.poi.stats")
-                                .allowsHitTesting(false)
+                        .overlay {
+                            if showsPlaceChrome { FriendStoryPOIChrome(place: place) }
                         }
                 }
                 .contentShape(Rectangle())
@@ -540,6 +587,47 @@ private struct FriendStoryPOIPreview: View {
                 .environment(\.friendStoryOnMediaReady, nil)
                 .environment(\.friendStoryChildPresentationChanged, nil)
         }
+    }
+}
+
+/// Place identity belongs to the containing card, not to each media slice.
+private struct FriendStoryPOIChrome: View {
+    let place: RatedPOI
+
+    var body: some View {
+        Color.clear
+            .overlay(alignment: .top) {
+                LinearGradient(colors: [.black.opacity(0.72), .clear],
+                    startPoint: .top, endPoint: .bottom)
+                    .frame(height: 140)
+            }
+            .overlay(alignment: .topLeading) {
+                ExperienceDetailView.POIPlaceHeading(
+                    info: .init(name: place.poi.name, category: place.poi.category,
+                        endorsementBadges: ExperienceDetailView.poiEndorsementBadges(for: place)),
+                    accentColor: place.poi.category.accentColor)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 28)
+                    .accessibilityIdentifier("friend-story.poi.place-name")
+            }
+            .overlay(alignment: .bottom) {
+                LinearGradient(colors: [.clear, .black.opacity(0.5)],
+                    startPoint: .top, endPoint: .bottom)
+                    .frame(height: 100)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                ExperienceDetailView.POIHeroStatsRow(model: .init(
+                    checkIns: place.checkInPersonCount,
+                    comments: place.comments.count,
+                    favorites: place.favoritesCount,
+                    endorsements: place.endorsements,
+                    commentTarget: .place(place.id)))
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 32)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("friend-story.poi.stats")
+            }
+            .allowsHitTesting(false)
     }
 }
 

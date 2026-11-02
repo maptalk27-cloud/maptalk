@@ -75,6 +75,33 @@ struct PublishPhotoNormalizerTests {
     }
 
     @Test
+    func cameraPreviewAppliesJPEGOrientationWithoutChangingSourceData() throws {
+        let original = try photoFile(width: 4_032, height: 3_024, orientation: 6)
+        defer { try? FileManager.default.removeItem(at: original) }
+        let originalBytes = try Data(contentsOf: original)
+        let input = originalBytes
+
+        let preview = try PublishPhotoNormalizer.cameraPreview(from: input)
+
+        #expect(preview.image.width == 1_536)
+        #expect(preview.image.height == 2_048)
+        #expect(input == originalBytes)
+        #expect(try Data(contentsOf: original) == originalBytes)
+        let sourceProperties = try properties(of: input)
+        #expect((sourceProperties[kCGImagePropertyOrientation] as? NSNumber)?.intValue == 6)
+    }
+
+    @Test
+    func cameraPreviewRejectsInvalidData() {
+        #expect(throws: PublishPhotoNormalizer.ImportError.self) {
+            try PublishPhotoNormalizer.cameraPreview(from: Data("not an image".utf8))
+        }
+        #expect(throws: PublishPhotoNormalizer.ImportError.self) {
+            try PublishPhotoNormalizer.cameraPreview(from: Data())
+        }
+    }
+
+    @Test
     func rotatedCameraCaptureHasUprightPortraitDimensionsRatherThanStretchingLandscapePixels() throws {
         let pixels = try image(width: 4_032, height: 3_024)
         let cameraImage = UIImage(cgImage: pixels, scale: 2, orientation: .right)

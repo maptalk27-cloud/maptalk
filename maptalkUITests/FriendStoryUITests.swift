@@ -66,8 +66,9 @@ final class FriendStoryUITests: XCTestCase {
         revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE2", app: app).tap()
         XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
         rewind(app)
-        // This POC checks the existing demo place projection, not a server
-        // history fetch. Only the compact story's media presentation changes.
+        // This checks the existing demo place projection, not a server history
+        // fetch. Expansion keeps the original POI page, overlays its heading
+        // and counters on this visit's media, and keeps visitors below it.
         for _ in 0..<pagePosition(app).count {
             if poiMediaID(from: currentPage(app).identifier) != nil { break }
             XCTAssertTrue(advancePage(app), "The demo author must have a POI media update")
@@ -99,22 +100,54 @@ final class FriendStoryUITests: XCTestCase {
         XCTAssertEqual(currentAuthor(app).value as? String, author)
         assertOriginalPOICard(app, expanded: true)
         assertSharedHeader(app)
+        let heading = app.descendants(matching: .any)["experience.poi.expanded.heading"].firstMatch
+        let featuredMedia = app.buttons["experience.poi.featured-media.\(mediaID)"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 3))
+        XCTAssertFalse(heading.frame.intersection(app.frame).isEmpty,
+                       "The original place heading remains visible over the media")
+        XCTAssertTrue(featuredMedia.waitForExistence(timeout: 3))
+        XCTAssertTrue(featuredMedia.isHittable, "The selected visit is visible immediately inside the POI page")
+        // Expanded photos and videos share one full-width portrait viewport;
+        // downloading or decoding media must not resize the place page.
+        let portraitLayout = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            featuredMedia.exists && featuredMedia.frame.width > 0 &&
+                abs(featuredMedia.frame.height - featuredMedia.frame.width * 16 / 9) < 2
+        }, object: featuredMedia)
+        XCTAssertEqual(XCTWaiter.wait(for: [portraitLayout], timeout: 3), .completed,
+                       "The expanded media uses a stable portrait viewport, not a provisional square")
+        assertOverlayFrame(heading.frame, inside: featuredMedia.frame,
+                           "The original place heading overlays the media, not a separate row")
+        XCTAssertLessThan(heading.frame.maxY, featuredMedia.frame.midY,
+                          "The place heading belongs at the top of the media")
+        let stats = app.descendants(matching: .any)["experience.poi.expanded.stats"].firstMatch
+        XCTAssertTrue(stats.waitForExistence(timeout: 3))
+        assertOverlayFrame(stats.frame, inside: featuredMedia.frame,
+                           "The activity counters overlay the media, not a separate row")
+        XCTAssertGreaterThan(stats.frame.minY, featuredMedia.frame.midY,
+                             "Activity counters belong at the bottom of the media")
+        XCTAssertEqual(featuredMedia.frame.width, storyCard(app).frame.width, accuracy: 2,
+                       "The media viewport spans the expanded card width")
+        XCTAssertEqual(featuredMedia.frame.height, featuredMedia.frame.width * 16 / 9, accuracy: 2,
+                       "Photos and videos share the same portrait stage; place history follows below")
+        evidence(app, name: "POI expanded — selected media inside the original place page")
         let otherVisitor = app.buttons.matching(NSPredicate(
             format: "identifier BEGINSWITH %@ AND identifier != %@",
             "experience.poi.footprint.", "experience.poi.footprint.\(authorID)"
         )).firstMatch
-        for _ in 0..<2 {
-            if otherVisitor.exists { break }
+        for _ in 0..<4 {
+            if otherVisitor.isHittable { break }
             storyCard(app).coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.8)).press(
                 forDuration: 0.05,
                 thenDragTo: storyCard(app).coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.35))
             )
         }
-        XCTAssertTrue(otherVisitor.waitForExistence(timeout: 3),
-                      "The original expanded place includes existing visitors beyond the current story author")
+        XCTAssertTrue(otherVisitor.isHittable,
+                      "Other visitors remain reachable below the selected media in the original place scroll")
+        XCTAssertGreaterThanOrEqual(otherVisitor.frame.minY, featuredMedia.frame.maxY - 2,
+                                    "Visitor history follows below the media instead of covering it")
         XCTAssertFalse(app.buttons["maptalk.friend-story.back"].exists,
                        "Expanding the same sheet must not push a separate place route")
-        evidence(app, name: "POI expanded — original place card and other visitors")
+        evidence(app, name: "POI expanded — original visitors below the selected media")
 
         let grabber = app.buttons["Sheet Grabber"].firstMatch
         XCTAssertTrue(grabber.waitForExistence(timeout: 3))
@@ -493,6 +526,12 @@ final class FriendStoryUITests: XCTestCase {
         XCTAssertEqual(firstItem.count, 3)
         XCTAssertLessThan(stop.count, pagePosition(app).count,
                           "Several media pages at the same place share one top-level stop")
+        let compactHeading = app.descendants(matching: .any)["friend-story.poi.place-name"].firstMatch
+        let compactStats = app.descendants(matching: .any)["friend-story.poi.stats"].firstMatch
+        XCTAssertTrue(compactHeading.isHittable)
+        let compactHeadingFrame = compactHeading.frame
+        let compactStatsFrame = compactStats.frame
+        let compactCardFrame = storyCard(app).frame
         evidence(app, name: "Same place — one stop with three original media pages")
 
         swipeCard(to: firstIndex + 1, app: app)
@@ -504,6 +543,57 @@ final class FriendStoryUITests: XCTestCase {
         XCTAssertEqual(momentPosition(app)?.index, 1)
         XCTAssertEqual(momentPosition(app)?.count, 3)
         XCTAssertEqual(currentAuthor(app).value as? String, author)
+        assertFrame(compactHeading.frame, matches: compactHeadingFrame,
+                    "Same-place media paging keeps the compact place heading fixed")
+        assertFrame(compactStats.frame, matches: compactStatsFrame,
+                    "Same-place media paging keeps the compact activity counters fixed")
+        assertFrame(storyCard(app).frame, matches: compactCardFrame,
+                    "Same-place media paging does not move or resize the card shell")
+
+        expandStoryForReading(app)
+        XCTAssertEqual(currentPage(app).identifier, secondPage)
+        let expandedHeading = app.descendants(matching: .any)["experience.poi.expanded.heading"].firstMatch
+        XCTAssertTrue(expandedHeading.waitForExistence(timeout: 3))
+        XCTAssertFalse(expandedHeading.frame.intersection(app.frame).isEmpty)
+        let expandedHeadingFrame = expandedHeading.frame
+        let expandedCardFrame = storyCard(app).frame
+        swipeCard(to: firstIndex + 2, app: app)
+        XCTAssertEqual(momentPosition(app)?.index, 2)
+        XCTAssertEqual(stopPosition(app).index, stop.index)
+        assertFrame(expandedHeading.frame, matches: expandedHeadingFrame,
+                    "The expanded POI heading stays outside its media pager")
+        assertFrame(storyCard(app).frame, matches: expandedCardFrame,
+                    "The expanded place remains the same sheet while its media changes")
+        swipeCard(to: firstIndex + 1, app: app)
+        XCTAssertEqual(currentPage(app).identifier, secondPage)
+        assertFrame(expandedHeading.frame, matches: expandedHeadingFrame,
+                    "Reversing a same-place swipe preserves the original heading position")
+        let secondMediaID = try XCTUnwrap(poiMediaID(from: secondPage))
+        let featuredMedia = app.buttons["experience.poi.featured-media.\(secondMediaID)"]
+        XCTAssertTrue(featuredMedia.isHittable)
+        visibleMediaCenter(featuredMedia, app: app).tap()
+        let closeMedia = app.buttons["experience.media-lightbox.close"]
+        XCTAssertTrue(closeMedia.waitForExistence(timeout: 5))
+        closeMedia.tap()
+        waitForDetent("Expanded", app: app)
+        XCTAssertEqual(currentPage(app).identifier, secondPage,
+                       "Closing the selected media returns to the same slice, not the first one")
+        XCTAssertEqual(momentPosition(app)?.index, 1)
+        assertFrame(expandedHeading.frame, matches: expandedHeadingFrame,
+                    "Opening and closing media leaves the fixed place shell intact")
+        evidence(app, name: "Same place expanded — only media pages, heading and shell stay fixed")
+
+        let grabber = app.buttons["Sheet Grabber"].firstMatch
+        grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(
+            forDuration: 0.08,
+            thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.62)),
+            withVelocity: .slow,
+            thenHoldForDuration: 0.1
+        )
+        waitForDetent("Half screen", app: app)
+        XCTAssertEqual(currentPage(app).identifier, secondPage)
+        assertFrame(compactHeading.frame, matches: compactHeadingFrame,
+                    "Collapsing returns to the unchanged compact place heading")
 
         XCTAssertLessThan(stop.index + 1, stop.count)
         selectStop(stop.index + 1, app: app)
@@ -520,6 +610,102 @@ final class FriendStoryUITests: XCTestCase {
         XCTAssertEqual(currentAuthor(app).value as? String, author)
         waitForDetent("Half screen", app: app)
         evidence(app, name: "Same place — independent page swipe and exact stop re-entry")
+    }
+
+    @MainActor
+    func testExpandedPOIMediaPagingKeepsStableViewport() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+
+        // Own Kirkland visit precedes the restaurant and location-only
+        // footprint, not just the night-market stop. Select its first page.
+        selectPage(7, app: app)
+        XCTAssertTrue(currentPage(app).identifier.hasPrefix(
+            "friend-story.page.poi:00000000-0000-0000-0000-000000006003:"
+        ), "The regression must exercise the existing photo/video check-in, got \(currentPage(app).identifier)")
+        XCTAssertEqual(momentPosition(app)?.count, 2)
+        let firstIndex = pagePosition(app).index
+        let originalStop = stopPosition(app).index
+        expandStoryForReading(app)
+        var baseline: (media: CGRect, heading: CGRect, stats: CGRect, card: CGRect)?
+
+        func capture(_ label: String) throws {
+            XCTAssertTrue(currentPage(app).identifier.hasPrefix(
+                "friend-story.page.poi:00000000-0000-0000-0000-000000006003:"
+            ), "Media paging must stay in the same original POI check-in")
+            XCTAssertEqual(stopPosition(app).index, originalStop)
+            let mediaID = try XCTUnwrap(poiMediaID(from: currentPage(app).identifier))
+            let media = app.buttons["experience.poi.featured-media.\(mediaID)"]
+            XCTAssertTrue(media.waitForExistence(timeout: 3))
+            if let baseline {
+                assertFrame(media.frame, matches: baseline.media,
+                            "The newly selected media must immediately inherit the same viewport")
+            }
+            // Sample again after one bounded settling interval. This is a
+            // layout regression, not a claim that remote video playback is ready.
+            let sampleAfter = Date().addingTimeInterval(1)
+            let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                Date() >= sampleAfter
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed)
+            let heading = app.descendants(matching: .any)["experience.poi.expanded.heading"].firstMatch
+            let stats = app.descendants(matching: .any)["experience.poi.expanded.stats"].firstMatch
+            XCTAssertTrue(heading.waitForExistence(timeout: 3))
+            XCTAssertTrue(stats.waitForExistence(timeout: 3))
+            let hero = app.descendants(matching: .any)["experience.poi.expanded"].firstMatch
+            let frame = media.frame
+            XCTAssertEqual(frame.width, storyCard(app).frame.width, accuracy: 2,
+                           "Expanded POI media spans the card width")
+            XCTAssertEqual(frame.height, frame.width * 16 / 9, accuracy: 2,
+                           "Photo/video decoding cannot replace the fixed portrait viewport")
+            assertOverlayFrame(heading.frame, inside: frame,
+                               "The fixed place heading stays inside the media viewport")
+            XCTAssertLessThan(heading.frame.maxY, frame.midY,
+                              "The place heading stays at the top of the media")
+            assertOverlayFrame(stats.frame, inside: frame,
+                               "The fixed activity counters stay inside the media viewport")
+            XCTAssertGreaterThan(stats.frame.minY, frame.midY,
+                                 "The activity counters stay at the bottom of the media")
+            if let baseline {
+                assertFrame(frame, matches: baseline.media,
+                            "Swiping between photo and video must not resize or shift the media viewport")
+                assertFrame(heading.frame, matches: baseline.heading,
+                            "The place heading remains fixed while only its media changes")
+                assertFrame(stats.frame, matches: baseline.stats,
+                            "The overlaid activity counters remain fixed while only media changes")
+                assertFrame(storyCard(app).frame, matches: baseline.card,
+                            "The original card shell remains fixed across media pages")
+            } else {
+                baseline = (frame, heading.frame, stats.frame, storyCard(app).frame)
+            }
+            let report = """
+                \(label)
+                Layout sampled after a 1 s settling interval; playback readiness is not exposed.
+                page=\(currentPage(app).identifier)
+                media=\(frame), height/width=\(frame.height / max(frame.width, 1))
+                heading=\(heading.frame)
+                stats=\(stats.frame)
+                card=\(storyCard(app).frame)
+                Expanded POI hierarchy, including statistic positions where exposed:
+                \(hero.debugDescription)
+                """
+            print(report)
+            let attachment = XCTAttachment(string: report)
+            attachment.name = "POI geometry — \(label)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            evidence(app, name: "POI geometry — \(label)")
+        }
+
+        try capture("Photo before paging")
+        swipeCard(to: firstIndex + 1, app: app)
+        try capture("Video after forward swipe")
+        swipeCard(to: firstIndex, app: app)
+        try capture("Photo after reverse swipe")
+        swipeCard(to: firstIndex + 1, app: app)
+        try capture("Video after second forward swipe")
     }
 
     @MainActor
@@ -935,12 +1121,61 @@ final class FriendStoryUITests: XCTestCase {
     private func dragCardForward(_ next: Bool, app: XCUIApplication) {
         let card = storyCard(app)
         XCTAssertTrue(card.isHittable)
-        // The original card's title/blank header area belongs to the outer
-        // pager. Do not commandeer a photo, video or Bubble's local gestures.
+        if let mediaID = poiMediaID(from: currentPage(app).identifier) {
+            let media = app.buttons.matching(NSPredicate(
+                format: "identifier IN %@", ["friend-story.poi.media.\(mediaID)",
+                                             "experience.poi.featured-media.\(mediaID)"]
+            )).firstMatch
+            if media.exists && media.isHittable {
+                // POI titles and activity belong to a fixed place shell.
+                // Page through its media from the media itself, including at
+                // the boundary into another place or person's next update.
+                // A natural-height portrait may continue below the viewport;
+                // drag within the visible portion, not its off-screen center.
+                let visibleFrame = media.frame.intersection(card.frame).intersection(app.frame)
+                XCTAssertFalse(visibleFrame.isNull || visibleFrame.isEmpty)
+                let visibleCenterY = (visibleFrame.midY - media.frame.minY) / media.frame.height
+                media.coordinate(withNormalizedOffset: CGVector(dx: next ? 0.84 : 0.16, dy: visibleCenterY)).press(
+                    forDuration: 0.05,
+                    thenDragTo: media.coordinate(withNormalizedOffset: CGVector(dx: next ? 0.16 : 0.84, dy: visibleCenterY))
+                )
+                return
+            }
+        }
+        // Original Reels (and a place without media) still use the card pager;
+        // preserve photo, video and Bubble tap/drag ownership inside Reels.
         card.coordinate(withNormalizedOffset: CGVector(dx: next ? 0.84 : 0.16, dy: 0.15)).press(
             forDuration: 0.05,
             thenDragTo: card.coordinate(withNormalizedOffset: CGVector(dx: next ? 0.16 : 0.84, dy: 0.15))
         )
+    }
+
+    @MainActor
+    private func visibleMediaCenter(_ media: XCUIElement, app: XCUIApplication) -> XCUICoordinate {
+        let visibleFrame = media.frame.intersection(storyCard(app).frame).intersection(app.frame)
+        XCTAssertFalse(visibleFrame.isNull || visibleFrame.isEmpty)
+        return media.coordinate(withNormalizedOffset: CGVector(
+            dx: (visibleFrame.midX - media.frame.minX) / media.frame.width,
+            dy: (visibleFrame.midY - media.frame.minY) / media.frame.height
+        ))
+    }
+
+    private func assertOverlayFrame(_ overlay: CGRect, inside media: CGRect, _ message: String,
+                                    file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertGreaterThan(overlay.width, 0, message, file: file, line: line)
+        XCTAssertGreaterThan(overlay.height, 0, message, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(overlay.minX, media.minX - 2, message, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(overlay.minY, media.minY - 2, message, file: file, line: line)
+        XCTAssertLessThanOrEqual(overlay.maxX, media.maxX + 2, message, file: file, line: line)
+        XCTAssertLessThanOrEqual(overlay.maxY, media.maxY + 2, message, file: file, line: line)
+    }
+
+    private func assertFrame(_ actual: CGRect, matches expected: CGRect, _ message: String,
+                             file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(actual.minX, expected.minX, accuracy: 2, message, file: file, line: line)
+        XCTAssertEqual(actual.minY, expected.minY, accuracy: 2, message, file: file, line: line)
+        XCTAssertEqual(actual.width, expected.width, accuracy: 2, message, file: file, line: line)
+        XCTAssertEqual(actual.height, expected.height, accuracy: 2, message, file: file, line: line)
     }
 
     @MainActor

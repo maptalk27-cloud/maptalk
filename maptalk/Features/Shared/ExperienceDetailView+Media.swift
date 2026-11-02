@@ -5,6 +5,129 @@ import UIKit
 // MARK: - Media
 
 extension ExperienceDetailView {
+/// The selected check-in sits inside the original place page, without a second
+/// horizontal pager or a replacement for the place's visitor history.
+struct POIFeaturedMedia: View {
+    // The place chrome and native pager share a stable stage. Decoding a new
+    // photo/video must not change its size halfway through a swipe.
+    static let viewportAspectRatio: CGFloat = 9.0 / 16.0
+
+    let media: RatedPOI.Media
+    let accentColor: Color
+    let isPlaybackActive: Bool
+    var fillsContainer = false
+    @State private var isLightboxPresented = false
+    @State private var childPresentationID = UUID()
+    @State private var isVisible = true
+    @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
+
+    private var item: MediaDisplayItem {
+        switch media.kind {
+        case let .photo(url):
+            return .init(id: media.id, content: .photo(url))
+        case let .video(url, poster):
+            return .init(id: media.id, content: .video(url: url, poster: poster, metadata: nil))
+        }
+    }
+
+    var body: some View {
+        Button {
+            isLightboxPresented = true
+        } label: {
+            mediaViewport
+            .mask {
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .white, location: 0.02),
+                    .init(color: .white, location: 0.98),
+                    .init(color: .clear, location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Open check-in media")
+        .accessibilityIdentifier("experience.poi.featured-media.\(media.id.uuidString)")
+        .onScrollVisibilityChange(threshold: 0.15) { isVisible = $0 }
+        .onChangeCompat(of: isLightboxPresented) { presented in
+            childPresentationChanged?(childPresentationID, presented)
+        }
+        .onDisappear {
+            if !isLightboxPresented { childPresentationChanged?(childPresentationID, false) }
+        }
+        .fullScreenCover(isPresented: $isLightboxPresented) {
+            MediaLightbox(items: [item], selection: .constant(media.id),
+                          accentColor: accentColor, isPresented: $isLightboxPresented)
+                .environment(\.friendStoryPlaybackEnabled, true)
+                .environment(\.friendStoryExpectedMedia, [])
+                .environment(\.friendStoryOnMediaReady, nil)
+                .environment(\.friendStoryChildPresentationChanged, nil)
+        }
+    }
+
+    @ViewBuilder
+    private var mediaViewport: some View {
+        if fillsContainer {
+            mediaContent
+        } else {
+            mediaContent.aspectRatio(Self.viewportAspectRatio, contentMode: .fit)
+        }
+    }
+
+    private var mediaContent: some View {
+        GeometryReader { geometry in
+            // Keep the complete media centered inside the fixed stage. Wide
+            // photos/videos must not be cropped to the portrait card's shape.
+            MediaCardView(item: item, accentColor: accentColor, mode: .card,
+                isPlaybackActive: isPlaybackActive && isVisible && !isLightboxPresented,
+                usesAspectFit: true, blendsWithBackground: true)
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
+        }
+    }
+}
+
+/// A static echo of the selected media joins the title, media and statistics.
+/// Videos use their poster here, never a second playing/decoding video layer.
+struct POIMediaBackdrop: View {
+    let media: RatedPOI.Media
+
+    private var imageURL: URL? {
+        switch media.kind {
+        case let .photo(url): return url
+        case let .video(_, poster): return poster
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            if let imageURL {
+                MapImage(url: imageURL) { phase in
+                    if case let .success(image) = phase {
+                        image.resizable().scaledToFill()
+                    } else {
+                        Color.clear
+                    }
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
+                .blur(radius: 24)
+                .overlay(Color.black.opacity(0.5))
+                .mask {
+                    LinearGradient(stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .white, location: 0.12),
+                        .init(color: .white, location: 0.68),
+                        .init(color: .clear, location: 1)
+                    ], startPoint: .top, endPoint: .bottom)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 struct ExperienceMediaGallery: View {
     let items: [MediaDisplayItem]
     let accentColor: Color
@@ -265,6 +388,8 @@ struct MediaCardView: View {
     let accentColor: Color
     let mode: Mode
     var isPlaybackActive = true
+    var usesAspectFit: Bool? = nil
+    var blendsWithBackground = false
     @Environment(\.friendStoryOnMediaReady) private var onMediaReady
 
     var body: some View {
@@ -308,14 +433,16 @@ struct MediaCardView: View {
             case let .success(image):
                 image
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: usesAspectFit == true ? .fit : .fill)
                     .onAppear { onMediaReady?() }
                     .overlay {
-                        LinearGradient(
-                            colors: [.black.opacity(0.05), .black.opacity(0.35)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
+                        if !blendsWithBackground {
+                            LinearGradient(
+                                colors: [.black.opacity(0.05), .black.opacity(0.35)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        }
                     }
             case .empty:
                 ProgressView()
@@ -330,14 +457,15 @@ struct MediaCardView: View {
     }
 
     private func videoView(url: URL, poster: URL?, metadata: RealPost.Attachment.VideoMetadata?) -> some View {
-        let shouldFit = mode == .lightbox || metadata?.isStandardLandscape == false
+        let shouldFit = usesAspectFit ?? (mode == .lightbox || metadata?.isStandardLandscape == false)
         return AutoPlayVideoView(
             url: url,
             poster: poster,
             accentColor: accentColor,
             mode: mode,
             usesAspectFit: shouldFit,
-            isPlaybackActive: isPlaybackActive
+            isPlaybackActive: isPlaybackActive,
+            blendsWithBackground: blendsWithBackground
         )
     }
 
@@ -382,6 +510,7 @@ struct AutoPlayVideoView: View {
     let isMuted: Bool
     let isPlaybackActive: Bool
     let onReady: (() -> Void)?
+    let blendsWithBackground: Bool
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.friendStoryOnMediaReady) private var onMediaReady
@@ -397,7 +526,8 @@ struct AutoPlayVideoView: View {
         usesAspectFit: Bool = false,
         isMuted: Bool? = nil,
         isPlaybackActive: Bool = true,
-        onReady: (() -> Void)? = nil
+        onReady: (() -> Void)? = nil,
+        blendsWithBackground: Bool = false
     ) {
         self.url = url
         self.poster = poster
@@ -408,6 +538,7 @@ struct AutoPlayVideoView: View {
         self.isMuted = isMuted ?? (mode == .card)
         self.isPlaybackActive = isPlaybackActive
         self.onReady = onReady
+        self.blendsWithBackground = blendsWithBackground
     }
 
     var body: some View {
@@ -442,11 +573,13 @@ struct AutoPlayVideoView: View {
                     isVideoVisible = false
                 }
 
-                LinearGradient(
-                    colors: [.clear, .black.opacity(mode == .lightbox ? 0.25 : 0.35)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+                if !blendsWithBackground {
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(mode == .lightbox ? 0.25 : 0.35)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .clipped()
@@ -472,7 +605,7 @@ struct AutoPlayVideoView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(usesAspectFit ? Color.black : Color.clear)
+            .background(usesAspectFit && !blendsWithBackground ? Color.black : Color.clear)
             .clipped()
         } else {
             placeholderPoster
@@ -481,7 +614,9 @@ struct AutoPlayVideoView: View {
 
     @ViewBuilder
     private var placeholderPoster: some View {
-        if showsPlaceholderBadge {
+        if blendsWithBackground {
+            Color.clear
+        } else if showsPlaceholderBadge {
             VStack(spacing: 12) {
                 Image(systemName: "play.rectangle.fill")
                     .font(.system(size: mode == .lightbox ? 52 : 38, weight: .bold))
