@@ -25,7 +25,6 @@ struct CompactRealCard: View {
     let onCapsuleTap: ((JourneyPost) -> Void)?
 
     @State private var isLightboxPresented = false
-    @State private var directionsPresented = false
     @State private var lightboxSelection: UUID
     @State private var capsuleOverlayHeight: CGFloat = 0
     @Environment(\.friendStoryOnMediaReady) private var onMediaReady
@@ -210,21 +209,6 @@ struct CompactRealCard: View {
     private var standardTileSize: CGFloat { 88 }
 
     private var showHeader: Bool { hideHeader == false }
-
-    private var directionsDestination: MapDirectionsDestination? {
-        guard showHeader else { return nil }
-        return MapDirectionsDestination(name: "Post location", coordinate: real.center)
-    }
-
-    private var directionsButtonSize: CGFloat { 44 }
-
-    private func directionsButton(for destination: MapDirectionsDestination) -> some View {
-        PlaceDirectionsButton(destination: destination, showsTitle: false) { presented in
-            directionsPresented = presented
-        }
-        .frame(width: directionsButtonSize, height: directionsButtonSize)
-        .accessibilityIdentifier("experience.real.directions.\(real.id.uuidString)")
-    }
 
     private var lightboxItems: [MediaDisplayItem] {
         real.attachments.map { attachment in
@@ -497,7 +481,7 @@ struct CompactRealCard: View {
                     mode: ExperienceDetailView.MediaCardView.Mode.card,
                     usesAspectFit: false,
                     isMuted: false,
-                    isPlaybackActive: isPlaybackActive && !isLightboxPresented && !directionsPresented
+                    isPlaybackActive: isPlaybackActive && !isLightboxPresented
                 )
                 .frame(maxWidth: .infinity)
                 .aspectRatio(containerAspectRatio, contentMode: .fit)
@@ -518,15 +502,6 @@ struct CompactRealCard: View {
                 // stays above the video's tap target without swallowing swipes.
                 .overlay(alignment: .bottomLeading) {
                     singleVideoJourneyCapsuleOverlay
-                }
-                // Keep the visual footer pass-through and expose only this
-                // button's 44-point target above the video's tap gesture.
-                .overlay(alignment: .bottomTrailing) {
-                    if let destination = directionsDestination {
-                        directionsButton(for: destination)
-                            .padding(.trailing, singleVideoTrailingInset)
-                            .padding(.bottom, 12)
-                    }
                 }
             } else if !expectedMedia.isEmpty {
                 loadingMediaTile.aspectRatio(3.0 / 4.0, contentMode: .fit)
@@ -576,7 +551,7 @@ struct CompactRealCard: View {
             )
             .padding(.leading, singleVideoLeadingInset)
             .padding(.trailing, singleVideoTrailingInset)
-            .padding(.bottom, directionsDestination == nil ? 42 : 12 + directionsButtonSize + 8)
+            .padding(.bottom, 42)
             .allowsHitTesting(onCapsuleTap != nil)
         }
     }
@@ -627,15 +602,13 @@ struct CompactRealCard: View {
     }
 
     private var footerRow: some View {
-        HStack(spacing: 8) {
+        HStack {
             Text(real.cardDisplayDate.formatted(.relative(presentation: .named)))
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.7))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
                 .accessibilityIdentifier("experience.real.timestamp.\(real.id.uuidString)")
 
-            Spacer(minLength: 0)
+            Spacer()
 
             HStack(spacing: 10) {
                 metricsPill(
@@ -650,17 +623,6 @@ struct CompactRealCard: View {
                     text: ExperienceDetailView.formatCount(real.metrics.commentCount),
                     commentTarget: real.visibility == .privateOnly ? nil : .memory(real.id)
                 )
-            }
-
-            if let destination = directionsDestination {
-                if isSingleVideoDetail {
-                    // The live button is a separate narrow video overlay.
-                    Color.clear
-                        .frame(width: directionsButtonSize, height: directionsButtonSize)
-                        .accessibilityHidden(true)
-                } else {
-                    directionsButton(for: destination)
-                }
             }
         }
         .frame(maxWidth: .infinity)

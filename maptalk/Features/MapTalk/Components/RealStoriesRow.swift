@@ -79,6 +79,7 @@ struct RealStoriesRow: View {
     let alignTrigger: Int
     let displayMode: DisplayMode
     let isUnseen: (StoryItem) -> Bool
+    let usesLightLabels: Bool
 
     init(
         items: [StoryItem],
@@ -89,7 +90,8 @@ struct RealStoriesRow: View {
         userProvider: @escaping (UUID) -> User?,
         alignTrigger: Int,
         displayMode: DisplayMode = .people,
-        isUnseen: @escaping (StoryItem) -> Bool = { _ in false }
+        isUnseen: @escaping (StoryItem) -> Bool = { _ in false },
+        usesLightLabels: Bool = false
     ) {
         self.items = items
         self.selectedId = selectedId
@@ -100,6 +102,7 @@ struct RealStoriesRow: View {
         self.alignTrigger = alignTrigger
         self.displayMode = displayMode
         self.isUnseen = isUnseen
+        self.usesLightLabels = usesLightLabels
     }
 
     private let spacing: CGFloat = 16
@@ -144,8 +147,9 @@ struct RealStoriesRow: View {
                 realBadge(for: real, user: user, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
                 Text(realLabel(for: real, user: user))
-                    .font(.caption2.weight(.thin))
-                    .foregroundStyle(.black)
+                    .font(.caption2.weight(usesLightLabels ? .medium : .thin))
+                    .foregroundStyle(usesLightLabels ? .white : .black)
+                    .shadow(color: .black.opacity(usesLightLabels ? 0.9 : 0), radius: 2, y: 1)
                     .lineLimit(1)
                     .padding(.vertical, 2)
             }
@@ -164,8 +168,9 @@ struct RealStoriesRow: View {
                 poiBadge(for: group, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
                 Text(group.poiName)
-                    .font(.caption2.weight(.thin))
-                    .foregroundStyle(.black)
+                    .font(.caption2.weight(usesLightLabels ? .medium : .thin))
+                    .foregroundStyle(usesLightLabels ? .white : .black)
+                    .shadow(color: .black.opacity(usesLightLabels ? 0.9 : 0), radius: 2, y: 1)
                     .lineLimit(1)
                     .padding(.vertical, 2)
             }
@@ -185,8 +190,9 @@ struct RealStoriesRow: View {
                 journeyBadge(for: journey, user: user, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
                 Text(journeyLabel(for: journey, user: user))
-                    .font(.caption2.weight(.thin))
-                    .foregroundStyle(.black)
+                    .font(.caption2.weight(usesLightLabels ? .medium : .thin))
+                    .foregroundStyle(usesLightLabels ? .white : .black)
+                    .shadow(color: .black.opacity(usesLightLabels ? 0.9 : 0), radius: 2, y: 1)
                     .lineLimit(1)
                     .padding(.vertical, 2)
             }

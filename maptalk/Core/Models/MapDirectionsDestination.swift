@@ -15,11 +15,12 @@ nonisolated enum MapDirectionsProvider: String, CaseIterable, Identifiable, Send
     }
 }
 
-/// A validated destination whose display name stays inside MapTalk.
+/// The selected place's name and coordinate, never a post caption or the viewer's location.
 nonisolated struct MapDirectionsDestination: Equatable, Sendable {
     let name: String
     let latitude: Double
     let longitude: Double
+    private let searchName: String?
 
     init?(name: String, coordinate: CLLocationCoordinate2D) {
         guard coordinate.latitude.isFinite,
@@ -31,11 +32,14 @@ nonisolated struct MapDirectionsDestination: Equatable, Sendable {
 
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         self.name = trimmedName.isEmpty ? "Selected location" : trimmedName
+        self.searchName = trimmedName.isEmpty ? nil : trimmedName
         self.latitude = coordinate.latitude
         self.longitude = coordinate.longitude
     }
 
-    /// Builds a route-planning URL, leaving current location and travel mode to the map app.
+    /// Opens the place, not a route. Existing POIs don't retain provider place IDs:
+    /// Apple gets a named place card at the exact coordinate; Google gets a place
+    /// search with a coordinate hint and can show candidates for ambiguous names.
     /// Apple unified URLs are supported on iOS 18.4+ (MapTalk targets iOS 26+):
     /// https://developer.apple.com/documentation/mapkit/unified-map-urls
     /// Google universal URLs open the app when installed and otherwise the browser:
@@ -48,21 +52,41 @@ nonisolated struct MapDirectionsDestination: Equatable, Sendable {
         switch provider {
         case .appleMaps:
             components.host = "maps.apple.com"
-            components.path = "/directions"
-            components.queryItems = [URLQueryItem(name: "destination", value: coordinate)]
+            components.path = "/place"
+            components.queryItems = [
+                URLQueryItem(name: "coordinate", value: coordinate),
+                URLQueryItem(name: "name", value: name)
+            ]
         case .googleMaps:
             components.host = "www.google.com"
-            components.path = "/maps/dir/"
+            components.path = "/maps/search/"
             components.queryItems = [
                 URLQueryItem(name: "api", value: "1"),
-                URLQueryItem(name: "destination", value: coordinate)
+                URLQueryItem(name: "query", value: searchName.map { "\($0), \(coordinate)" } ?? coordinate)
             ]
         }
-        // Encode the coordinate separator as required by Google's Maps URL guide.
+        // Maps uses form-style queries: a literal '+' in a place name must not
+        // become a space. Google also requires encoded coordinate separators.
         components.percentEncodedQuery = components.percentEncodedQuery?
+            .replacingOccurrences(of: "+", with: "%2B")
             .replacingOccurrences(of: ",", with: "%2C")
 
-        // Only fixed URL components and validated finite numbers reach this point.
+        // Maps URLs have a 2,048-character limit. An unusually long custom name
+        // must still open its actual location, rather than produce a broken URL.
+        if (components.url?.absoluteString.utf8.count ?? 0) > 2_048 {
+            components.queryItems = components.queryItems?.map {
+                switch $0.name {
+                case "query": URLQueryItem(name: "query", value: coordinate)
+                case "name": URLQueryItem(name: "name", value: "Selected location")
+                default: $0
+                }
+            }
+            components.percentEncodedQuery = components.percentEncodedQuery?
+                .replacingOccurrences(of: "+", with: "%2B")
+                .replacingOccurrences(of: ",", with: "%2C")
+        }
+
+        // Names are encoded query values, never URL hosts, paths or parameters.
         return components.url!
     }
 }

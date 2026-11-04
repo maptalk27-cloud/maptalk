@@ -1,13 +1,9 @@
 import SwiftUI
 
-/// A small card action: route planning belongs to the chosen map app, not our pager.
+/// A small card action: open the landmark; navigation is a later choice in Maps.
 struct PlaceDirectionsButton: View {
     let destination: MapDirectionsDestination
-    var showsTitle = true
-    var onPresentationChanged: (Bool) -> Void = { _ in }
-
     @Environment(\.openURL) private var openURL
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
     @State private var presentationID = UUID()
     @State private var selectedDestination: MapDirectionsDestination?
@@ -25,32 +21,41 @@ struct PlaceDirectionsButton: View {
             selectedDestination = destination
             isChoosingMaps = true
         } label: {
-            ViewThatFits(in: .horizontal) {
-                if showsTitle && !dynamicTypeSize.isAccessibilitySize {
-                    Label("Directions", systemImage: "arrow.turn.up.right")
-                        .fixedSize()
-                }
-                Image(systemName: "arrow.turn.up.right")
-                    .frame(width: 44)
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.white.opacity(0.9))
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Rectangle())
+            Image(systemName: "arrow.turn.up.right")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(isOpeningMaps)
-        .accessibilityLabel("Directions to \(destination.name)")
-        .accessibilityHint("Choose Apple Maps or Google Maps")
+        .accessibilityLabel("Open \(destination.name) in Maps")
+        .accessibilityHint("View this place in Apple Maps or Google Maps")
         .accessibilityIdentifier("place.directions")
-        .confirmationDialog("Open directions", isPresented: $isChoosingMaps,
-                            titleVisibility: .visible, presenting: selectedDestination) { selected in
-            ForEach(MapDirectionsProvider.allCases) { provider in
-                Button(provider.title) { openDirections(to: selected, using: provider) }
+        .popover(isPresented: $isChoosingMaps, arrowEdge: .bottom) {
+            VStack(spacing: 0) {
+                ForEach(MapDirectionsProvider.allCases) { provider in
+                    Button {
+                        guard let selectedDestination else { return }
+                        isChoosingMaps = false
+                        openPlace(selectedDestination, using: provider)
+                    } label: {
+                        Text(provider.title)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if provider != MapDirectionsProvider.allCases.last {
+                        Divider().padding(.horizontal, 12)
+                    }
+                }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: { selected in
-            Text(selected.name)
+            .padding(6)
+            .frame(width: 184)
+            .presentationCompactAdaptation(.popover)
         }
         .alert("Couldn't open maps", isPresented: Binding(
             get: { failedProvider != nil },
@@ -62,18 +67,16 @@ struct PlaceDirectionsButton: View {
         }
         .onChangeCompat(of: hasPresentation) { presented in
             childPresentationChanged?(presentationID, presented)
-            onPresentationChanged(presented)
         }
         .onDisappear {
             childPresentationChanged?(presentationID, false)
-            onPresentationChanged(false)
         }
     }
 
-    private func openDirections(to selected: MapDirectionsDestination, using provider: MapDirectionsProvider) {
+    private func openPlace(_ selected: MapDirectionsDestination, using provider: MapDirectionsProvider) {
         isOpeningMaps = true
         openURL(selected.url(for: provider)) { accepted in
-            // Acceptance only means the system handed off the URL, not that a route exists.
+            // Acceptance only means the system handed off the URL, not that Maps found a match.
             if !accepted { failedProvider = provider }
             isOpeningMaps = false
         }

@@ -75,6 +75,38 @@ enum FriendStoryPageSelection {
     }
 }
 
+extension FriendStoryGroup {
+    func cameraFocus(for page: FriendStoryPage, previousLocationKey: String?,
+                     previousAuthorID: UUID?) -> MapStoryCameraFocus? {
+        guard page.authorID == authorID, let target = page.coordinate else { return nil }
+        // Use only this person's frozen, currently browsable feed. A remote
+        // post must not make a cluster of nearby stops look like a world tour.
+        var stops: [CLLocationCoordinate2D] = []
+        for coordinate in pages.compactMap(\.coordinate)
+            where coordinate.distance(to: target) <= 12_000 {
+            if !stops.contains(where: { $0.distance(to: coordinate) <= 25 }) {
+                stops.append(coordinate)
+            }
+        }
+        let previous = previousAuthorID == authorID ? pages.first {
+            $0.locationKey == previousLocationKey
+        }?.coordinate : nil
+        // An isolated airport/island is still a story hop. Neighborhood
+        // density chooses landing scale, not which camera animator owns it.
+        guard stops.count > 1 else {
+            return MapStoryCameraFocus(landingSpan: 20_000, previousCoordinate: previous)
+        }
+
+        // Typical spacing, not the whole city's bounding box. The median
+        // avoids one isolated stop or repeated media setting everyone's zoom.
+        let spacing = stops.map { stop in
+            stops.map { stop.distance(to: $0) }.filter { $0 > 25 }.min() ?? 0
+        }.sorted()
+        let landingSpan = min(8_000, max(800, spacing[spacing.count / 2] * 2.2))
+        return MapStoryCameraFocus(landingSpan: landingSpan, previousCoordinate: previous)
+    }
+}
+
 /// A local browsing session, never the selection/pager owned by the public map.
 @MainActor
 final class FriendStoryNavigation: ObservableObject {
@@ -126,19 +158,23 @@ final class FriendStoryNavigation: ObservableObject {
         routes.removeAll()
     }
 
+    /// A native swipe commits exactly one neighboring page from the render
+    /// that started it. Late callbacks must not overwrite a newer cursor.
     /// The lower card pager may cross an author boundary only from its edge,
     /// landing on the exact adjacent card rather than an unread/resume cursor.
     /// Explicit author selection keeps its existing resume/unread entry rules.
     @discardableResult
-    func selectPagerPage(id: String, fromAuthorID: UUID) -> Bool {
+    func selectPagerPage(id: String, fromAuthorID: UUID, fromPageID: String) -> Bool {
         guard routes.isEmpty, var session,
               session.selectedAuthorID == fromAuthorID,
+              session.currentPage?.id == fromPageID,
               let group = session.currentGroup,
               let pageIndex = session.currentPageIndex,
               let authorIndex = session.groups.firstIndex(where: { $0.authorID == fromAuthorID }) else {
             return false
         }
-        if group.pages.contains(where: { $0.id == id }) {
+        if let destinationIndex = group.pages.firstIndex(where: { $0.id == id }) {
+            guard abs(destinationIndex - pageIndex) == 1 else { return false }
             guard session.selectPage(id: id) else { return false }
         } else {
             let next = session.groups.indices.contains(authorIndex + 1)
@@ -201,8 +237,8 @@ struct FriendStoryFlow: View {
     private var isExpanded: Bool { detent == .large }
 
     static func shouldFocusPlace(isCurrentPlace: Bool, isExpanded: Bool) -> Bool {
-        // Expanded stories defer map movement. Even the current place can
-        // therefore be different from the camera behind the full-screen card.
+        // Preserve the current compact-place camera. An expanded place route
+        // explicitly requests its own framing, even for the same location.
         !isCurrentPlace || isExpanded
     }
 
@@ -224,7 +260,7 @@ struct FriendStoryFlow: View {
                         // redraws. Always return the live cursor, not `page`'s
                         // previous-render snapshot after a progress-bar tap.
                         get: { navigation.session?.currentPage?.id ?? page.id },
-                        set: { selectPagerPage($0, fromAuthorID: group.authorID) }
+                        set: { selectPagerPage($0, fromAuthorID: group.authorID, fromPageID: page.id) }
                     ),
                     viewedKeys: viewedKeys,
                     isExpanded: isExpanded,
@@ -274,8 +310,8 @@ struct FriendStoryFlow: View {
         focusPage(page)
     }
 
-    private func selectPagerPage(_ id: String, fromAuthorID: UUID) {
-        guard navigation.selectPagerPage(id: id, fromAuthorID: fromAuthorID),
+    private func selectPagerPage(_ id: String, fromAuthorID: UUID, fromPageID: String) {
+        guard navigation.selectPagerPage(id: id, fromAuthorID: fromAuthorID, fromPageID: fromPageID),
               let page = navigation.session?.currentPage else { return }
         focusPage(page)
     }

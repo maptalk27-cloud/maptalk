@@ -550,6 +550,22 @@ final class FriendStoryUITests: XCTestCase {
         assertFrame(storyCard(app).frame, matches: compactCardFrame,
                     "Same-place media paging does not move or resize the card shell")
 
+        // Reverse repeatedly after a progress-bar jump. A late native pager
+        // callback must not snap a later slice back to this stop's first page.
+        for _ in 0..<2 {
+            swipeCard(to: firstIndex + 2, app: app)
+            XCTAssertEqual(momentPosition(app)?.index, 2)
+            swipeCard(to: firstIndex + 1, app: app)
+            XCTAssertEqual(currentPage(app).identifier, secondPage)
+            assertVisiblePOIMediaMatchesPage(secondPage, app: app)
+            swipeCard(to: firstIndex, app: app)
+            XCTAssertEqual(currentPage(app).identifier, firstPage)
+            assertVisiblePOIMediaMatchesPage(firstPage, app: app)
+            swipeCard(to: firstIndex + 1, app: app)
+            XCTAssertEqual(currentPage(app).identifier, secondPage)
+            assertVisiblePOIMediaMatchesPage(secondPage, app: app)
+        }
+
         expandStoryForReading(app)
         XCTAssertEqual(currentPage(app).identifier, secondPage)
         let expandedHeading = app.descendants(matching: .any)["experience.poi.expanded.heading"].firstMatch
@@ -610,6 +626,105 @@ final class FriendStoryUITests: XCTestCase {
         XCTAssertEqual(currentAuthor(app).value as? String, author)
         waitForDetent("Half screen", app: app)
         evidence(app, name: "Same place — independent page swipe and exact stop re-entry")
+    }
+
+    @MainActor
+    func testRapidCompactPOISwipesAndAuthorBoundaryReturnKeepSelection() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+        try exerciseRapidPOISwipes(app, expanded: false)
+
+        selectPage(pagePosition(app).count - 1, app: app)
+        let lastPage = currentPage(app).identifier
+        let lastIndex = pagePosition(app).index
+        fastCardSwipeBurst([true], app: app)
+        waitForAuthorChange(from: "chengsi", app: app)
+        let nextAuthor = try XCTUnwrap(currentAuthor(app).value as? String)
+        XCTAssertEqual(pagePosition(app).index, 0)
+        XCTAssertEqual(storyCard(app).value as? String, "Compact")
+        XCTAssertFalse(app.buttons["experience.media-lightbox.close"].exists)
+
+        fastCardSwipeBurst([false], app: app)
+        waitForAuthorChange(from: nextAuthor, app: app)
+        XCTAssertEqual(currentAuthor(app).value as? String, "chengsi")
+        XCTAssertEqual(currentPage(app).identifier, lastPage)
+        XCTAssertEqual(pagePosition(app).index, lastIndex)
+        let reelID = try XCTUnwrap(UUID(uuidString: String(lastPage.dropFirst("friend-story.page.reel:".count))))
+        assertOriginalReelIdentity(reelID.uuidString, app: app)
+        XCTAssertTrue(app.descendants(matching: .any)["experience.real.author.\(reelID.uuidString)"].firstMatch.isHittable)
+        assertStorySelectionStays(pageID: lastPage, author: "chengsi", detent: "Compact", app: app)
+        evidence(app, name: "Fast compact bursts and author-boundary reversal — exact visible selection")
+    }
+
+    @MainActor
+    func testRapidExpandedPOISwipesAndReversalsKeepVisibleMediaAndDetent() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+        try exerciseRapidPOISwipes(app, expanded: true)
+        evidence(app, name: "Fast expanded POI bursts — visible media and header stay synchronized")
+    }
+
+    @MainActor
+    private func exerciseRapidPOISwipes(_ app: XCUIApplication, expanded: Bool) throws {
+        selectPage(12, app: app)
+        XCTAssertTrue(currentPage(app).identifier.hasPrefix(
+            "friend-story.page.poi:00000000-0000-0000-0000-000000006006:"
+        ))
+        let stop = stopPosition(app)
+        selectStop(stop.index, app: app)
+        let firstIndex = pagePosition(app).index
+        XCTAssertEqual(momentPosition(app)?.count, 3)
+        if expanded { expandStoryForReading(app) }
+        let detent = expanded ? "Expanded" : "Compact"
+        var pages = [currentPage(app).identifier]
+        // Record the actual fixture IDs through normal navigation, then begin
+        // bursts at the first slice. Expected results never come from whatever
+        // page the burst happened to leave selected.
+        for offset in 1...2 {
+            swipeCard(to: firstIndex + offset, app: app)
+            pages.append(currentPage(app).identifier)
+        }
+        XCTAssertEqual(Set(pages).count, 3)
+        selectStop(stop.index, app: app)
+        assertVisiblePOIMediaMatchesPage(pages[0], app: app)
+        let cardFrame = storyCard(app).frame
+
+        let bursts: [(directions: [Bool], expectedItem: Int)] = [
+            ([true, true], 2),
+            ([false, false], 0),
+            ([true, false, true, true, false], 1)
+        ]
+        for burst in bursts {
+            fastCardSwipeBurst(burst.directions, app: app)
+            let expected = pages[burst.expectedItem]
+            let selected = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "identifier == %@", expected), object: currentPage(app)
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 3), .completed,
+                           "Each full-width fast drag must select exactly one adjacent media slice")
+            XCTAssertEqual(pagePosition(app).index, firstIndex + burst.expectedItem)
+            XCTAssertEqual(momentPosition(app)?.index, burst.expectedItem)
+            XCTAssertEqual(momentPosition(app)?.count, 3)
+            XCTAssertEqual(stopPosition(app).index, stop.index)
+            XCTAssertEqual(currentAuthor(app).value as? String, "chengsi")
+            XCTAssertEqual(currentPage(app).value as? String, "chengsi")
+            XCTAssertEqual(storyCard(app).value as? String, detent)
+            XCTAssertFalse(app.buttons["experience.media-lightbox.close"].exists,
+                           "A fast media drag must never become a photo tap")
+            assertVisiblePOIMediaMatchesPage(expected, app: app)
+            assertFrame(storyCard(app).frame, matches: cardFrame,
+                        "Repeated horizontal gestures must not move or resize the sheet")
+        }
+        assertSharedHeader(app)
+        assertOriginalPOICard(app, expanded: expanded)
+        assertStorySelectionStays(pageID: pages[1], author: "chengsi", detent: detent, app: app)
+        assertVisiblePOIMediaMatchesPage(pages[1], app: app)
+        XCTAssertEqual(pagePosition(app).index, firstIndex + 1)
+        XCTAssertEqual(momentPosition(app)?.index, 1)
     }
 
     @MainActor
@@ -738,6 +853,261 @@ final class FriendStoryUITests: XCTestCase {
         close.tap()
         XCTAssertTrue(list.waitForExistence(timeout: 5))
         XCTAssertFalse(storyNavigation(app).exists)
+    }
+
+    @MainActor
+    func testCompactIntercontinentalFlightVisualReplay() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+        let canvas = app.descendants(matching: .any)["maptalk.map-canvas"].firstMatch
+
+        func arrived(id: String, near center: CameraCenter, notBefore: Date) {
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                Date() >= notBefore && self.currentPage(app).identifier == id
+                    && CameraCenter(value: canvas.value)?.isNear(center, tolerance: 0.08) == true
+            }, object: canvas)
+            XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
+            XCTAssertEqual(storyCard(app).value as? String, "Compact")
+        }
+
+        let nairobiID = "friend-story.page.reel:00000000-0000-0000-0000-000000009122"
+        let spokaneID = "friend-story.page.reel:00000000-0000-0000-0000-000000000101"
+        let nairobi = CameraCenter(latitude: -1.2921, longitude: 36.8219)
+        let spokane = CameraCenter(latitude: 47.72, longitude: -117)
+        selectPage(18, app: app)
+        arrived(id: nairobiID, near: nairobi, notBefore: Date().addingTimeInterval(6))
+        print("[GlobalFlightReplay] Nairobi -> Spokane at \(Date().timeIntervalSince1970)")
+        // Center movement finishes before the zoom. Count from the completed
+        // gesture, not before XCTest's element lookup and gesture synthesis.
+        // Record the entire 5.2 s flight plus settling before reversing.
+        swipeCard(to: 17, app: app)
+        arrived(id: spokaneID, near: spokane, notBefore: Date().addingTimeInterval(6))
+        evidence(app, name: "Intercontinental compact — Spokane arrival")
+        print("[GlobalFlightReplay] Spokane -> Nairobi at \(Date().timeIntervalSince1970)")
+        swipeCard(to: 18, app: app)
+        arrived(id: nairobiID, near: nairobi, notBefore: Date().addingTimeInterval(6))
+        evidence(app, name: "Intercontinental compact — Nairobi return")
+    }
+
+    @MainActor
+    func testCompactIntercontinentalFastReversalsKeepLatestStoryAndLanding() throws {
+        try verifyIntercontinentalReversals(delayBeforeLastSwipe: 0)
+    }
+
+    @MainActor
+    func testCompactIntercontinentalPausedReversalKeepsLatestStoryAndLanding() throws {
+        try verifyIntercontinentalReversals(delayBeforeLastSwipe: 3.2)
+    }
+
+    @MainActor
+    private func verifyIntercontinentalReversals(delayBeforeLastSwipe: TimeInterval) throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+        let canvas = app.descendants(matching: .any)["maptalk.map-canvas"].firstMatch
+        let spokaneID = "friend-story.page.reel:00000000-0000-0000-0000-000000000101"
+        let spokane = CameraCenter(latitude: 47.72, longitude: -117)
+
+        func waitForSpokane(after notBefore: Date) {
+            let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                Date() >= notBefore
+                    && self.currentPage(app).identifier == spokaneID
+                    && self.currentAuthor(app).value as? String == "chengsi"
+                    && self.storyCard(app).value as? String == "Compact"
+                    && CameraCenter(value: canvas.value)?.isNear(spokane, tolerance: 0.08) == true
+            }, object: canvas)
+            XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 10), .completed,
+                           "The final story and camera must settle on Spokane after the complete global flight")
+        }
+
+        selectPage(17, app: app)
+        waitForSpokane(after: Date().addingTimeInterval(6))
+        XCTAssertEqual(pagePosition(app).index, 17)
+        // Start at 17: 18, 17, 18, 17. Never swipe forward from 18 into another
+        // person. Cache-based gestures have no deliberate inter-swipe wait.
+        fastCardSwipeBurst([true, false, true, false], app: app,
+                          delayBeforeLastSwipe: delayBeforeLastSwipe)
+        // Measure from the LAST completed gesture. A near-center coordinate
+        // alone can appear before the 5.2-second zoom has finished landing.
+        waitForSpokane(after: Date().addingTimeInterval(6))
+        XCTAssertEqual(pagePosition(app).index, 17)
+        XCTAssertEqual(currentPage(app).identifier, spokaneID)
+        XCTAssertEqual(currentAuthor(app).value as? String, "chengsi")
+        XCTAssertEqual(storyCard(app).value as? String, "Compact")
+        XCTAssertTrue(CameraCenter(value: canvas.value)?.isNear(spokane, tolerance: 0.08) == true)
+        assertStorySelectionStays(pageID: spokaneID, author: "chengsi", detent: "Compact", app: app)
+        evidence(app, name: "Intercontinental fast reversal — final Spokane story and landing")
+    }
+
+    @MainActor
+    func testCompactGlobalFlightVisualReplay() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+
+        func settled(_ index: Int, id: String, near center: CameraCenter, label: String) {
+            XCTAssertEqual(pagePosition(app).index, index)
+            XCTAssertEqual(currentPage(app).identifier, id)
+            waitForCamera(near: center, app: app)
+            waitForDetent("Half screen", app: app)
+            XCTAssertEqual(currentAuthor(app).value as? String, "chengsi")
+            XCTAssertEqual(currentPage(app).identifier, id,
+                           "The selected card must not revert while its global flight settles")
+            XCTAssertFalse(app.buttons["experience.media-lightbox.close"].exists)
+            evidence(app, name: label)
+        }
+
+        let waikikiPage = "friend-story.page.reel:00000000-0000-0000-0000-000000009301"
+        let waikiki = CameraCenter(latitude: 21.2866, longitude: -157.8399)
+        selectPage(13, app: app)
+        settled(13, id: waikikiPage, near: waikiki, label: "Global compact 1 — Waikiki departure")
+        print("[GlobalFlightReplay] Waikiki -> Walla Walla")
+        swipeCard(to: 14, app: app)
+        settled(14, id: "friend-story.page.reel:00000000-0000-0000-0000-000000009101",
+                near: .init(latitude: 46.065, longitude: -118.343),
+                label: "Global compact 2 — Walla Walla arrival")
+        print("[GlobalFlightReplay] Walla Walla -> Waikiki")
+        swipeCard(to: 13, app: app)
+        settled(13, id: waikikiPage, near: waikiki, label: "Global compact 3 — Waikiki reverse arrival")
+        print("[GlobalFlightReplay] Waikiki -> Nairobi")
+        selectPage(18, app: app)
+        settled(18, id: "friend-story.page.reel:00000000-0000-0000-0000-000000009122",
+                near: .init(latitude: -1.2921, longitude: 36.8219),
+                label: "Global compact 4 — Nairobi arrival")
+        print("[GlobalFlightReplay] Nairobi -> previous own update")
+        swipeCard(to: 17, app: app)
+        // The live mock feed's101 is Spokane; its older profile fixture uses
+        // the same ID in Tacoma. Assert the source actually shown in this feed.
+        settled(17, id: "friend-story.page.reel:00000000-0000-0000-0000-000000000101",
+                near: .init(latitude: 47.72, longitude: -117.0),
+                label: "Global compact 5 — exact previous own update restored")
+    }
+
+    @MainActor
+    func testManualMapPanThenRegionalStoryFlightAndProfileReturnKeepCameraOwnership() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+        // Existing early own POIs: Port Townsend -> Bellingham, about 74 km.
+        // This exercises the native regional path, not a global hop or a
+        // same-place media change (which intentionally does not fly).
+        selectPage(6, app: app)
+        XCTAssertTrue(currentPage(app).identifier.hasPrefix(
+            "friend-story.page.poi:00000000-0000-0000-0000-000000006515:"
+        ))
+        let departurePage = currentPage(app).identifier
+        let departure = CameraCenter(latitude: 48.117, longitude: -122.76)
+        let destination = CameraCenter(latitude: 48.754, longitude: -122.478)
+        waitForCamera(near: departure, app: app)
+        let canvas = app.descendants(matching: .any)["maptalk.map-canvas"].firstMatch
+        let beforePan = try XCTUnwrap(CameraCenter(value: canvas.value))
+        let panStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.78, dy: 0.34))
+        let panEnd = app.coordinate(withNormalizedOffset: CGVector(dx: 0.22, dy: 0.34))
+
+        print("[MapStoryPanProbe] phase=manual-pan-before-regional-flight")
+        panStart.press(forDuration: 0.05, thenDragTo: panEnd,
+                       withVelocity: .slow, thenHoldForDuration: 0.15)
+        let moved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let camera = CameraCenter(value: canvas.value) else { return false }
+            return !camera.isNear(beforePan, tolerance: 0.002)
+        }, object: canvas)
+        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 3), .completed,
+                       "The exposed map must accept a genuine user pan while a story stays open")
+        XCTAssertEqual(currentPage(app).identifier, departurePage)
+
+        print("[MapStoryPanProbe] phase=regional-flight-after-user-pan")
+        fastCardSwipeBurst([true], app: app)
+        waitForPageChange(from: departurePage, app: app)
+        let destinationPage = currentPage(app).identifier
+        XCTAssertTrue(destinationPage.hasPrefix(
+            "friend-story.page.poi:00000000-0000-0000-0000-000000006003:"
+        ))
+        XCTAssertEqual(pagePosition(app).index, 7)
+        waitForCamera(near: destination, app: app)
+        assertVisiblePOIMediaMatchesPage(destinationPage, app: app)
+
+        print("[MapStoryPanProbe] phase=reverse-regional-flight-then-immediate-map-pan")
+        fastCardSwipeBurst([false], app: app)
+        // No intentional flight-arrival wait. XCTest may nevertheless idle
+        // before injecting this public gesture; traces distinguish that case.
+        panStart.press(forDuration: 0.05, thenDragTo: panEnd,
+                       withVelocity: .slow, thenHoldForDuration: 0.15)
+        let interrupted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let camera = CameraCenter(value: canvas.value) else { return false }
+            return abs(camera.longitude - departure.longitude) > 0.02
+        }, object: canvas)
+        XCTAssertEqual(XCTWaiter.wait(for: [interrupted], timeout: 3), .completed,
+                       "The manual pan must displace the regional flight's destination")
+        let manuallyPositioned = try XCTUnwrap(CameraCenter(value: canvas.value))
+        XCTAssertEqual(currentPage(app).identifier, departurePage)
+        let snappedBack = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let camera = CameraCenter(value: canvas.value) else { return false }
+            return abs(camera.longitude - departure.longitude) < 0.01
+        }, object: canvas)
+        snappedBack.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [snappedBack], timeout: 2), .completed,
+                       "An interrupted flight must not reclaim the map after the user pans")
+
+        print("[MapStoryPanProbe] phase=profile-open-return-after-manual-pan")
+        app.buttons["friend-story.open-author"].tap()
+        let back = app.buttons["Back"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(currentPage(app).waitForExistence(timeout: 5))
+        XCTAssertEqual(currentPage(app).identifier, departurePage)
+        let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            CameraCenter(value: canvas.value)?.isNear(manuallyPositioned, tolerance: 0.01) == true
+        }, object: canvas)
+        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed,
+                       "Profile return preserves the user's actual panned camera")
+
+        print("[MapStoryPanProbe] phase=regional-flight-after-profile-return")
+        fastCardSwipeBurst([true], app: app)
+        waitForPageChange(from: departurePage, app: app)
+        XCTAssertEqual(currentPage(app).identifier, destinationPage)
+        waitForCamera(near: destination, app: app)
+        XCTAssertEqual(currentAuthor(app).value as? String, "chengsi")
+        waitForDetent("Half screen", app: app)
+        assertVisiblePOIMediaMatchesPage(destinationPage, app: app)
+        XCTAssertFalse(app.buttons["experience.media-lightbox.close"].exists)
+        print("[MapStoryPanProbe] phase=complete")
+    }
+
+    @MainActor
+    func testImmediateBubbleReturnAfterReelSwipeRestoresSelectedDestination() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
+        XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
+        selectPage(14, app: app)
+        waitForCamera(near: .init(latitude: 46.065, longitude: -118.343), app: app)
+
+        // Open the existing Bubble as soon as the adjacent Honolulu card is
+        // selected. Do not wait for its map arrival before entering the child.
+        // XCTest may still idle automatically, so this is not a guaranteed
+        // 250 ms interruption of the native flight.
+        swipeCard(to: 13, app: app)
+        let capsule = app.buttons["Journey memories"].firstMatch
+        XCTAssertTrue(capsule.isHittable)
+        capsule.tap()
+        let back = app.buttons["maptalk.friend-story.back"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+
+        let expectedPage = "friend-story.page.reel:00000000-0000-0000-0000-000000009301"
+        XCTAssertTrue(currentPage(app).waitForExistence(timeout: 5))
+        XCTAssertEqual(currentPage(app).identifier, expectedPage)
+        XCTAssertEqual(pagePosition(app).index, 13)
+        XCTAssertEqual(currentAuthor(app).value as? String, "chengsi")
+        waitForDetent("Half screen", app: app)
+        waitForCamera(near: .init(latitude: 21.2866, longitude: -157.8399), app: app)
+        assertStorySelectionStays(pageID: expectedPage, author: "chengsi", detent: "Compact", app: app)
+        evidence(app, name: "Immediate Bubble return — selected Honolulu Reel and destination restored")
     }
 
     @MainActor
@@ -935,9 +1305,9 @@ final class FriendStoryUITests: XCTestCase {
     }
 
     @MainActor
-    private func launchDemo() -> XCUIApplication {
+    private func launchDemo(extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["--mock-data", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments = ["--mock-data", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"] + extraArguments
         app.launch()
         return app
     }
@@ -1007,6 +1377,21 @@ final class FriendStoryUITests: XCTestCase {
               let last = pageID.split(separator: ":").last,
               let mediaID = UUID(uuidString: String(last)) else { return nil }
         return mediaID.uuidString
+    }
+
+    @MainActor
+    private func assertVisiblePOIMediaMatchesPage(_ pageID: String, app: XCUIApplication) {
+        guard let mediaID = poiMediaID(from: pageID) else {
+            XCTFail("Expected a POI media page")
+            return
+        }
+        let media = app.buttons.matching(NSPredicate(
+            format: "identifier IN %@", ["friend-story.poi.media.\(mediaID)",
+                                         "experience.poi.featured-media.\(mediaID)"]
+        )).firstMatch
+        XCTAssertTrue(media.isHittable, "The actual visible media must agree with the floating progress header")
+        XCTAssertEqual(media.frame.midX, storyCard(app).frame.midX, accuracy: 2,
+                       "An offscreen cached neighbor is not the selected page")
     }
 
     @MainActor
@@ -1148,6 +1533,57 @@ final class FriendStoryUITests: XCTestCase {
             forDuration: 0.05,
             thenDragTo: card.coordinate(withNormalizedOffset: CGVector(dx: next ? 0.16 : 0.84, dy: 0.15))
         )
+    }
+
+    @MainActor
+    private func fastCardSwipeBurst(_ directions: [Bool], app: XCUIApplication,
+                                   delayBeforeLastSwipe: TimeInterval = 0) {
+        let card = storyCard(app)
+        XCTAssertTrue(card.isHittable)
+        let cardFrame = card.frame.intersection(app.frame)
+        var dragY = cardFrame.minY + cardFrame.height * 0.15
+        if let mediaID = poiMediaID(from: currentPage(app).identifier) {
+            let media = app.buttons.matching(NSPredicate(
+                format: "identifier IN %@", ["friend-story.poi.media.\(mediaID)",
+                                             "experience.poi.featured-media.\(mediaID)"]
+            )).firstMatch
+            XCTAssertTrue(media.isHittable)
+            let visible = media.frame.intersection(cardFrame)
+            XCTAssertFalse(visible.isNull || visible.isEmpty)
+            dragY = visible.midY
+        }
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let left = origin.withOffset(CGVector(dx: cardFrame.minX + cardFrame.width * 0.08 - app.frame.minX,
+                                             dy: dragY - app.frame.minY))
+        let right = origin.withOffset(CGVector(dx: cardFrame.minX + cardFrame.width * 0.92 - app.frame.minX,
+                                              dy: dragY - app.frame.minY))
+        // Cache screen coordinates so there are no page queries or deliberate
+        // settling waits between drags. XCTest still performs its own idling;
+        // this tests fast gestures, not a guaranteed sub-frame input cadence.
+        for (index, next) in directions.enumerated() {
+            // Mix a pause into the burst without blocking the app. XCTest's
+            // own idling can delay it further; native-map tests, not this UI
+            // delay, prove interruption at an exact late-animation phase.
+            if index == directions.count - 1, delayBeforeLastSwipe > 0 {
+                Thread.sleep(forTimeInterval: delayBeforeLastSwipe)
+            }
+            (next ? right : left).press(forDuration: 0.01,
+                thenDragTo: next ? left : right, withVelocity: .fast, thenHoldForDuration: 0)
+        }
+    }
+
+    @MainActor
+    private func assertStorySelectionStays(pageID: String, author: String, detent: String,
+                                          app: XCUIApplication) {
+        let reverted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            self.currentPage(app).identifier != pageID
+                || self.currentAuthor(app).value as? String != author
+                || self.storyCard(app).value as? String != detent
+                || app.buttons["experience.media-lightbox.close"].exists
+        }, object: nil)
+        reverted.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [reverted], timeout: 1.5), .completed,
+                       "A late pager callback must not revert the final page, author or sheet state")
     }
 
     @MainActor

@@ -26,6 +26,9 @@ final class PlaceDirectionsUITests: XCTestCase {
 
         let directions = app.buttons["place.directions"].firstMatch
         assertDirectionsTarget(directions, app: app)
+        XCTAssertTrue(directions.label.hasPrefix("Open "))
+        XCTAssertTrue(directions.label.hasSuffix(" in Maps"))
+        let placeName = String(directions.label.dropFirst("Open ".count).dropLast(" in Maps".count))
         directions.tap()
         assertChooser(app)
         XCTAssertFalse(app.buttons["experience.media-lightbox.close"].exists)
@@ -62,6 +65,14 @@ final class PlaceDirectionsUITests: XCTestCase {
         let maps = XCUIApplication(bundleIdentifier: "com.apple.Maps")
         XCTAssertTrue(maps.wait(for: .runningForeground, timeout: 10),
                       "Apple Maps must receive the real URL handoff")
+        // Foreground alone can still show the previous session's route for a
+        // frame. Wait for the requested place card, not just any foreground UI.
+        let requestedPlace = maps.staticTexts.matching(NSPredicate(
+            format: "identifier == 'PlaceHeaderTitle' AND label == %@", placeName)).firstMatch
+        XCTAssertTrue(requestedPlace.waitForExistence(timeout: 15))
+        // Apple's title text is not an interactive accessibility target. The
+        // optional Directions action proves we're on the place card, not a route.
+        waitUntil { maps.buttons["ActionRowItemTypeDirections"].isHittable }
         evidence(maps, "Apple Maps receives demo place destination")
         app.activate()
         XCTAssertTrue(page(app).waitForExistence(timeout: 5))
@@ -75,7 +86,39 @@ final class PlaceDirectionsUITests: XCTestCase {
     }
 
     @MainActor
-    func testReelVideoDirectionsDoNotStealPreviewOrBubbleTaps() throws {
+    func testPOIMapsOpensSelectedPlaceCard() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        let author = app.buttons["friend-story.author.AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1"]
+        XCTAssertTrue(author.waitForExistence(timeout: 8))
+        author.tap()
+        XCTAssertTrue(page(app).waitForExistence(timeout: 5))
+        let openMaps = app.buttons["place.directions"].firstMatch
+        for _ in 0..<12 {
+            if openMaps.exists { break }
+            swipeNext(app)
+        }
+        XCTAssertTrue(openMaps.isHittable)
+        let pageID = page(app).identifier
+        let placeName = String(openMaps.label.dropFirst("Open ".count).dropLast(" in Maps".count))
+        openMaps.tap()
+        XCTAssertTrue(app.buttons["Apple Maps"].waitForExistence(timeout: 3))
+        app.buttons["Apple Maps"].tap()
+        let maps = XCUIApplication(bundleIdentifier: "com.apple.Maps")
+        XCTAssertTrue(maps.wait(for: .runningForeground, timeout: 10))
+        let title = maps.staticTexts.matching(NSPredicate(
+            format: "identifier == 'PlaceHeaderTitle' AND label == %@", placeName)).firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 15))
+        waitUntil { maps.buttons["ActionRowItemTypeDirections"].isHittable }
+        evidence(maps, "Selected place card, not directions")
+        app.activate()
+        XCTAssertTrue(page(app).waitForExistence(timeout: 5))
+        XCTAssertEqual(page(app).identifier, pageID)
+        XCTAssertTrue(openMaps.isHittable)
+    }
+
+    @MainActor
+    func testReelHasNoDirectionsAndPreservesVideoPreviewAndBubble() throws {
         let app = launchDemo()
         defer { app.terminate() }
         let myMap = app.buttons["MyMap"]
@@ -88,42 +131,29 @@ final class PlaceDirectionsUITests: XCTestCase {
         record.tap()
         let pager = app.collectionViews["mymap.compact-capsule"].firstMatch
         XCTAssertTrue(pager.waitForExistence(timeout: 5))
-        let directions = app.buttons["experience.real.directions.\(id)"].firstMatch
-        assertDirectionsTarget(directions, app: app)
-        directions.tap()
-        assertChooser(app)
-        cancelChooser(app)
-        XCTAssertTrue(directions.isHittable)
-        evidence(app, "Reel compact video directions")
+        assertNoReelDirections(app)
+        evidence(app, "Reel compact video without directions")
 
         pager.coordinate(withNormalizedOffset: .init(dx: 0.75, dy: 0.45)).tap()
         let video = element("experience.real.video.\(id)", app)
         XCTAssertTrue(video.waitForExistence(timeout: 5))
-        assertDirectionsTarget(directions, app: app)
-        directions.tap()
-        assertChooser(app)
+        assertNoReelDirections(app)
         XCTAssertFalse(app.buttons["experience.media-lightbox.close"].exists)
-        cancelChooser(app)
-        evidence(app, "Reel full video directions and original Bubble")
+        evidence(app, "Reel full video and original Bubble without directions")
         video.coordinate(withNormalizedOffset: .init(dx: 0.7, dy: 0.45)).tap()
         let close = app.buttons["experience.media-lightbox.close"]
         XCTAssertTrue(close.waitForExistence(timeout: 5))
         close.tap()
         XCTAssertTrue(video.waitForExistence(timeout: 5))
         let bubble = app.buttons["Journey memories"].firstMatch
-        XCTAssertTrue(bubble.isHittable, "Directions must not cover the original Bubble control")
+        XCTAssertTrue(bubble.isHittable, "The original Bubble control must remain interactive")
+        assertNoReelDirections(app)
+    }
 
-        // This simulator has no Google Maps app: the official HTTPS URL must
-        // still hand off to the browser, without requiring an SDK or login.
-        directions.tap()
-        assertChooser(app)
-        app.buttons["Google Maps"].tap()
-        let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
-        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 10))
-        evidence(safari, "Google Maps browser fallback receives demo destination")
-        app.activate()
-        XCTAssertTrue(video.waitForExistence(timeout: 5))
-        XCTAssertTrue(directions.isHittable)
+    @MainActor private func assertNoReelDirections(_ app: XCUIApplication) {
+        XCTAssertFalse(app.buttons["place.directions"].exists)
+        XCTAssertFalse(app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "experience.real.directions.")).firstMatch.exists)
     }
 
     @MainActor private func launchDemo() -> XCUIApplication {
@@ -175,7 +205,8 @@ final class PlaceDirectionsUITests: XCTestCase {
     @MainActor private func assertChooser(_ app: XCUIApplication) {
         XCTAssertTrue(app.buttons["Apple Maps"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.buttons["Google Maps"].exists)
-        evidence(app, "Native maps provider chooser")
+        XCTAssertFalse(app.staticTexts["Open directions"].exists)
+        evidence(app, "Compact maps provider chooser")
     }
 
     @MainActor private func cancelChooser(_ app: XCUIApplication) {

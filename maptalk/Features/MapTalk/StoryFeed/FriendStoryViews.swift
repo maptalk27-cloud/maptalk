@@ -52,6 +52,7 @@ struct FriendStoriesRow: View {
     let isUnseen: (FriendStoryGroup) -> Bool
     let onSelect: (UUID) -> Void
     let alignTrigger: Int
+    var usesLightLabels: Bool = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -76,8 +77,9 @@ struct FriendStoriesRow: View {
                                 .opacity(selected ? 1 : 0.82)
 
                                 Text(user?.handle ?? "Member")
-                                    .font(.caption2.weight(.thin))
-                                    .foregroundStyle(.black)
+                                    .font(.caption2.weight(usesLightLabels ? .medium : .thin))
+                                    .foregroundStyle(usesLightLabels ? .white : .black)
+                                    .shadow(color: .black.opacity(usesLightLabels ? 0.9 : 0), radius: 2, y: 1)
                                     .lineLimit(1)
                                     .padding(.vertical, 2)
                             }

@@ -80,10 +80,73 @@ struct MapCameraViewport {
     }
 }
 
+/// Opt-in framing for the current person's nearby feed, never map search/history.
+struct MapStoryCameraFocus {
+    let landingSpan: CLLocationDistance
+    let previousCoordinate: CLLocationCoordinate2D?
+}
+
+/// App camera commands invalidate the view. MapKit's own binding echoes do
+/// not: they already describe native state, including an animation's future
+/// endpoint, and must not be issued back as another camera command.
+final class MapCameraPositionStore: ObservableObject {
+    private(set) var position: MapCameraPosition
+
+    init(_ position: MapCameraPosition = .automatic) { self.position = position }
+
+    var commandBinding: Binding<MapCameraPosition> {
+        Binding(get: { self.position }, set: { self.setCommand($0) })
+    }
+
+    func setCommand(_ position: MapCameraPosition) {
+        objectWillChange.send()
+        self.position = position
+    }
+
+    func observeNativePosition(_ position: MapCameraPosition) {
+        self.position = position
+    }
+}
+
 final class MapFlightController: ObservableObject {
     private var activeTransitionID: UUID?
+    @Published private(set) var storyFlight: MapStoryFlightRequest?
+    private var visibleRegion: MKCoordinateRegion?
+    private var storyFlightStartedAt: CFTimeInterval = 0
+    private var stagedLandingRegion: MKCoordinateRegion?
+    var isStoryFlightInProgress: Bool {
+        guard let storyFlight else { return false }
+        return CACurrentMediaTime() - storyFlightStartedAt < storyFlight.duration - 0.1
+    }
+
+    /// A child opened during flight must return to the selected post, not a
+    /// stale departure captured before MapKit's settled-camera callback.
+    /// Once settled, callers keep using the user's exact camera snapshot.
+    var pendingLandingRegion: MKCoordinateRegion? {
+        if let storyFlight,
+           CACurrentMediaTime() - storyFlightStartedAt < storyFlight.duration {
+            return storyFlight.viewport?.framed(storyFlight.destination) ?? storyFlight.destination
+        }
+        return activeTransitionID == nil ? nil : stagedLandingRegion
+    }
+
+    // Kept off published/view state: observing the live camera must not rebuild
+    // the map's cards and annotations at display refresh frequency.
+    func observeCamera(region: MKCoordinateRegion) {
+        visibleRegion = region
+    }
 
     func cancelActiveTransition() {
+        activeTransitionID = nil
+        stagedLandingRegion = nil
+        if storyFlight != nil { storyFlight = nil }
+    }
+
+    func cancelPendingCameraSteps() {
+        // positionedByUser describes the binding's last owner; it is not a
+        // fresh gesture event. Native keyframes do not reset that binding.
+        // MapKit interrupts them for actual gestures itself. Only invalidate
+        // our legacy delayed steps here, or an old pan can cancel a new flight.
         activeTransitionID = nil
     }
 
@@ -92,15 +155,99 @@ final class MapFlightController: ObservableObject {
         targetRegion: MKCoordinateRegion,
         cause: RegionChangeCause,
         viewport: MapCameraViewport? = nil,
+        storyFocus: MapStoryCameraFocus? = nil,
         cameraPosition: Binding<MapCameraPosition>,
         onRegionUpdate: @escaping (MKCoordinateRegion) -> Void
     ) {
         // A camera callback during lift/cruise contains the flight's temporary
         // wide zoom, not a zoom chosen by the user. A replacement flight must
         // land at its destination instead of preserving that intermediate span.
-        let wasTransitioning = activeTransitionID != nil
+        let isRetargetingStory = storyFlight != nil
+            && CACurrentMediaTime() - storyFlightStartedAt < (storyFlight?.duration ?? 0)
+        let wasGlobalStory = isRetargetingStory && storyFlight?.usesGlobalPlan == true
+        let wasTransitioning = activeTransitionID != nil || isRetargetingStory
         activeTransitionID = nil
 
+        if let storyFocus, let start = visibleRegion ?? currentRegion,
+           storyFocus.landingSpan.isFinite, storyFocus.landingSpan > 0 {
+            let departure = storyFocus.previousCoordinate ?? start.center
+            // Far-away first entry and crossing people belong to the same
+            // continuous story camera as swiping within one person. Keep the
+            // ordinary map/search controller below unchanged.
+            let crossesDateLine = abs(departure.longitude - targetRegion.center.longitude) > 180
+                || abs(start.center.longitude - targetRegion.center.longitude) > 180
+            let returningFromGlobe = wasGlobalStory && start.dominantSpanMeters > 500_000
+            let logicalDistance = departure.distance(to: targetRegion.center)
+            let liveDistance = start.center.distance(to: targetRegion.center)
+            if logicalDistance > 2_000_000 || liveDistance > 2_000_000
+                || crossesDateLine || returningFromGlobe,
+               !UIAccessibility.isReduceMotionEnabled {
+                storyFlightStartedAt = CACurrentMediaTime()
+                // A rapid skip can select two nearby destination posts before
+                // the camera even leaves another continent. Its remaining
+                // flight is still long, despite the short logical page hop.
+                let timingDeparture = logicalDistance <= 2_000_000 && liveDistance > 2_000_000
+                    ? start.center : departure
+                let request = MapStoryFlightRequest(destination: cityClamp(targetRegion),
+                    previousCoordinate: timingDeparture, viewport: viewport,
+                    isRetarget: isRetargetingStory, isGlobal: true)
+                withAnimation(.linear(duration: request.duration)) {
+                    storyFlight = request
+                }
+                return
+            }
+        }
+
+        if let storyFocus, let currentRegion = visibleRegion ?? currentRegion,
+           storyFocus.landingSpan.isFinite, storyFocus.landingSpan > 0,
+           abs((storyFocus.previousCoordinate?.longitude ?? targetRegion.center.longitude)
+                - targetRegion.center.longitude) <= 180,
+           abs(currentRegion.center.longitude - targetRegion.center.longitude) <= 180 {
+            let hop = storyFocus.previousCoordinate?.distance(to: targetRegion.center) ?? 0
+            let isNearby = hop <= 12_000 &&
+                (currentRegion.center.distance(to: targetRegion.center) <= 12_000
+                    || storyFocus.previousCoordinate.map { currentRegion.contains($0) } == true)
+            // Regional story hops use one native trajectory in both directions.
+            // A sheet-shifted/intermediate camera must not choose a different
+            // tempo or shortcut for the same pair of places. Globe-scale
+            // trips use the wrapped Mercator plan above with perceptual zoom.
+            let isRegionalHop = hop > 25 && hop <= 2_000_000
+                && abs(currentRegion.center.latitude) < 70
+                && abs(targetRegion.center.latitude) < 70
+            if isNearby || isRegionalHop {
+                let landingTarget = hop <= 12_000
+                    ? MKCoordinateRegion(center: targetRegion.center,
+                        latitudinalMeters: storyFocus.landingSpan,
+                        longitudinalMeters: storyFocus.landingSpan)
+                    : cityClamp(targetRegion)
+                if hop <= 25 || UIAccessibility.isReduceMotionEnabled {
+                    cancelActiveTransition()
+                    // Enter the person's neighborhood once. Same-place media
+                    // and layout changes only reframe; they do not invent a trip.
+                    let framed = viewport?.framed(landingTarget) ?? landingTarget
+                    withAnimation(smoothAnimation(duration: 0.45)) {
+                        cameraPosition.wrappedValue = .region(framed)
+                    }
+                    onRegionUpdate(framed)
+                } else {
+                    storyFlightStartedAt = CACurrentMediaTime()
+                    // The real page changes selection/annotations in this same
+                    // update. Carry the animator's explicit transaction so that
+                    // the parent cannot swallow it and apply only its endpoint.
+                    let request = MapStoryFlightRequest(destination: landingTarget,
+                        previousCoordinate: storyFocus.previousCoordinate ?? currentRegion.center,
+                        viewport: viewport, isRetarget: isRetargetingStory)
+                    withAnimation(.linear(duration: request.duration)) {
+                        storyFlight = request
+                    }
+                    // MapKit supplies the actual starting camera and owns the
+                    // animation. Its onEnd callback records the final region.
+                }
+                return
+            }
+        }
+
+        cancelActiveTransition()
         let clampedTarget = cityClamp(targetRegion)
         guard let existingRegion = currentRegion else {
             let framedTarget = viewport?.framed(clampedTarget) ?? clampedTarget
@@ -254,6 +401,8 @@ final class MapFlightController: ObservableObject {
     ) {
         let id = UUID()
         activeTransitionID = id
+        let landing = cityClamp(target)
+        stagedLandingRegion = viewport?.framed(landing) ?? landing
         let durations = tempo.durations
         let liftFraction = tempo == .cinematic ? 0.38 : 0.26
         let liftCenter = current.center.interpolated(to: target.center, fraction: liftFraction)

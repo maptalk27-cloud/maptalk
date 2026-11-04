@@ -8,8 +8,14 @@ struct MapTalkView: View {
     @StateObject private var viewModel: MapTalkViewModel
     @Environment(\.appEnv) private var environment
     @Environment(\.scenePhase) private var scenePhase
-    @State private var flightController = MapFlightController()
-    @State private var cameraPosition: MapCameraPosition = .automatic
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("maptalk.map-layer") private var mapLayer: MapTalkMapLayer = .standard
+    @StateObject private var flightController = MapFlightController()
+    @StateObject private var cameraPositionStore = MapCameraPositionStore()
+    private var cameraPosition: MapCameraPosition {
+        get { cameraPositionStore.position }
+        nonmutating set { cameraPositionStore.setCommand(newValue) }
+    }
     @State private var selectedRealId: UUID?
     @State private var selectedStoryId: UUID?
     @State private var selectedFriendFootprintID: String?
@@ -455,7 +461,15 @@ struct MapTalkView: View {
                         experiencePresentation.presentNewContent()
                     }
 
-                    Map(position: $cameraPosition, interactionModes: .all) {
+                    Map(position: Binding(get: { cameraPosition }, set: { position in
+                        // A fresh native binding write identifies an actual
+                        // map gesture. Reading positionedByUser later in camera
+                        // callbacks can instead describe a much earlier pan.
+                        if position.positionedByUser && friendStoryNavigation.isActive {
+                            flightController.cancelActiveTransition()
+                        }
+                        cameraPositionStore.observeNativePosition(position)
+                    }), interactionModes: .all) {
                         if renderedJourney == nil,
                            viewModel.isUserScope == false,
                            let friendFootprintVisibility {
@@ -524,21 +538,28 @@ struct MapTalkView: View {
                             showsSelectedReelRangeOnly: usesFriendStories && focusedJourneyHeader == nil
                         )
                     }
+                    .mapStyle(mapLayer.mapStyle)
+                    .modifier(MapStoryFlightModifier(controller: flightController, proxy: mapProxy))
                     .ignoresSafeArea()
                     .accessibilityIdentifier("maptalk.map-canvas")
                     .accessibilityValue(currentCamera.map {
                         "\($0.centerCoordinate.latitude),\($0.centerCoordinate.longitude)"
                     } ?? "")
-                    .onMapCameraChange(frequency: .continuous) { _ in
+                    .onMapCameraChange(frequency: .continuous) { context in
+                        flightController.observeCamera(region: context.region)
                         friendFootprintInteractionGate.noteCameraMotion()
                         if cameraPosition.positionedByUser {
                             viewModel.cancelPendingLocationFocus()
                             if friendStoryNavigation.isActive {
-                                flightController.cancelActiveTransition()
+                                flightController.cancelPendingCameraSteps()
                             }
                         }
                     }
                     .onMapCameraChange(frequency: .onEnd) { context in
+                        // Cancelling an old keyframe animation emits onEnd
+                        // while the replacement flight is only starting.
+                        // Do not rebuild the map around that temporary frame.
+                        guard !flightController.isStoryFlightInProgress else { return }
                         friendFootprintInteractionGate.noteCameraMotion()
                         let preservesSettledRepresentatives =
                             FriendFootprintSamplingContinuityPolicy
@@ -623,8 +644,9 @@ struct MapTalkView: View {
                             Group {
                                 if let scopedUser = viewModel.scopedUser {
                                     ProfileMapIdentityBadge(user: scopedUser)
+                                        .environment(\.colorScheme, mapLayer == .satellite ? .dark : colorScheme)
                                 } else {
-                                    MapTalkHandwrittenBadge()
+                                    MapTalkHandwrittenBadge(usesLightInk: mapLayer == .satellite)
                                 }
                             }
 
@@ -632,12 +654,13 @@ struct MapTalkView: View {
                                 HStack {
                                     Spacer()
                                     MapTalkActivityButton(
-                                        unreadCount: unreadActivityCount
+                                        unreadCount: unreadActivityCount,
+                                        usesDarkMaterial: mapLayer == .satellite
                                     ) {
                                         requestActivity()
                                     }
-                                    .padding(.trailing, 16)
                                 }
+                                .padding(.horizontal, 16)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -672,7 +695,8 @@ struct MapTalkView: View {
                                 onSelect: { authorID in
                                     openFriendStory(authorID: authorID, groups: friendGroups, geometry: geometry)
                                 },
-                                alignTrigger: reelAlignTrigger
+                                alignTrigger: reelAlignTrigger,
+                                usesLightLabels: mapLayer == .satellite
                             )
                         }
                     } else if storyItems.isEmpty == false {
@@ -696,7 +720,8 @@ struct MapTalkView: View {
                             userProvider: viewModel.user(for:),
                             alignTrigger: reelAlignTrigger,
                             displayMode: viewModel.isUserScope ? .content : .people,
-                            isUnseen: isStoryUnseen
+                            isUnseen: isStoryUnseen,
+                            usesLightLabels: mapLayer == .satellite
                         )
                     }
                 }
@@ -705,20 +730,20 @@ struct MapTalkView: View {
                 .padding(.bottom, MapTalkTopChromeLayout.bottomPadding)
                 .frame(maxWidth: .infinity, alignment: .top)
                 .background {
-                    Rectangle()
-                        .fill(.ultraThinMaterial.opacity(0.65))
-                        .overlay(Color.white.opacity(0.06))
-                        .mask {
-                            LinearGradient(
-                                colors: [
-                                    .white,
-                                    .white,
-                                    .white.opacity(0)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        }
+                    // Satellite imagery stays unobscured. Contrast belongs to
+                    // the labels and local controls, not a map-wide white veil.
+                    if mapLayer == .standard {
+                        Rectangle()
+                            .fill(.ultraThinMaterial.opacity(0.65))
+                            .overlay(Color.white.opacity(0.06))
+                            .mask {
+                                LinearGradient(
+                                    colors: [.white, .white, .white.opacity(0)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            }
+                    }
                 }
                 .ignoresSafeArea(edges: .top)
                 .opacity(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded) ? 1 : 0)
@@ -732,6 +757,7 @@ struct MapTalkView: View {
                         HStack {
                             Spacer()
                             MapTalkControls(
+                                mapLayer: $mapLayer,
                                 onTapLocate: {
                                     finishFriendStory(restoreMap: false)
                                     if let region = currentRegion,
@@ -1035,7 +1061,7 @@ struct MapTalkView: View {
                     currentRegion: currentRegion,
                     targetRegion: newRegion,
                     cause: cause,
-                    cameraPosition: $cameraPosition
+                    cameraPosition: cameraPositionStore.commandBinding
                 ) { updated in
                     currentRegion = updated
                 }
@@ -1280,7 +1306,10 @@ private extension MapTalkView {
     }
 
     func friendStoryMapSnapshot() -> FriendStoryNavigation.MapSnapshot {
-        .init(camera: currentCamera, region: currentRegion)
+        if let landing = flightController.pendingLandingRegion {
+            return .init(camera: nil, region: landing)
+        }
+        return .init(camera: currentCamera, region: currentRegion)
     }
 
     func restoreFriendStoryCamera(_ snapshot: FriendStoryNavigation.MapSnapshot) {
@@ -1318,6 +1347,7 @@ private extension MapTalkView {
 
     func finishFriendStory(restoreMap: Bool) {
         guard friendStoryNavigation.isActive || friendStoryNavigation.origin != nil else { return }
+        flightController.cancelActiveTransition()
         if restoreMap, let origin = friendStoryNavigation.origin { restoreFriendStoryCamera(origin) }
         friendStoryNavigation.clear()
         experiencePresentation.configureCompactDetent(.fraction(ControlsLayout.previewFraction))
@@ -1399,18 +1429,32 @@ private extension MapTalkView {
         }
         guard friendStoryNavigation.needsMapFocus(locationKey: locationKey,
             viewportSize: geometry.size, authorID: page.authorID) else { return }
+        let localFocus = friendStoryNavigation.session?.currentGroup?.cameraFocus(for: page,
+            previousLocationKey: friendStoryNavigation.lastLocationKey,
+            previousAuthorID: friendStoryNavigation.lastFocusedAuthorID)
+        let previousCoordinate = friendStoryNavigation.session?.groups
+            .first(where: { $0.authorID == friendStoryNavigation.lastFocusedAuthorID })?
+            .pages.first(where: { $0.locationKey == friendStoryNavigation.lastLocationKey })?.coordinate
+        let storyFocus = localFocus.map {
+            MapStoryCameraFocus(landingSpan: $0.landingSpan,
+                previousCoordinate: $0.previousCoordinate ?? previousCoordinate)
+        }
         // Both detents share one selection and camera. Switching a post while
         // expanded must not leave the map at the previous post on return.
         friendStoryNavigation.lastLocationKey = locationKey
         friendStoryNavigation.lastViewportSize = geometry.size
         friendStoryNavigation.lastFocusedAuthorID = page.authorID
         switch page.content {
-        case let .reel(reel): focusFriendStoryContent(.real(reel, viewModel.user(for: reel.userId)), geometry: geometry)
-        case let .poi(place, _, _): focusFriendStoryContent(.poi(place), geometry: geometry)
+        case let .reel(reel):
+            focusFriendStoryContent(.real(reel, viewModel.user(for: reel.userId)),
+                geometry: geometry, storyFocus: storyFocus)
+        case let .poi(place, _, _):
+            focusFriendStoryContent(.poi(place), geometry: geometry, storyFocus: storyFocus)
         }
     }
 
-    func focusFriendStoryContent(_ mode: ExperienceDetailView.Mode, geometry: GeometryProxy) {
+    func focusFriendStoryContent(_ mode: ExperienceDetailView.Mode, geometry: GeometryProxy,
+                                 storyFocus: MapStoryCameraFocus? = nil) {
         viewModel.cancelPendingLocationFocus()
         let region: MKCoordinateRegion
         let cause: RegionChangeCause
@@ -1432,12 +1476,19 @@ private extension MapTalkView {
             currentRegion = target.region
             return
         }
-        let viewport = MapCameraViewport(size: geometry.size,
+        // The Map ignores safe areas, while this outer GeometryReader does
+        // not. Use the full canvas before subtracting chrome; otherwise the
+        // same safe areas shrink the useful map twice and inflate lift height.
+        let canvasSize = CGSize(
+            width: geometry.size.width + geometry.safeAreaInsets.leading + geometry.safeAreaInsets.trailing,
+            height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom)
+        let viewport = MapCameraViewport(size: canvasSize,
             topInset: MapTalkTopChromeLayout.height(safeAreaTop: geometry.safeAreaInsets.top, showsStories: true),
             bottomInset: geometry.size.height * ControlsLayout.previewFraction
                 + geometry.safeAreaInsets.bottom + FriendStoryLayout.floatingHeight)
         flightController.handleRegionChange(currentRegion: currentRegion, targetRegion: region,
-            cause: cause, viewport: viewport, cameraPosition: $cameraPosition) { currentRegion = $0 }
+            cause: cause, viewport: viewport, storyFocus: storyFocus,
+            cameraPosition: cameraPositionStore.commandBinding) { currentRegion = $0 }
     }
 
     func searchNearbyPlaces(_ query: String) async -> MapTalkNearbyPlaceSearchResult {
@@ -1883,6 +1934,8 @@ private extension MapTalkView {
 }
 
 private struct MapTalkHandwrittenBadge: View {
+    let usesLightInk: Bool
+
     private var handwritingFont: Font {
         if UIFont(name: "SavoyeLetPlain", size: 44) != nil {
             return .custom("SavoyeLetPlain", size: 44)
@@ -1898,7 +1951,7 @@ private struct MapTalkHandwrittenBadge: View {
 
     private var inkGradient: LinearGradient {
         LinearGradient(
-            colors: [
+            colors: usesLightInk ? [.white, .white.opacity(0.9), .white] : [
                 Color.black.opacity(0.95),
                 Color(red: 0.1, green: 0.1, blue: 0.1).opacity(0.82),
                 Color.black.opacity(0.92)
@@ -1913,11 +1966,14 @@ private struct MapTalkHandwrittenBadge: View {
             .font(handwritingFont.weight(.bold))
             .kerning(-0.8)
             .foregroundStyle(inkGradient)
+            .shadow(color: .black.opacity(usesLightInk ? 0.7 : 0), radius: 3, y: 1)
     }
 }
 
 private struct MapTalkActivityButton: View {
+    @Environment(\.colorScheme) private var colorScheme
     let unreadCount: Int
+    let usesDarkMaterial: Bool
     let action: () -> Void
 
     private var badgeText: String {
@@ -1929,13 +1985,14 @@ private struct MapTalkActivityButton: View {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: unreadCount > 0 ? "bell.fill" : "bell")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.black.opacity(0.84))
+                    .foregroundStyle(usesDarkMaterial ? Color.white.opacity(0.94) : Color.black.opacity(0.84))
                     .frame(width: 40, height: 40)
                     .background(.ultraThinMaterial, in: Circle())
                     .overlay {
                         Circle()
-                            .stroke(Color.white.opacity(0.48), lineWidth: 1)
+                            .stroke(Color.white.opacity(usesDarkMaterial ? 0.18 : 0.48), lineWidth: 1)
                     }
+                    .environment(\.colorScheme, usesDarkMaterial ? .dark : colorScheme)
 
                 if unreadCount > 0 {
                     Text(badgeText)
@@ -2026,6 +2083,7 @@ private struct ProfileMapIdentityBadge: View {
 }
 
 private struct MapTalkControls: View {
+    @Binding var mapLayer: MapTalkMapLayer
     let onTapLocate: () -> Void
     let onTapPlace: () -> Void
     let onTapReel: () -> Void
@@ -2033,8 +2091,14 @@ private struct MapTalkControls: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 12) {
-            LocateButton(action: onTapLocate)
-                .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+            if showsPublishActions {
+                MapNavigationControls(selection: $mapLayer, onLocate: onTapLocate)
+                    .frame(width: ControlsLayout.controlButtonSize)
+            } else {
+                LocateButton(action: onTapLocate)
+                    .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+                    .accessibilityIdentifier("maptalk.locate")
+            }
             if showsPublishActions {
                 PlacePublishButton(action: onTapPlace)
                     .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)

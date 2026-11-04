@@ -5,12 +5,21 @@ import UIKit
 struct AppRouter: View {
     @Environment(\.appEnv) private var environment
     @State private var selectedTab = 0
+    @AppStorage("maptalk.map-layer") private var mapLayer: MapTalkMapLayer = .standard
     @State private var tabAvatarURL: URL?
     @State private var tabAvatar: UIImage?
+
+    private var usesSatelliteChrome: Bool {
+        selectedTab == 0 && mapLayer == .satellite
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {
             MapTalkView(viewModel: .init(environment: environment))
+                // Adapt only the native bar, not the map's cards or publishers.
+                .tint(.black)
+                .toolbarColorScheme(usesSatelliteChrome ? .dark : nil, for: .tabBar)
+                .toolbarBackgroundVisibility(usesSatelliteChrome ? .visible : .automatic, for: .tabBar)
                 .tabItem { Label("MapTalk", systemImage: "map") }
                 .tag(0)
 
@@ -47,7 +56,7 @@ struct AppRouter: View {
                 }
                 .tag(3)
         }
-        .tint(.black)
+        .tint(usesSatelliteChrome ? .white : .black)
         .onReceive(environment.backend?.$user.eraseToAnyPublisher()
             ?? Just(environment.currentUser).eraseToAnyPublisher()) { user in
             guard tabAvatarURL != user.avatarURL else { return }
