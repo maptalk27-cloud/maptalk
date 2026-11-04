@@ -325,6 +325,7 @@ struct FriendStoryContentView: View {
             } else {
                 nativePostPager(mediaOnly: true)
                     .overlay { FriendStoryPOIChrome(place: place) }
+                    .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("friend-story.poi.preview")
             }
@@ -560,15 +561,14 @@ private struct FriendStoryPOIPreview: View {
                         isPlaybackActive: isPlaybackActive && !isLightboxPresented)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
-                        .overlay {
-                            if showsPlaceChrome { FriendStoryPOIChrome(place: place) }
-                        }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Open check-in media")
             .accessibilityIdentifier("friend-story.poi.media.\(media.id.uuidString)")
+            // The route button is a sibling of the media button, never nested inside it.
+            if showsPlaceChrome { FriendStoryPOIChrome(place: place) }
         }
         .ignoresSafeArea(.container, edges: .bottom)
         .accessibilityElement(children: .contain)
@@ -596,10 +596,12 @@ private struct FriendStoryPOIChrome: View {
 
     var body: some View {
         Color.clear
+            .allowsHitTesting(false)
             .overlay(alignment: .top) {
                 LinearGradient(colors: [.black.opacity(0.72), .clear],
                     startPoint: .top, endPoint: .bottom)
                     .frame(height: 140)
+                    .allowsHitTesting(false)
             }
             .overlay(alignment: .topLeading) {
                 ExperienceDetailView.POIPlaceHeading(
@@ -609,11 +611,13 @@ private struct FriendStoryPOIChrome: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 28)
                     .accessibilityIdentifier("friend-story.poi.place-name")
+                    .allowsHitTesting(false)
             }
             .overlay(alignment: .bottom) {
                 LinearGradient(colors: [.clear, .black.opacity(0.5)],
                     startPoint: .top, endPoint: .bottom)
                     .frame(height: 100)
+                    .allowsHitTesting(false)
             }
             .overlay(alignment: .bottomTrailing) {
                 ExperienceDetailView.POIHeroStatsRow(model: .init(
@@ -621,13 +625,14 @@ private struct FriendStoryPOIChrome: View {
                     comments: place.comments.count,
                     favorites: place.favoritesCount,
                     endorsements: place.endorsements,
-                    commentTarget: .place(place.id)))
+                    commentTarget: .place(place.id)),
+                    directionsDestination: MapDirectionsDestination(name: place.poi.name,
+                                                                     coordinate: place.poi.coordinate))
                     .padding(.horizontal, 20)
                     .padding(.bottom, 32)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("friend-story.poi.stats")
             }
-            .allowsHitTesting(false)
     }
 }
 

@@ -95,6 +95,7 @@ struct ExperienceDetailView: View {
         let name: String
         let category: POICategory
         let endorsementBadges: [EndorsementBadge]
+        var directionsDestination: MapDirectionsDestination? = nil
     }
 
     struct POIStatsModel {

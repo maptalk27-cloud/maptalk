@@ -22,6 +22,8 @@ struct POIStorySelectionTests {
 
         #expect(data.poiInfo?.name == place.poi.name)
         #expect(data.poiInfo?.category == place.poi.category)
+        #expect(data.poiInfo?.directionsDestination == MapDirectionsDestination(
+            name: place.poi.name, coordinate: place.poi.coordinate))
         #expect(detail.poi?.poi.coordinate.latitude == place.poi.coordinate.latitude)
         #expect(detail.poi?.poi.coordinate.longitude == place.poi.coordinate.longitude)
         #expect(data.poiStats?.checkIns == 2)
@@ -96,6 +98,8 @@ struct POIStorySelectionTests {
         let data = detail.contentData(for: .poi(place))
 
         #expect(detail.expandedPOIMedia == selectedMedia)
+        #expect(data.poiInfo?.directionsDestination == MapDirectionsDestination(
+            name: place.poi.name, coordinate: place.poi.coordinate))
         #expect(detail.poiStorySelection == nil)
         #expect(detail.poiStoryCheckIns(for: place) == visits)
         #expect(Set(data.engagement.storyContributors.map(\.userId)) == Set([alice, bob]))

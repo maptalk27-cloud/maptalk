@@ -131,7 +131,9 @@ extension ExperienceDetailView {
                 poiInfo: POIInfoModel(
                     name: rated.poi.name,
                     category: rated.poi.category,
-                    endorsementBadges: endorsementBadges
+                    endorsementBadges: endorsementBadges,
+                    directionsDestination: MapDirectionsDestination(name: rated.poi.name,
+                                                                     coordinate: rated.poi.coordinate)
                 ),
                 poiStats: POIStatsModel(
                     checkIns: rated.checkInPersonCount,

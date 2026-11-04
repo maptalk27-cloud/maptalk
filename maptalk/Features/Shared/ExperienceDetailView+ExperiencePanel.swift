@@ -261,7 +261,7 @@ struct POICollapsedHero: View {
             Spacer(minLength: 0)
 
             if let stats {
-                POIHeroStatsRow(model: stats)
+                POIHeroStatsRow(model: stats, directionsDestination: info.directionsDestination)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("experience.poi.collapsed.stats")
             }
@@ -309,7 +309,7 @@ struct POIExpandedHero: View {
                     }
 
                     if let stats {
-                        POIHeroStatsRow(model: stats)
+                        POIHeroStatsRow(model: stats, directionsDestination: info.directionsDestination)
                     }
                 }
                 .padding(.top, POIHeroLayout.headerTopPadding)
@@ -359,10 +359,9 @@ struct POIExpandedHero: View {
         }
         .overlay(alignment: .bottomTrailing) {
             if let stats {
-                POIHeroStatsRow(model: stats)
+                POIHeroStatsRow(model: stats, directionsDestination: info.directionsDestination)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 32)
-                    .allowsHitTesting(false)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("experience.poi.expanded.stats")
             }
@@ -381,13 +380,20 @@ struct POIExpandedHero: View {
 }
 struct POIHeroStatsRow: View {
     let model: ExperienceDetailView.POIStatsModel
+    var directionsDestination: MapDirectionsDestination? = nil
 
     var body: some View {
         HStack(spacing: 8) {
+            if let directionsDestination {
+                PlaceDirectionsButton(destination: directionsDestination)
+            }
             Spacer(minLength: 0)
             POIStatPill(icon: "shoeprints.fill", value: model.checkIns)
+                .allowsHitTesting(false)
             POIStatPill(icon: "text.bubble.fill", value: model.comments, commentTarget: model.commentTarget)
+                .allowsHitTesting(false)
             POIStatPill(icon: "star.fill", value: model.favorites)
+                .allowsHitTesting(false)
         }
         .padding(.horizontal, 2)
     }
