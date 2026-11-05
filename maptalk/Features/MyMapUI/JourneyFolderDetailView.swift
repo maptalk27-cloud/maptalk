@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// A Collection is only a named, private folder of memories. MyMap remains
+/// A Highlight is a named, private collection of memories. MyMap remains
 /// the one place to find and add memories, so this view stays deliberately
 /// quiet: browse, add, remove, rename, or delete the folder.
 @MainActor
@@ -39,15 +39,15 @@ struct JourneyFolderDetailView: View {
 
     var body: some View {
         List {
-            if memberRecords.isEmpty {
-                ContentUnavailableView(
-                    "No memories yet",
-                    systemImage: "folder",
-                    description: Text("Tap + to add from MyMap.")
-                )
-                .listRowSeparator(.hidden)
-            } else {
-                Section {
+            Section {
+                if memberRecords.isEmpty {
+                    ContentUnavailableView(
+                        "No memories yet",
+                        systemImage: "rectangle.stack",
+                        description: Text("Tap + to add from MyMap.")
+                    )
+                    .listRowSeparator(.hidden)
+                } else {
                     ForEach(memberRecords) { record in
                         Button {
                             onOpenMemory(record)
@@ -64,19 +64,25 @@ struct JourneyFolderDetailView: View {
                                 Label("Remove", systemImage: "trash")
                             }
                             .tint(.red)
-                            .accessibilityLabel("Remove from collection")
+                            .accessibilityLabel("Remove from highlight")
                         }
                         .accessibilityIdentifier("mymap.collection-memory.\(record.id.uuidString)")
                     }
-                } header: {
-                    Text(memoryCountLabel)
-                        .textCase(nil)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
                 }
+            } header: {
+                HStack {
+                    Text(memoryCountLabel)
+                    Spacer()
+                    Label("Only you", systemImage: "lock")
+                }
+                .textCase(nil)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color(.systemBackground))
         .accessibilityIdentifier("mymap.collection-list.\(workingFolder.id.uuidString)")
         .navigationTitle(workingFolder.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -101,20 +107,21 @@ struct JourneyFolderDetailView: View {
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
-                .accessibilityLabel("Collection options")
+                .accessibilityLabel("Highlight options")
             }
         }
-        .alert("Rename collection", isPresented: $isRenaming) {
-            TextField("Collection name", text: $renameDraft)
+        .alert("Rename highlight", isPresented: $isRenaming) {
+            TextField("Highlight name", text: $renameDraft)
             Button("Cancel", role: .cancel) {}
             Button("Save", action: rename)
+                .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .confirmationDialog(
-            "Delete this collection?",
+            "Delete this highlight?",
             isPresented: $isConfirmingDeletion,
             titleVisibility: .visible
         ) {
-            Button("Delete collection", role: .destructive) {
+            Button("Delete highlight", role: .destructive) {
                 delete(workingFolder.id)
             }
         } message: {
@@ -187,40 +194,36 @@ struct JourneyFolderDetailView: View {
 }
 
 @MainActor
-private struct JourneyFolderCover: View {
+private struct PrivateHighlightCover: View {
     let records: [UserMapRecord]
     let size: CGFloat
 
     var body: some View {
         ZStack {
-            if records.isEmpty {
-                Image(systemName: "folder.fill")
-                    .font(.system(size: size * 0.35, weight: .semibold))
-                    .foregroundStyle(Color(.secondaryLabel))
-                    .frame(width: size, height: size)
-                    .background(Color(.tertiarySystemFill))
+            if let record = records.first {
+                MemoryThumbnail(
+                    record: record,
+                    size: size - 8,
+                    cornerRadius: (size - 8) / 2,
+                    showsKindBadge: false
+                )
             } else {
-                Color(.tertiarySystemFill)
-
-                ForEach(Array(records.prefix(4).enumerated()), id: \.element.id) { index, record in
-                    MemoryThumbnail(record: record, size: size * 0.64, cornerRadius: size * 0.16)
-                        .offset(
-                            x: index.isMultiple(of: 2) ? -size * 0.16 : size * 0.16,
-                            y: index < 2 ? -size * 0.16 : size * 0.16
-                        )
-                }
+                Image(systemName: "rectangle.stack")
+                    .font(.system(size: size * 0.3, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: size - 8, height: size - 8)
+                    .background(Color(.tertiarySystemFill), in: Circle())
             }
         }
         .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(Color.black.opacity(0.08), lineWidth: 1)
+            Circle().strokeBorder(Color(.separator).opacity(0.45), lineWidth: 1)
         }
+        .accessibilityHidden(true)
     }
 }
 
-/// The private collection directory reached from MyMap's folder button.
+/// The private Highlights directory reached from MyMap.
 /// It is deliberately just a directory: selecting and adding memories stays
 /// in the main MyMap list, where search and filters already live.
 @MainActor
@@ -245,9 +248,9 @@ struct JourneyCollectionsSheet: View {
             List {
                 if folders.isEmpty {
                     ContentUnavailableView(
-                        "No collections yet",
-                        systemImage: "folder",
-                        description: Text("Tap + to make a folder.")
+                        "No highlights yet",
+                        systemImage: "rectangle.stack",
+                        description: Text("Keep memories together. Only you can see your highlights.")
                     )
                     .listRowSeparator(.hidden)
                 } else {
@@ -256,7 +259,10 @@ struct JourneyCollectionsSheet: View {
                     }
                 }
             }
-            .navigationTitle("Collections")
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color(.systemBackground))
+            .navigationTitle("Highlights")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -269,12 +275,12 @@ struct JourneyCollectionsSheet: View {
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("New collection")
+                    .accessibilityLabel("New highlight")
                     .accessibilityIdentifier("mymap.collections-add")
                 }
             }
-            .alert("New collection", isPresented: $isCreatingCollection) {
-                TextField("Collection name", text: $newCollectionTitle)
+            .alert("New highlight", isPresented: $isCreatingCollection) {
+                TextField("Highlight name", text: $newCollectionTitle)
                 Button("Cancel", role: .cancel) {}
                 Button("Create", action: createCollection)
             }
@@ -303,7 +309,7 @@ struct JourneyCollectionsSheet: View {
 
     private func createCollection() {
         let title = newCollectionTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let folder = onCreate(title.isEmpty ? "Untitled Collection" : title) else { return }
+        guard let folder = onCreate(title.isEmpty ? "Untitled Highlight" : title) else { return }
         selectedFolder = folder
     }
 
@@ -312,7 +318,7 @@ struct JourneyCollectionsSheet: View {
             selectedFolder = folder
         } label: {
             HStack(spacing: 12) {
-                JourneyFolderCover(records: records(for: folder), size: 50)
+                PrivateHighlightCover(records: records(for: folder), size: 60)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(folder.title)
@@ -320,7 +326,7 @@ struct JourneyCollectionsSheet: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
-                    Text(memoryCountLabel(for: folder))
+                    Text("\(memoryCountLabel(for: folder)) · \(Image(systemName: "lock")) Only you")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -331,6 +337,7 @@ struct JourneyCollectionsSheet: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -341,10 +348,10 @@ struct JourneyCollectionsSheet: View {
                 Label("Delete", systemImage: "trash")
             }
             .tint(.red)
-            .accessibilityLabel("Delete collection")
+            .accessibilityLabel("Delete highlight")
         }
         .accessibilityLabel("Open \(folder.title)")
-        .accessibilityValue(memoryCountLabel(for: folder))
+        .accessibilityValue("\(memoryCountLabel(for: folder)), Only you")
         .accessibilityIdentifier("mymap.collection-folder.\(folder.id.uuidString)")
     }
 
@@ -390,8 +397,8 @@ struct JourneyFolderPickerSheet: View {
             List {
                 if folders.isEmpty {
                     ContentUnavailableView(
-                        "No collections yet",
-                        systemImage: "folder",
+                        "No highlights yet",
+                        systemImage: "rectangle.stack",
                         description: Text("Tap + to make one.")
                     )
                     .listRowSeparator(.hidden)
@@ -401,7 +408,10 @@ struct JourneyFolderPickerSheet: View {
                     }
                 }
             }
-            .navigationTitle("Add to collection")
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color(.systemBackground))
+            .navigationTitle("Add to highlight")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -412,14 +422,14 @@ struct JourneyFolderPickerSheet: View {
                         newCollectionTitle = ""
                         isCreatingCollection = true
                     } label: {
-                        Image(systemName: "folder.badge.plus")
+                        Image(systemName: "plus")
                     }
-                    .accessibilityLabel("New collection")
+                    .accessibilityLabel("New highlight")
                     .accessibilityIdentifier("mymap.picker-new-collection")
                 }
             }
-            .alert("New collection", isPresented: $isCreatingCollection) {
-                TextField("Collection name", text: $newCollectionTitle)
+            .alert("New highlight", isPresented: $isCreatingCollection) {
+                TextField("Highlight name", text: $newCollectionTitle)
                 Button("Cancel", role: .cancel) {}
                 Button("Create", action: createCollection)
             }
@@ -435,7 +445,7 @@ struct JourneyFolderPickerSheet: View {
             dismiss()
         } label: {
             HStack(spacing: 12) {
-                Image(systemName: "folder.fill")
+                Image(systemName: "rectangle.stack")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .frame(width: 24)
@@ -462,7 +472,7 @@ struct JourneyFolderPickerSheet: View {
 
     private func createCollection() {
         let title = newCollectionTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        onCreate(title.isEmpty ? "Untitled Collection" : title)
+        onCreate(title.isEmpty ? "Untitled Highlight" : title)
         dismiss()
     }
 

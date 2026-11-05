@@ -373,7 +373,7 @@ final class maptalkUITests: XCTestCase {
         ]
         XCTAssertTrue(alreadyAdded.waitForExistence(timeout: 3))
         XCTAssertFalse(alreadyAdded.isEnabled)
-        XCTAssertEqual(alreadyAdded.value as? String, "Already in collection")
+        XCTAssertEqual(alreadyAdded.value as? String, "Already in highlight")
 
         app.buttons["mymap.cancel-selection"].tap()
         XCTAssertTrue(collectionList.waitForExistence(timeout: 5))
@@ -410,7 +410,7 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(collectionsSheet.waitForExistence(timeout: 5))
 
         app.buttons["mymap.collections-add"].tap()
-        let newCollection = app.alerts["New collection"]
+        let newCollection = app.alerts["New highlight"]
         XCTAssertTrue(newCollection.waitForExistence(timeout: 5))
 
         newCollection.buttons["Cancel"].tap()
@@ -419,7 +419,7 @@ final class maptalkUITests: XCTestCase {
         app.buttons["mymap.collections-add"].tap()
         XCTAssertTrue(newCollection.waitForExistence(timeout: 5))
 
-        let nameField = newCollection.textFields["Collection name"]
+        let nameField = newCollection.textFields["Highlight name"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 3))
         nameField.tap()
         nameField.typeText("Weekend plans")
@@ -444,7 +444,7 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(record.waitForExistence(timeout: 5))
         record.swipeRight()
 
-        XCTAssertFalse(app.buttons["Add to collection"].exists)
+        XCTAssertFalse(app.buttons["Add to highlight"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["mymap.collection-picker"].exists)
         XCTAssertTrue(select.exists)
         XCTAssertTrue(app.textFields["Search memories"].exists)
@@ -548,7 +548,7 @@ final class maptalkUITests: XCTestCase {
         addSelected.tap()
         let picker = app.descendants(matching: .any)["mymap.collection-picker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 3))
-        app.navigationBars["Add to collection"].buttons["Cancel"].tap()
+        app.navigationBars["Add to highlight"].buttons["Cancel"].tap()
 
         XCTAssertTrue(addSelected.waitForExistence(timeout: 3))
         XCTAssertEqual(addSelected.value as? String, "2 selected")
@@ -594,13 +594,13 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(picker.waitForExistence(timeout: 3))
         let newFolder = app.buttons["mymap.picker-new-collection"]
         newFolder.tap()
-        let naming = app.alerts["New collection"]
+        let naming = app.alerts["New highlight"]
         XCTAssertTrue(naming.waitForExistence(timeout: 3))
         naming.buttons["Cancel"].tap()
         XCTAssertTrue(picker.waitForExistence(timeout: 3))
 
         newFolder.tap()
-        let name = naming.textFields["Collection name"]
+        let name = naming.textFields["Highlight name"]
         XCTAssertTrue(name.waitForExistence(timeout: 3))
         name.tap()
         name.typeText("Selected weekend")
@@ -615,7 +615,7 @@ final class maptalkUITests: XCTestCase {
             "mymap.collection-folder.", "Open Selected weekend"
         )).firstMatch
         XCTAssertTrue(folder.waitForExistence(timeout: 3))
-        XCTAssertEqual(folder.value as? String, "2 memories")
+        XCTAssertEqual(folder.value as? String, "2 memories, Only you")
         folder.tap()
         XCTAssertTrue(app.navigationBars["Selected weekend"].waitForExistence(timeout: 3))
 
@@ -648,7 +648,7 @@ final class maptalkUITests: XCTestCase {
         ]
         XCTAssertTrue(destination.waitForExistence(timeout: 3))
         XCTAssertFalse(destination.isEnabled, "A destination containing all selected memories is a no-op")
-        app.navigationBars["Add to collection"].buttons["Cancel"].tap()
+        app.navigationBars["Add to highlight"].buttons["Cancel"].tap()
 
         let newMemory = app.buttons[
             "mymap.list-record.00000000-0000-0000-0000-000000009122"
@@ -667,7 +667,7 @@ final class maptalkUITests: XCTestCase {
             "mymap.collection-folder.00000000-0000-0000-0000-000000008101"
         ]
         XCTAssertTrue(folder.waitForExistence(timeout: 3))
-        XCTAssertEqual(folder.value as? String, "4 memories")
+        XCTAssertEqual(folder.value as? String, "4 memories, Only you")
         folder.tap()
         XCTAssertTrue(app.navigationBars["After dark"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["4 memories"].exists)
@@ -684,7 +684,7 @@ final class maptalkUITests: XCTestCase {
         ]
         XCTAssertTrue(added.waitForExistence(timeout: 3))
         XCTAssertFalse(added.isEnabled)
-        XCTAssertEqual(added.value as? String, "Already in collection")
+        XCTAssertEqual(added.value as? String, "Already in highlight")
         app.buttons["mymap.cancel-selection"].tap()
         XCTAssertTrue(app.navigationBars["After dark"].waitForExistence(timeout: 3))
     }

@@ -757,11 +757,11 @@ struct UserMapHomeView: View {
                     Button {
                         presentCollectionsDirectory()
                     } label: {
-                        Image(systemName: "folder")
+                        Image(systemName: "rectangle.stack")
                             .font(.subheadline.weight(.semibold))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Collections")
+                    .accessibilityLabel("Highlights")
                     .accessibilityIdentifier("mymap.collections-entry")
                 }
             }
@@ -1003,10 +1003,10 @@ struct UserMapHomeView: View {
 
     private var collectionSelectionAction: some View {
         let count = selectedCollectionReferencesInListOrder.count
-        let title = collectionMemorySelection?.destinationFolderID == nil ? "Add to collection" : "Add memories"
+        let title = collectionMemorySelection?.destinationFolderID == nil ? "Add to highlight" : "Add memories"
         return Button(action: completeCollectionMemorySelection) {
             HStack(spacing: 10) {
-                Image(systemName: "folder.badge.plus")
+                Image(systemName: "rectangle.stack")
                 Text(title)
                 Text("\(count)")
                     .monospacedDigit()
@@ -1969,7 +1969,7 @@ struct UserMapHomeView: View {
             }
         }
         guard uniqueReferences.isEmpty == false else { return nil }
-        return onCreateJourneyFolder("Untitled Collection", uniqueReferences)
+        return onCreateJourneyFolder("Untitled Highlight", uniqueReferences)
     }
 
     /// A map-created folder is provisional until its naming step is accepted.
@@ -2141,8 +2141,8 @@ struct UserMapHomeView: View {
         tile
             .contentShape(Rectangle())
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Collection: \(folder.title)")
-            .accessibilityValue("\(folder.memberReferences.count) memories")
+            .accessibilityLabel("Highlight: \(folder.title)")
+            .accessibilityValue("\(folder.memberReferences.count) memories, Only you")
             .accessibilityIdentifier("mymap.map-journey-folder.\(folder.id.uuidString)")
     }
 
@@ -2354,7 +2354,7 @@ struct UserMapHomeView: View {
         .disabled(isAlreadyInTarget || reference == nil)
         .accessibilityIdentifier("mymap.list-record.\(record.id.uuidString)")
         .accessibilityLabel(record.title)
-        .accessibilityValue(isAlreadyInTarget ? "Already in collection" : (isSelected ? "Selected" : "Not selected"))
+        .accessibilityValue(isAlreadyInTarget ? "Already in highlight" : (isSelected ? "Selected" : "Not selected"))
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
@@ -2572,7 +2572,7 @@ struct UserMapHomeView: View {
             isOrganizingMapJourneys
                 ? (isStack
                     ? "Tap to switch the selected memory. Hold briefly, then drag it."
-                    : "Hold briefly, then drag into another memory or Journey")
+                    : "Hold briefly, then drag into another memory or Highlight")
                 : (isStack
                     ? "Tap again to switch between memories."
                     : "Double tap to open.")
@@ -2861,7 +2861,7 @@ struct UserMapHomeView: View {
     private var mapScopeAccessibilityValue: String {
         guard let journey = mapFocusedJourney else { return "All memories" }
         let isPrivateCollection = journeyFolders.contains { $0.id == journey.id }
-        return isPrivateCollection ? "Collection: \(journey.title)" : "Journey: \(journey.title)"
+        return isPrivateCollection ? "Highlight: \(journey.title)" : "Journey: \(journey.title)"
     }
 
     /// A Journey replaces the archive controls with the same folder chrome
@@ -2892,7 +2892,7 @@ struct UserMapHomeView: View {
                     },
                     subtitleForJourney: { pathJourney in
                         journeyFolders.contains(where: { $0.id == pathJourney.id })
-                            ? "Collection"
+                            ? "Highlight"
                             : "Journey"
                     },
                     exitAccessibilityLabel: isPrivateFolder ? "Back to MyMap" : "Back",
@@ -2924,8 +2924,8 @@ struct UserMapHomeView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .accessibilityElement(children: .contain)
-            .accessibilityLabel(isPrivateFolder ? "Collection: \(journey.title)" : "Journey")
-            .accessibilityValue(isPrivateFolder ? "\(journeyScope.storyItems.count) memories" : "")
+            .accessibilityLabel(isPrivateFolder ? "Highlight: \(journey.title)" : "Journey")
+            .accessibilityValue(isPrivateFolder ? "\(journeyScope.storyItems.count) memories, Only you" : "")
             .accessibilityIdentifier(
                 isPrivateFolder
                     ? "mymap.map-folder-scope.\(journey.id.uuidString)"
@@ -3863,12 +3863,12 @@ private struct JourneyFolderNamingSheet: View {
                     .background(Color.black, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Name your collection")
+                    Text("Name your highlight")
                         .font(.title3.weight(.bold))
 
                     Text(folder.memberReferences.count == 1
-                         ? "Private collection · 1 memory"
-                         : "Private collection · \(folder.memberReferences.count) memories")
+                         ? "Only you · 1 memory"
+                         : "Only you · \(folder.memberReferences.count) memories")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -3876,7 +3876,7 @@ private struct JourneyFolderNamingSheet: View {
                 Spacer(minLength: 0)
             }
 
-            TextField("Untitled Collection", text: $title)
+            TextField("Untitled Highlight", text: $title)
                 .font(.body.weight(.medium))
                 .textInputAutocapitalization(.words)
                 .submitLabel(.done)
@@ -3898,7 +3898,7 @@ private struct JourneyFolderNamingSheet: View {
                 .background(Color(.secondarySystemBackground), in: Capsule(style: .continuous))
                 .accessibilityIdentifier("mymap.cancel-journey-creation")
 
-                Button(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Create collection" : "Save name") {
+                Button(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Create highlight" : "Save name") {
                     save()
                 }
                 .font(.subheadline.weight(.semibold))

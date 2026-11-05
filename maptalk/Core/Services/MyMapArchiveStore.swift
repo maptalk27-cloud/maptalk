@@ -97,7 +97,7 @@ final class MyMapArchiveStore: ObservableObject {
             try writeFolders(journeyFolders)
         } catch {
             // Keep the in-memory edit; callers observe an actionable save issue.
-            persistenceIssue = "Could not save Collections on this device. Please try again."
+            persistenceIssue = "Could not save Highlights on this device. Please try again."
         }
     }
 
@@ -129,7 +129,7 @@ final class MyMapArchiveStore: ObservableObject {
         do {
             try writeFolders(updated)
         } catch {
-            persistenceIssue = "Could not save Collections on this device. Please try again."
+            persistenceIssue = "Could not save Highlights on this device. Please try again."
             throw error
         }
         journeyFolders = updated
@@ -302,7 +302,7 @@ final class MyMapArchiveStore: ObservableObject {
 
     private func normalizedFolderTitle(_ title: String) -> String {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "Untitled Collection" : cleaned
+        return cleaned.isEmpty ? "Untitled Highlight" : cleaned
     }
 
     private func unique(

@@ -48,7 +48,7 @@ struct MySettingsView: View {
                 }
             } footer: {
                 if environment.backend != nil {
-                    Text("Deleting a memory from MyMap also removes its public post. Deleting a place removes only your visits, not other people's. Collections are stored only on this device.")
+                    Text("Deleting a memory from MyMap also removes its public post. Deleting a place removes only your visits, not other people's. Highlights are stored only on this device.")
                 }
             }
 
