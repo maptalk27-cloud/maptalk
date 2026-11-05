@@ -17,12 +17,16 @@ struct MyMapMapDestination: View {
     let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
 
-    @State private var flightController = MapFlightController()
+    @StateObject private var flightController = MapFlightController()
     @State private var focusedRecord: UserMapRecord
     @State private var focusedJourney: JourneyPost?
     @State private var journeyStack: [JourneyPost] = []
     @State private var journeyEntryRecord: UserMapRecord?
-    @State private var cameraPosition: MapCameraPosition
+    @StateObject private var cameraPositionStore: MapCameraPositionStore
+    private var cameraPosition: MapCameraPosition {
+        get { cameraPositionStore.position }
+        nonmutating set { cameraPositionStore.setCommand(newValue) }
+    }
     @State private var currentRegion: MKCoordinateRegion
     @State private var mapSize: CGSize = .zero
     @State private var mapSafeAreaBottom: CGFloat = 0
@@ -43,7 +47,7 @@ struct MyMapMapDestination: View {
         self.journeyProvider = journeyProvider
         self.userProvider = userProvider
         _focusedRecord = State(initialValue: selectedRecord)
-        _cameraPosition = State(initialValue: .region(entryRegion))
+        _cameraPositionStore = StateObject(wrappedValue: MapCameraPositionStore(.region(entryRegion)))
         _currentRegion = State(initialValue: entryRegion)
         _capsulePresentation = StateObject(
             wrappedValue: MapExperiencePresentation(compactDetent: Self.regularDetent)
@@ -52,7 +56,12 @@ struct MyMapMapDestination: View {
 
     var body: some View {
         GeometryReader { geometry in
-            Map(position: $cameraPosition, interactionModes: .all) {
+            Map(position: Binding(get: { cameraPosition }, set: { position in
+                if position.positionedByUser {
+                    flightController.cancelActiveTransition()
+                }
+                cameraPositionStore.observeNativePosition(position)
+            }), interactionModes: .all) {
                 ForEach(mapRecords) { record in
                     Annotation("", coordinate: record.coordinate) {
                         Button {
@@ -71,7 +80,12 @@ struct MyMapMapDestination: View {
             }
             .mapStyle(.standard)
             .ignoresSafeArea()
+            .onMapCameraChange(frequency: .continuous) { context in
+                flightController.observeCamera(region: context.region, camera: context.camera)
+            }
             .onMapCameraChange(frequency: .onEnd) { context in
+                flightController.observeCamera(region: context.region, camera: context.camera)
+                flightController.observeCameraEnd()
                 currentRegion = context.region
             }
             .safeAreaInset(edge: .top, spacing: 0) {
@@ -243,7 +257,11 @@ struct MyMapMapDestination: View {
             )
         } else {
             presentCapsule(for: selectedRecord)
-            flyFromList(to: storyRegion(for: selectedRecord), cause: flightCause(for: selectedRecord))
+            flyFromList(
+                to: storyRegion(for: selectedRecord),
+                cause: flightCause(for: selectedRecord),
+                appliesBrowsingFocus: false
+            )
         }
     }
 
@@ -372,12 +390,17 @@ struct MyMapMapDestination: View {
         currentRegion = target.region
     }
 
-    private func flyFromList(to targetRegion: MKCoordinateRegion, cause: RegionChangeCause) {
+    private func flyFromList(
+        to targetRegion: MKCoordinateRegion,
+        cause: RegionChangeCause,
+        appliesBrowsingFocus: Bool = true
+    ) {
         flightController.handleRegionChange(
             currentRegion: currentRegion,
             targetRegion: targetRegion,
             cause: cause,
-            cameraPosition: $cameraPosition
+            browsingCoordinates: appliesBrowsingFocus ? browsingCoordinates : nil,
+            cameraPosition: cameraPositionStore.commandBinding
         ) { region in
             currentRegion = region
         }
@@ -450,6 +473,10 @@ struct MyMapMapDestination: View {
         return storyRecords(for: focusedJourney)
     }
 
+    private var browsingCoordinates: [CLLocationCoordinate2D] {
+        mapRecords.filter(\.isMapExperienceItem).map(\.coordinate)
+    }
+
     private var sequenceItems: [ExperienceDetailView.SequencePager.Item] {
         if let focusedJourney {
             return scope(for: focusedJourney).sequenceItems
@@ -490,8 +517,13 @@ struct MyMapMapDestination: View {
         if capsulePresentation.isExpanded {
             // MapTalk keeps its content selection and map selection synchronized
             // without a cinematic transition behind the expanded sheet.
-            currentRegion = targetRegion
-            cameraPosition = .region(targetRegion)
+            flightController.cancelActiveTransition()
+            let landingRegion = flightController.neighborhoodRegion(
+                for: targetRegion,
+                coordinates: browsingCoordinates
+            ) ?? targetRegion
+            currentRegion = landingRegion
+            cameraPosition = .region(landingRegion)
             return
         }
 
@@ -501,7 +533,8 @@ struct MyMapMapDestination: View {
             currentRegion: currentRegion,
             targetRegion: targetRegion,
             cause: flightCause(for: record),
-            cameraPosition: $cameraPosition
+            browsingCoordinates: browsingCoordinates,
+            cameraPosition: cameraPositionStore.commandBinding
         ) { region in
             currentRegion = region
         }

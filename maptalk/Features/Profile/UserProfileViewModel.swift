@@ -35,7 +35,6 @@ final class UserProfileViewModel: ObservableObject {
         let subtitle: String
         let timestamp: Date
         let preview: Preview
-        let timelineSegmentId: String?
     }
 
     let environment: AppEnvironment
@@ -114,8 +113,7 @@ final class UserProfileViewModel: ObservableObject {
                 title: real.message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "Reel",
                 subtitle: locationLabel(for: real.id, coordinate: real.center),
                 timestamp: real.activityDate,
-                preview: preview(for: real),
-                timelineSegmentId: timelineSegmentId(for: real.id)
+                preview: preview(for: real)
             )
         }
 
@@ -126,8 +124,7 @@ final class UserProfileViewModel: ObservableObject {
                 title: footprint.name,
                 subtitle: locationLabel(for: footprint.ratedPOI.poi.id, coordinate: footprint.coordinate),
                 timestamp: footprint.latestVisit ?? .distantPast,
-                preview: preview(for: footprint.ratedPOI),
-                timelineSegmentId: timelineSegmentId(for: footprint.id)
+                preview: preview(for: footprint.ratedPOI)
             )
         }
 
@@ -243,58 +240,7 @@ final class UserProfileViewModel: ObservableObject {
         return .category(rated.poi.category)
     }
 
-    private func timelineSegmentId(for eventId: UUID) -> String? {
-        timelineSegments.first { segment in
-            segment.events.contains { $0.id == eventId }
-        }?.id
-    }
-
-    private var timelineSegments: [TimelineSegment] {
-        let reelEvents = reels.map { real in
-            TimelineEvent(
-                id: real.id,
-                date: real.activityDate,
-                coordinate: real.center,
-                kind: .reel(real, userProvider(for: real.userId))
-            )
-        }
-
-        let footprintEvents: [TimelineEvent] = footprints.compactMap { footprint in
-            guard let date = footprint.latestVisit else { return nil }
-            return TimelineEvent(
-                id: footprint.id,
-                date: date,
-                coordinate: footprint.coordinate,
-                kind: .poi(footprint.ratedPOI)
-            )
-        }
-
-        let events = (reelEvents + footprintEvents).sorted { $0.date > $1.date }
-        var segments: [TimelineSegment] = []
-        for event in events {
-            let label = locationLabel(for: event.id, coordinate: event.coordinate, preferred: event.labelHint)
-            if var last = segments.last, last.label == label {
-                last.events.append(event)
-                last.end = max(last.end, event.date)
-                segments[segments.count - 1] = last
-            } else {
-                segments.append(
-                    TimelineSegment(
-                        label: label,
-                        start: event.date,
-                        end: event.date,
-                        events: [event]
-                    )
-                )
-            }
-        }
-        return segments
-    }
-
-    private func locationLabel(for id: UUID, coordinate: CLLocationCoordinate2D, preferred: String? = nil) -> String {
-        if let preferred, preferred.isEmpty == false {
-            return preferred
-        }
+    private func locationLabel(for id: UUID, coordinate: CLLocationCoordinate2D) -> String {
         if environment.backend == nil, let registered = PreviewData.locationLabel(for: id) {
             return registered
         }

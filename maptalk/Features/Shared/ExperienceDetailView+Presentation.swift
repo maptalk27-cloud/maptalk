@@ -186,7 +186,6 @@ extension ExperienceDetailView {
                 mode: .card,
                 showsPlaceholderBadge: false,
                 usesAspectFit: false,
-                isMuted: true,
                 isPlaybackActive: isMediaPlaybackActive
             )
             .allowsHitTesting(false)

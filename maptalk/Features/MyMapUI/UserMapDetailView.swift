@@ -15,8 +15,12 @@ struct UserMapDetailView: View {
     let selectedSegmentId: Binding<String?>?
     let showsCloseButton: Bool
 
-    @State private var flightController = MapFlightController()
-    @State private var cameraPosition: MapCameraPosition
+    @StateObject private var flightController = MapFlightController()
+    @StateObject private var cameraPositionStore: MapCameraPositionStore
+    private var cameraPosition: MapCameraPosition {
+        get { cameraPositionStore.position }
+        nonmutating set { cameraPositionStore.setCommand(newValue) }
+    }
     @State private var displayMode: MapDisplayMode = .timeline
     @StateObject private var cityResolver = TimelineCityResolver()
     @State private var selectedTimelineSegmentId: String?
@@ -66,7 +70,7 @@ struct UserMapDetailView: View {
         self.onSelectSegment = onSelectSegment
         self.onDismissWithSegment = onDismissWithSegment
         self.showsCloseButton = showsCloseButton
-        _cameraPosition = State(initialValue: .region(region))
+        _cameraPositionStore = StateObject(wrappedValue: MapCameraPositionStore(.region(region)))
         _lastCenter = State(initialValue: region.center)
         _currentRegion = State(initialValue: region)
         _isShowingDetailedAnnotations = State(initialValue: UserMapAnnotationZoomHelper.isClose(region: region))
@@ -79,7 +83,12 @@ struct UserMapDetailView: View {
             let topInset = max(proxy.safeAreaInsets.top, safeAreaTopInset())
             let topOffset = max(topInset - 25, 12)
             ZStack(alignment: .topLeading) {
-                Map(position: $cameraPosition, interactionModes: .all) {
+                Map(position: Binding(get: { cameraPosition }, set: { position in
+                    if position.positionedByUser {
+                        flightController.cancelActiveTransition()
+                    }
+                    cameraPositionStore.observeNativePosition(position)
+                }), interactionModes: .all) {
                     let now = Date()
                     let reelsForDisplay = activeReels.sorted { lhs, rhs in
                         let lhsMode = reelDisplayMode(for: lhs, now: now)
@@ -128,25 +137,26 @@ struct UserMapDetailView: View {
                             }
                             .buttonStyle(.plain)
                         }
+                    }
                 }
-            }
-            .ignoresSafeArea()
-            .mapStyle(.standard)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear
-                        .onAppear { mapSize = proxy.size }
-                        .onChange(of: proxy.size) { _, newValue in mapSize = newValue }
-                }
-            )
-            .saturation(mapSaturationEffect)
-            .blur(radius: mapBlurEffect)
-            .overlay(timelineEffectOverlay)
-            .onMapCameraChange(frequency: .continuous) { context in
-                lastCenter = context.region.center
-                currentRegion = context.region
-                lastCameraDistance = context.camera.distance
-                let nextState = UserMapAnnotationZoomHelper.nextDetailState(
+                .ignoresSafeArea()
+                .mapStyle(.standard)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear
+                            .onAppear { mapSize = proxy.size }
+                            .onChange(of: proxy.size) { _, newValue in mapSize = newValue }
+                    }
+                )
+                .saturation(mapSaturationEffect)
+                .blur(radius: mapBlurEffect)
+                .overlay(timelineEffectOverlay)
+                .onMapCameraChange(frequency: .continuous) { context in
+                    flightController.observeCamera(region: context.region, camera: context.camera)
+                    lastCenter = context.region.center
+                    currentRegion = context.region
+                    lastCameraDistance = context.camera.distance
+                    let nextState = UserMapAnnotationZoomHelper.nextDetailState(
                         current: isShowingDetailedAnnotations,
                         distance: context.camera.distance,
                         region: context.region
@@ -154,6 +164,10 @@ struct UserMapDetailView: View {
                     if nextState != isShowingDetailedAnnotations {
                         isShowingDetailedAnnotations = nextState
                     }
+                }
+                .onMapCameraChange(frequency: .onEnd) { context in
+                    flightController.observeCamera(region: context.region, camera: context.camera)
+                    flightController.observeCameraEnd()
                 }
 
                 if showsCloseButton {
@@ -274,6 +288,19 @@ struct UserMapDetailView: View {
                     id: entry.id,
                     mode: .poi(rated)
                 )
+            }
+        }
+    }
+
+    private var browsingCoordinates: [CLLocationCoordinate2D] {
+        // Use the same entries as the experience pager, not the timeline's
+        // broader overview fit or only the markers visible at this zoom.
+        entries.map { entry in
+            switch entry.kind {
+            case let .real(real):
+                return real.center
+            case let .poi(rated):
+                return rated.poi.coordinate
             }
         }
     }
@@ -498,6 +525,7 @@ struct UserMapDetailView: View {
     }
 
     private func flyToTimelineSegment(_ segment: TimelineSegment, animated: Bool = true) {
+        flightController.cancelActiveTransition()
         let target = boundingTarget(for: segment.events)
             ?? (region, max(UserMapAnnotationZoomHelper.spanMeters(for: region), timelineMinSpanMeters))
 
@@ -686,16 +714,26 @@ struct UserMapDetailView: View {
                 currentRegion: currentRegion,
                 targetRegion: target,
                 cause: cause,
-                cameraPosition: $cameraPosition,
+                browsingCoordinates: browsingCoordinates,
+                cameraPosition: cameraPositionStore.commandBinding,
                 onRegionUpdate: { updated in
                     currentRegion = updated
                     lastCenter = updated.center
                 }
             )
         } else {
-            cameraPosition = .region(target)
-            currentRegion = target
-            lastCenter = target.center
+            flightController.cancelActiveTransition()
+            // Preserve list entry's immediate preview. Expanded map paging
+            // shares the compact pager's scale without animating behind it.
+            let landingRegion = isListSelection ? target : (
+                flightController.neighborhoodRegion(
+                    for: target,
+                    coordinates: browsingCoordinates
+                ) ?? target
+            )
+            cameraPosition = .region(landingRegion)
+            currentRegion = landingRegion
+            lastCenter = landingRegion.center
         }
     }
 

@@ -202,8 +202,12 @@ struct UserProfileView: View {
     }
 
     private var historySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if viewModel.historyActivities.isEmpty {
+        // Build one snapshot, not the entire history again for each row's divider.
+        let activities = viewModel.historyActivities
+        let lastActivityID = activities.last?.id
+
+        return VStack(alignment: .leading, spacing: 10) {
+            if activities.isEmpty {
                 if viewModel.isRefreshing {
                     ProgressView()
                         .padding(.vertical, 12)
@@ -222,25 +226,27 @@ struct UserProfileView: View {
                         .padding(.vertical, 12)
                 }
             } else {
-                VStack(spacing: 0) {
-                    ForEach(viewModel.historyActivities) { item in
-                        NavigationLink {
-                            ProfileMapDestination(
-                                environment: viewModel.environment,
-                                context: viewModel.context,
-                                initialStoryId: item.id
-                            )
-                        } label: {
-                            HistoryActivityRow(item: item)
-                        }
-                        .buttonStyle(.plain)
-                        .backendPostActions(for: postReference(for: item), ownerID: viewModel.user.id)
+                LazyVStack(spacing: 0) {
+                    ForEach(activities) { item in
+                        VStack(spacing: 0) {
+                            NavigationLink {
+                                ProfileMapDestination(
+                                    environment: viewModel.environment,
+                                    context: viewModel.context,
+                                    initialStoryId: item.id
+                                )
+                            } label: {
+                                HistoryActivityRow(item: item)
+                            }
+                            .buttonStyle(.plain)
+                            .backendPostActions(for: postReference(for: item), ownerID: viewModel.user.id)
 
-                        if item.id != viewModel.historyActivities.last?.id {
-                            Rectangle()
-                                .fill(Color(.separator).opacity(0.35))
-                                .frame(height: 1)
-                                .padding(.leading, 78)
+                            if item.id != lastActivityID {
+                                Rectangle()
+                                    .fill(Color(.separator).opacity(0.35))
+                                    .frame(height: 1)
+                                    .padding(.leading, 78)
+                            }
                         }
                     }
                 }

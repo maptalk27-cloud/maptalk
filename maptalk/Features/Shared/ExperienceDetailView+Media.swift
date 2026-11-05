@@ -524,7 +524,7 @@ struct AutoPlayVideoView: View {
         mode: MediaCardView.Mode,
         showsPlaceholderBadge: Bool = true,
         usesAspectFit: Bool = false,
-        isMuted: Bool? = nil,
+        isMuted: Bool = false,
         isPlaybackActive: Bool = true,
         onReady: (() -> Void)? = nil,
         blendsWithBackground: Bool = false
@@ -535,7 +535,7 @@ struct AutoPlayVideoView: View {
         self.mode = mode
         self.showsPlaceholderBadge = showsPlaceholderBadge
         self.usesAspectFit = usesAspectFit
-        self.isMuted = isMuted ?? (mode == .card)
+        self.isMuted = isMuted
         self.isPlaybackActive = isPlaybackActive
         self.onReady = onReady
         self.blendsWithBackground = blendsWithBackground

@@ -994,7 +994,7 @@ final class FriendStoryUITests: XCTestCase {
         revealAuthor("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEE1", app: app).tap()
         XCTAssertTrue(storyNavigation(app).waitForExistence(timeout: 5))
         // Existing early own POIs: Port Townsend -> Bellingham, about 74 km.
-        // This exercises the native regional path, not a global hop or a
+        // This exercises the shared regional flight, not a global hop or a
         // same-place media change (which intentionally does not fly).
         selectPage(6, app: app)
         XCTAssertTrue(currentPage(app).identifier.hasPrefix(
@@ -1006,8 +1006,10 @@ final class FriendStoryUITests: XCTestCase {
         waitForCamera(near: departure, app: app)
         let canvas = app.descendants(matching: .any)["maptalk.map-canvas"].firstMatch
         let beforePan = try XCTUnwrap(CameraCenter(value: canvas.value))
-        let panStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.78, dy: 0.34))
-        let panEnd = app.coordinate(withNormalizedOffset: CGVector(dx: 0.22, dy: 0.34))
+        // Keep the drag in exposed map space, clear of the map/locate capsule
+        // and its enlarged native hit target on the right edge.
+        let panStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.64, dy: 0.43))
+        let panEnd = app.coordinate(withNormalizedOffset: CGVector(dx: 0.24, dy: 0.43))
 
         print("[MapStoryPanProbe] phase=manual-pan-before-regional-flight")
         panStart.press(forDuration: 0.05, thenDragTo: panEnd,
@@ -1018,6 +1020,7 @@ final class FriendStoryUITests: XCTestCase {
         }, object: canvas)
         XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 3), .completed,
                        "The exposed map must accept a genuine user pan while a story stays open")
+        print("[MapStoryPanProbe] first-pan before=\(beforePan) after=\(String(describing: canvas.value))")
         XCTAssertEqual(currentPage(app).identifier, departurePage)
 
         print("[MapStoryPanProbe] phase=regional-flight-after-user-pan")
@@ -1037,6 +1040,8 @@ final class FriendStoryUITests: XCTestCase {
         // before injecting this public gesture; traces distinguish that case.
         panStart.press(forDuration: 0.05, thenDragTo: panEnd,
                        withVelocity: .slow, thenHoldForDuration: 0.15)
+        print("[MapStoryPanProbe] reverse-pan after=\(String(describing: canvas.value))")
+        evidence(app, name: "Regional reversal — manual map takeover")
         let interrupted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             guard let camera = CameraCenter(value: canvas.value) else { return false }
             return abs(camera.longitude - departure.longitude) > 0.02

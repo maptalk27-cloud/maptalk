@@ -75,38 +75,6 @@ enum FriendStoryPageSelection {
     }
 }
 
-extension FriendStoryGroup {
-    func cameraFocus(for page: FriendStoryPage, previousLocationKey: String?,
-                     previousAuthorID: UUID?) -> MapStoryCameraFocus? {
-        guard page.authorID == authorID, let target = page.coordinate else { return nil }
-        // Use only this person's frozen, currently browsable feed. A remote
-        // post must not make a cluster of nearby stops look like a world tour.
-        var stops: [CLLocationCoordinate2D] = []
-        for coordinate in pages.compactMap(\.coordinate)
-            where coordinate.distance(to: target) <= 12_000 {
-            if !stops.contains(where: { $0.distance(to: coordinate) <= 25 }) {
-                stops.append(coordinate)
-            }
-        }
-        let previous = previousAuthorID == authorID ? pages.first {
-            $0.locationKey == previousLocationKey
-        }?.coordinate : nil
-        // An isolated airport/island is still a story hop. Neighborhood
-        // density chooses landing scale, not which camera animator owns it.
-        guard stops.count > 1 else {
-            return MapStoryCameraFocus(landingSpan: 20_000, previousCoordinate: previous)
-        }
-
-        // Typical spacing, not the whole city's bounding box. The median
-        // avoids one isolated stop or repeated media setting everyone's zoom.
-        let spacing = stops.map { stop in
-            stops.map { stop.distance(to: $0) }.filter { $0 > 25 }.min() ?? 0
-        }.sorted()
-        let landingSpan = min(8_000, max(800, spacing[spacing.count / 2] * 2.2))
-        return MapStoryCameraFocus(landingSpan: landingSpan, previousCoordinate: previous)
-    }
-}
-
 /// A local browsing session, never the selection/pager owned by the public map.
 @MainActor
 final class FriendStoryNavigation: ObservableObject {

@@ -50,10 +50,15 @@ struct MapTalkView: View {
     @State private var viewedActivityIDs = Set<String>()
     @Namespace private var heroNamespace
     private let initialStoryId: UUID?
+    private let isTabActive: Bool
 
-    init(viewModel: @autoclosure @escaping () -> MapTalkViewModel, initialStoryId: UUID? = nil) {
+    private var mapWorkEnabled: Bool { isTabActive && scenePhase == .active }
+
+    init(viewModel: @autoclosure @escaping () -> MapTalkViewModel,
+         initialStoryId: UUID? = nil, isTabActive: Bool = true) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.initialStoryId = initialStoryId
+        self.isTabActive = isTabActive
     }
 
     var body: some View {
@@ -465,7 +470,7 @@ struct MapTalkView: View {
                         // A fresh native binding write identifies an actual
                         // map gesture. Reading positionedByUser later in camera
                         // callbacks can instead describe a much earlier pan.
-                        if position.positionedByUser && friendStoryNavigation.isActive {
+                        if position.positionedByUser {
                             flightController.cancelActiveTransition()
                         }
                         cameraPositionStore.observeNativePosition(position)
@@ -539,27 +544,26 @@ struct MapTalkView: View {
                         )
                     }
                     .mapStyle(mapLayer.mapStyle)
-                    .modifier(MapStoryFlightModifier(controller: flightController, proxy: mapProxy))
                     .ignoresSafeArea()
                     .accessibilityIdentifier("maptalk.map-canvas")
                     .accessibilityValue(currentCamera.map {
                         "\($0.centerCoordinate.latitude),\($0.centerCoordinate.longitude)"
                     } ?? "")
                     .onMapCameraChange(frequency: .continuous) { context in
-                        flightController.observeCamera(region: context.region)
+                        guard mapWorkEnabled else { return }
+                        flightController.observeCamera(region: context.region, camera: context.camera)
                         friendFootprintInteractionGate.noteCameraMotion()
                         if cameraPosition.positionedByUser {
                             viewModel.cancelPendingLocationFocus()
-                            if friendStoryNavigation.isActive {
-                                flightController.cancelPendingCameraSteps()
-                            }
                         }
                     }
                     .onMapCameraChange(frequency: .onEnd) { context in
-                        // Cancelling an old keyframe animation emits onEnd
-                        // while the replacement flight is only starting.
-                        // Do not rebuild the map around that temporary frame.
-                        guard !flightController.isStoryFlightInProgress else { return }
+                        guard mapWorkEnabled else { return }
+                        flightController.observeCamera(region: context.region, camera: context.camera)
+                        flightController.observeCameraEnd()
+                        // A replaced flight can emit an old onEnd during the
+                        // next flight. Do not rebuild around its temporary frame.
+                        guard !flightController.isTransitionInProgress else { return }
                         friendFootprintInteractionGate.noteCameraMotion()
                         let preservesSettledRepresentatives =
                             FriendFootprintSamplingContinuityPolicy
@@ -831,7 +835,7 @@ struct MapTalkView: View {
                                 // dismissal; onDismiss clears the session and restores the map.
                                 experiencePresentation.dismiss(preservingDetent: true)
                             },
-                            allowsPlayback: !isActivityOverExperiencePresented
+                            allowsPlayback: mapWorkEnabled && !isActivityOverExperiencePresented
                         ))
                     }
                     switch activeExperience {
@@ -959,6 +963,7 @@ struct MapTalkView: View {
 
                 content
                     .id(experiencePresentation.contentRevision)
+                    .environment(\.friendStoryPlaybackEnabled, mapWorkEnabled)
                     .modifier(FriendStorySheetChrome(presentation: experiencePresentation,
                                                      navigation: friendStoryNavigation))
                     .fullScreenCover(isPresented: $isActivityOverExperiencePresented) {
@@ -1028,11 +1033,11 @@ struct MapTalkView: View {
                 viewedActivityIDs.formUnion(identifiers)
             }
             .onAppear {
+                updateMapActivity()
                 storyReadStore.configure(
                     accountID: environment.currentUser.id,
                     server: environment.backend?.api.baseURL.absoluteString ?? "preview"
                 )
-                WorldBasemapPrefetcher.shared.prefetchGlobalBasemapIfNeeded()
                 if currentRegion == nil {
                     let initialRegion = viewModel.region
                     cameraPosition = .region(initialRegion)
@@ -1040,12 +1045,15 @@ struct MapTalkView: View {
                     settledFriendFootprintRegion = initialRegion
                     pendingRegionCause = .initial
                 }
-                viewModel.onAppear()
                 controlsBottomPadding = baseControlsPadding
-                ensureSelectionIfNeeded()
-                applyInitialStorySelectionIfNeeded()
+                if mapWorkEnabled {
+                    viewModel.onAppear()
+                    ensureSelectionIfNeeded()
+                    applyInitialStorySelectionIfNeeded()
+                }
             }
             .onReceive(viewModel.$region.dropFirst()) { newRegion in
+                guard mapWorkEnabled else { return }
                 let cause = pendingRegionCause
                 pendingRegionCause = .other
                 if (cause == .initial || cause == .user),
@@ -1102,12 +1110,23 @@ struct MapTalkView: View {
                 applyInitialStorySelectionIfNeeded()
             }
             .onChangeCompat(of: scenePhase) { phase in
-                if phase == .active {
-                    viewModel.onBecomeActive()
+                updateMapActivity()
+                if phase == .active && isTabActive {
+                    ensureSelectionIfNeeded()
+                    applyInitialStorySelectionIfNeeded()
+                    reconcileFriendStories(geometry: geometry)
+                }
+            }
+            .onChangeCompat(of: isTabActive) { active in
+                updateMapActivity()
+                if active && scenePhase == .active {
+                    ensureSelectionIfNeeded()
+                    applyInitialStorySelectionIfNeeded()
                     reconcileFriendStories(geometry: geometry)
                 }
             }
             .onChange(of: friendStoryRevision(friendGroups)) { _, _ in
+                guard mapWorkEnabled else { return }
                 reconcileFriendStories(geometry: geometry)
             }
             .onChange(of: environment.currentUser.id) { _, accountID in
@@ -1255,6 +1274,23 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    func updateMapActivity() {
+        viewModel.setMapActivity(mapWorkEnabled)
+        guard !mapWorkEnabled else { return }
+        // Finish at the selected post while offscreen, without animating or
+        // leaving a queued flight to fight the newly selected tab.
+        let landing = flightController.pendingLandingRegion
+        flightController.cancelActiveTransition()
+        if let landing {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { cameraPosition = .region(landing) }
+            currentRegion = landing
+            currentCamera = nil
+            viewModel.rememberVisibleRegion(landing)
+        }
+    }
+
     var usesFriendStories: Bool {
         guard !viewModel.isUserScope else { return false }
 #if DEBUG
@@ -1409,6 +1445,7 @@ private extension MapTalkView {
     }
 
     func focusFriendStoryPage(_ page: FriendStoryPage, geometry: GeometryProxy) {
+        guard mapWorkEnabled else { return }
         switch page.content {
         case let .reel(reel):
             selectedStoryId = reel.id
@@ -1429,16 +1466,7 @@ private extension MapTalkView {
         }
         guard friendStoryNavigation.needsMapFocus(locationKey: locationKey,
             viewportSize: geometry.size, authorID: page.authorID) else { return }
-        let localFocus = friendStoryNavigation.session?.currentGroup?.cameraFocus(for: page,
-            previousLocationKey: friendStoryNavigation.lastLocationKey,
-            previousAuthorID: friendStoryNavigation.lastFocusedAuthorID)
-        let previousCoordinate = friendStoryNavigation.session?.groups
-            .first(where: { $0.authorID == friendStoryNavigation.lastFocusedAuthorID })?
-            .pages.first(where: { $0.locationKey == friendStoryNavigation.lastLocationKey })?.coordinate
-        let storyFocus = localFocus.map {
-            MapStoryCameraFocus(landingSpan: $0.landingSpan,
-                previousCoordinate: $0.previousCoordinate ?? previousCoordinate)
-        }
+        let browsingCoordinates = friendStoryNavigation.session?.currentGroup?.pages.compactMap(\.coordinate)
         // Both detents share one selection and camera. Switching a post while
         // expanded must not leave the map at the previous post on return.
         friendStoryNavigation.lastLocationKey = locationKey
@@ -1447,14 +1475,15 @@ private extension MapTalkView {
         switch page.content {
         case let .reel(reel):
             focusFriendStoryContent(.real(reel, viewModel.user(for: reel.userId)),
-                geometry: geometry, storyFocus: storyFocus)
+                geometry: geometry, browsingCoordinates: browsingCoordinates)
         case let .poi(place, _, _):
-            focusFriendStoryContent(.poi(place), geometry: geometry, storyFocus: storyFocus)
+            focusFriendStoryContent(.poi(place), geometry: geometry, browsingCoordinates: browsingCoordinates)
         }
     }
 
     func focusFriendStoryContent(_ mode: ExperienceDetailView.Mode, geometry: GeometryProxy,
-                                 storyFocus: MapStoryCameraFocus? = nil) {
+                                 browsingCoordinates: [CLLocationCoordinate2D]? = nil) {
+        guard mapWorkEnabled else { return }
         viewModel.cancelPendingLocationFocus()
         let region: MKCoordinateRegion
         let cause: RegionChangeCause
@@ -1487,7 +1516,7 @@ private extension MapTalkView {
             bottomInset: geometry.size.height * ControlsLayout.previewFraction
                 + geometry.safeAreaInsets.bottom + FriendStoryLayout.floatingHeight)
         flightController.handleRegionChange(currentRegion: currentRegion, targetRegion: region,
-            cause: cause, viewport: viewport, storyFocus: storyFocus,
+            cause: cause, viewport: viewport, browsingCoordinates: browsingCoordinates,
             cameraPosition: cameraPositionStore.commandBinding) { currentRegion = $0 }
     }
 
@@ -1580,6 +1609,7 @@ private extension MapTalkView {
         region: MKCoordinateRegion,
         preserveVisibleRepresentatives: Bool = true
     ) {
+        guard mapWorkEnabled else { return }
         guard focusedJourneyHeader == nil, viewModel.isUserScope == false else {
             friendFootprintVisibility = nil
             return

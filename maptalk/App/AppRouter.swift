@@ -15,7 +15,7 @@ struct AppRouter: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            MapTalkView(viewModel: .init(environment: environment))
+            MapTalkView(viewModel: .init(environment: environment), isTabActive: selectedTab == 0)
                 // Adapt only the native bar, not the map's cards or publishers.
                 .tint(.black)
                 .toolbarColorScheme(usesSatelliteChrome ? .dark : nil, for: .tabBar)

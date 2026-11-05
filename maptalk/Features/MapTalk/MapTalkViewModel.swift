@@ -97,6 +97,8 @@ final class MapTalkViewModel: ObservableObject {
     private var activeFeedExpiryWorkItem: DispatchWorkItem?
     private(set) var nextActiveFeedExpiryDate: Date?
     private var cancellables = Set<AnyCancellable>()
+    private var mapActivityCancellables = Set<AnyCancellable>()
+    private var isMapActive = true
     init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
         self.scope = scope
@@ -167,6 +169,7 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func onAppear() {
+        guard isMapActive else { return }
         if case .global = scope {
             environment.location.requestWhenInUse()
             searchMap(in: lastVisibleRegion ?? region)
@@ -176,6 +179,26 @@ final class MapTalkViewModel: ObservableObject {
     }
 
     func onBecomeActive() {
+        guard isMapActive else { return }
+        refreshFreshness()
+        refreshBackendIfNeeded()
+    }
+
+    /// Keep the cached map and its data subscriptions, but do not keep doing
+    /// location-driven searches for a tab that is no longer being viewed.
+    func setMapActivity(_ active: Bool) {
+        guard case .global = scope, isMapActive != active else { return }
+        isMapActive = active
+        mapActivityCancellables.removeAll()
+        backendMapSearch?.cancel()
+        backendMapSearch = nil
+        guard active else { return }
+
+        // CurrentValueSubject replays the latest GPS reading when rebound;
+        // publishing keeps using the real device fix, never the map center.
+        environment.location.requestWhenInUse()
+        bindMapActivity()
+        searchMap(in: lastVisibleRegion ?? lastBackendMapRegion ?? region)
         refreshFreshness()
         refreshBackendIfNeeded()
     }
@@ -216,14 +239,16 @@ final class MapTalkViewModel: ObservableObject {
     /// independent from the device coordinate and the top active feed.
     func searchMap(in region: MKCoordinateRegion) {
         guard case .global = scope else { return }
+        lastBackendMapRegion = region
+        guard isMapActive else { return }
         if let backend = environment.backend {
-            lastBackendMapRegion = region
             backendMapSearch?.cancel()
             let revision = backend.publicContentRevision
             backendMapSearch = Task { [weak self] in
                 do {
+                    try Task.checkCancellation()
                     let apply: (BackendStore.Snapshot) -> Void = { [weak self] content in
-                        guard let self, !Task.isCancelled, backend.isActive,
+                        guard let self, isMapActive, !Task.isCancelled, backend.isActive,
                               revision == backend.publicContentRevision else { return }
                         repositoryPOIs = content.pois
                         repositoryMapReels = content.reels
@@ -438,7 +463,7 @@ final class MapTalkViewModel: ObservableObject {
     /// Opening the composer retries Maps even if the person has not moved
     /// since an earlier network failure. It never changes the map or GPS fix.
     func refreshNearbyPlaces() {
-        guard let location = publishableLiveLocation else { return }
+        guard isMapActive, let location = publishableLiveLocation else { return }
         nearbyPlaceRefresh.send(location.coordinate)
     }
 
@@ -721,7 +746,7 @@ final class MapTalkViewModel: ObservableObject {
         }
     }
 
-    private func bind() {
+    private func bindMapActivity() {
         environment.location.authorization
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
@@ -731,7 +756,7 @@ final class MapTalkViewModel: ObservableObject {
                     self?.shouldCenterWhenLocationArrives = false
                 }
             }
-            .store(in: &cancellables)
+            .store(in: &mapActivityCancellables)
 
         // `location` is a CurrentValueSubject. Keep direct subscriptions so
         // every branch receives its current value; `share()` would not replay
@@ -741,7 +766,7 @@ final class MapTalkViewModel: ObservableObject {
         locationStream
             .receive(on: DispatchQueue.main)
             .sink { [weak self] location in
-                guard let self else { return }
+                guard let self, isMapActive else { return }
                 liveLocation = location
                 userCoordinate = MapStartupLocation.usable(location)?.coordinate
                 if shouldApplyInitialLocation, let location = MapStartupLocation.usable(location) {
@@ -752,7 +777,7 @@ final class MapTalkViewModel: ObservableObject {
                     centerRegion(on: location.coordinate)
                 }
             }
-            .store(in: &cancellables)
+            .store(in: &mapActivityCancellables)
 
         locationStream
             .compactMap { $0?.coordinate }
@@ -766,9 +791,10 @@ final class MapTalkViewModel: ObservableObject {
             .switchToLatest()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] pois in
-                self?.nearbySocialPOIs = pois
+                guard let self, isMapActive else { return }
+                nearbySocialPOIs = pois
             }
-            .store(in: &cancellables)
+            .store(in: &mapActivityCancellables)
 
         mapSearchRegion
             .map { [environment] region in
@@ -777,11 +803,11 @@ final class MapTalkViewModel: ObservableObject {
             .switchToLatest()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] pois in
-                guard let self else { return }
+                guard let self, isMapActive else { return }
                 repositoryPOIs = pois
                 rebuildMapRenderContent()
             }
-            .store(in: &cancellables)
+            .store(in: &mapActivityCancellables)
 
         mapSearchRegion
             .map { [environment] region in
@@ -790,11 +816,11 @@ final class MapTalkViewModel: ObservableObject {
             .switchToLatest()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] reals in
-                guard let self else { return }
+                guard let self, isMapActive else { return }
                 repositoryMapReels = reals
                 rebuildMapRenderContent()
             }
-            .store(in: &cancellables)
+            .store(in: &mapActivityCancellables)
 
         locationStream
             .compactMap { $0?.coordinate }
@@ -813,11 +839,16 @@ final class MapTalkViewModel: ObservableObject {
             .switchToLatest()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] result in
-                self?.nearbyDirectoryPOIs = result.places
-                self?.nearbyPlaceIssue = result.issue
-                self?.isLoadingNearbyPlaces = false
+                guard let self, isMapActive else { return }
+                nearbyDirectoryPOIs = result.places
+                nearbyPlaceIssue = result.issue
+                isLoadingNearbyPlaces = false
             }
-            .store(in: &cancellables)
+            .store(in: &mapActivityCancellables)
+    }
+
+    private func bind() {
+        bindMapActivity()
 
         environment.myMapArchive.$publicPOIOverlays
             .receive(on: DispatchQueue.main)

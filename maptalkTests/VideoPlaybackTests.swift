@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import SwiftUI
 import Testing
+import UIKit
 @testable import maptalk
 
 struct VideoPlaybackTests {
@@ -15,15 +16,18 @@ struct VideoPlaybackTests {
     }
 
     @Test @MainActor
-    func compactDefaultsToQuietButOpenedVideoIsAudibleUnlessExplicitlyMuted() {
+    func compactAndOpenedVideosDefaultToSoundUnlessExplicitlyMuted() {
         let url = URL(fileURLWithPath: "/tmp/playback-test.mp4")
         let compact = ExperienceDetailView.AutoPlayVideoView(url: url, poster: nil, accentColor: .blue, mode: .card)
         let opened = ExperienceDetailView.AutoPlayVideoView(url: url, poster: nil, accentColor: .blue, mode: .lightbox)
         let muted = ExperienceDetailView.AutoPlayVideoView(url: url, poster: nil, accentColor: .blue,
                                                           mode: .lightbox, isMuted: true)
-        #expect(compact.isMuted)
+        let mutedCompact = ExperienceDetailView.AutoPlayVideoView(url: url, poster: nil, accentColor: .blue,
+                                                                 mode: .card, isMuted: true)
+        #expect(!compact.isMuted)
         #expect(!opened.isMuted)
         #expect(muted.isMuted)
+        #expect(mutedCompact.isMuted)
     }
 
     @Test @MainActor
@@ -99,7 +103,7 @@ struct VideoPlaybackTests {
     @Test @MainActor
     func audibleSessionIsScopedMixableAndRestoresPreviousConfiguration() {
         let session = PlaybackAudioSessionSpy()
-        let audio = VideoPlaybackAudioSession(session: session)
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .zero)
         let owner = UUID()
         #expect(session.activationRequests.isEmpty)
         #expect(audio.acquire(owner: owner, stopPlayback: {}))
@@ -121,7 +125,7 @@ struct VideoPlaybackTests {
     @Test @MainActor
     func selectingAnotherVideoStopsPreviousOwnerAndIgnoresLateCleanup() {
         let session = PlaybackAudioSessionSpy()
-        let audio = VideoPlaybackAudioSession(session: session)
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .zero)
         let first = UUID()
         let second = UUID()
         var stoppedFirst = false
@@ -131,19 +135,163 @@ struct VideoPlaybackTests {
         })
         #expect(audio.acquire(owner: second, stopPlayback: {}))
         #expect(stoppedFirst)
+        #expect(session.activationRequests == [true])
+        #expect(session.categoryChanges.count == 1)
+        audio.release(owner: first)
+        #expect(session.activationRequests == [true])
+        audio.release(owner: second)
+        #expect(session.activationRequests == [true, false])
+        #expect(session.category == .ambient)
+    }
+
+    @Test @MainActor
+    func outgoingFirstHandoffCancelsDeferredReleaseAndEventuallyReleases() async throws {
+        let session = PlaybackAudioSessionSpy()
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .milliseconds(40))
+        let first = UUID()
+        let second = UUID()
+        #expect(audio.acquire(owner: first, stopPlayback: {}))
+        audio.release(owner: first)
+        #expect(session.activationRequests == [true])
+        // The new page may not become selected until a subsequent UI update.
+        try await Task.sleep(for: .milliseconds(5))
+        #expect(audio.acquire(owner: second, stopPlayback: {}))
+        audio.release(owner: first)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(session.activationRequests == [true])
+        #expect(session.categoryChanges.count == 1)
+        audio.release(owner: second)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(session.activationRequests == [true, false])
+        #expect(session.category == .ambient)
+    }
+
+    @Test @MainActor
+    func twentyMixedOrderHandoffsUseOneSessionAndSilenceEveryPredecessor() async throws {
+        let session = PlaybackAudioSessionSpy()
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .milliseconds(40))
+        var current = UUID()
+        var stoppedOwners: Set<UUID> = []
+        let first = current
+        #expect(audio.acquire(owner: first) {
+            stoppedOwners.insert(first)
+            audio.release(owner: first)
+        })
+        for index in 0..<20 {
+            let outgoing = current
+            if index.isMultiple(of: 2) {
+                // An outgoing-first caller stops its own player before release.
+                stoppedOwners.insert(outgoing)
+                audio.release(owner: outgoing)
+            }
+            let incoming = UUID()
+            #expect(audio.acquire(owner: incoming) {
+                stoppedOwners.insert(incoming)
+                audio.release(owner: incoming)
+            })
+            audio.release(owner: outgoing)
+            current = incoming
+        }
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(stoppedOwners.count == 20)
+        #expect(!stoppedOwners.contains(current))
+        #expect(session.activationRequests == [true])
+        #expect(session.categoryChanges.count == 1)
+        audio.release(owner: current)
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(session.activationRequests == [true, false])
+        #expect(session.categoryChanges.count == 2)
+    }
+
+    @Test @MainActor
+    func backgroundStopsCurrentPlayerAndReleasesWithoutGracePeriod() {
+        let session = PlaybackAudioSessionSpy()
+        let notifications = NotificationCenter()
+        let audio = VideoPlaybackAudioSession(session: session, notificationCenter: notifications)
+        let first = UUID()
+        var stopped = false
+        #expect(audio.acquire(owner: first) {
+            stopped = true
+            audio.release(owner: first)
+        })
+        notifications.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        #expect(stopped)
+        #expect(session.activationRequests == [true, false])
+        #expect(!audio.acquire(owner: first, stopPlayback: {}))
+        notifications.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        #expect(audio.acquire(owner: first, stopPlayback: {}))
+        notifications.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        #expect(session.activationRequests == [true, false, true, false])
+    }
+
+    @Test @MainActor
+    func interruptionInvalidatesCachedSessionAndAllowsFreshPlaybackAfterEnding() {
+        let session = PlaybackAudioSessionSpy()
+        let notifications = NotificationCenter()
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .zero,
+                                               notificationCenter: notifications)
+        let first = UUID()
+        var stopped = false
+        #expect(audio.acquire(owner: first) {
+            stopped = true
+            audio.release(owner: first)
+        })
+        notifications.post(name: AVAudioSession.interruptionNotification, object: nil,
+                           userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
+        #expect(stopped)
+        #expect(!audio.acquire(owner: first, stopPlayback: {}))
+        notifications.post(name: AVAudioSession.interruptionNotification, object: nil,
+                           userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue])
+        #expect(audio.acquire(owner: first, stopPlayback: {}))
         #expect(session.activationRequests == [true, false, true])
         audio.release(owner: first)
-        #expect(session.activationRequests == [true, false, true])
-        audio.release(owner: second)
         #expect(session.activationRequests == [true, false, true, false])
+    }
+
+    @Test @MainActor
+    func foregroundCanRetryAfterInterruptionWithoutMatchingEndNotification() {
+        let session = PlaybackAudioSessionSpy()
+        let notifications = NotificationCenter()
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .zero,
+                                               notificationCenter: notifications)
+        let owner = UUID()
+        #expect(audio.acquire(owner: owner, stopPlayback: {}))
+        notifications.post(name: AVAudioSession.interruptionNotification, object: nil,
+                           userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
+        notifications.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        notifications.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        // The OS, rather than a stale local interruption flag, decides whether
+        // audio is available after the app resumes.
+        session.rejectActivation = true
+        #expect(!audio.acquire(owner: owner, stopPlayback: {}))
+        #expect(session.activationRequests == [true, false, true])
+        session.rejectActivation = false
+        #expect(audio.acquire(owner: owner, stopPlayback: {}))
+        audio.release(owner: owner)
+        #expect(session.activationRequests == [true, false, true, true, false])
         #expect(session.category == .ambient)
+    }
+
+    @Test @MainActor
+    func delayedCleanupDoesNotDeactivateOrOverwriteCameraConfiguration() async throws {
+        let session = PlaybackAudioSessionSpy()
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .milliseconds(40))
+        let owner = UUID()
+        #expect(audio.acquire(owner: owner, stopPlayback: {}))
+        audio.release(owner: owner)
+        try session.setCategory(.playAndRecord, mode: .videoRecording, options: [])
+        try await Task.sleep(for: .milliseconds(80))
+        #expect(session.activationRequests == [true])
+        #expect(session.category == .playAndRecord)
+        #expect(session.mode == .videoRecording)
+        #expect(session.categoryChanges.count == 2)
     }
 
     @Test @MainActor
     func failedActivationDoesNotClaimOwnershipOrLeavePlaybackCategoryBehind() {
         let session = PlaybackAudioSessionSpy()
         session.rejectActivation = true
-        let audio = VideoPlaybackAudioSession(session: session)
+        let audio = VideoPlaybackAudioSession(session: session, releaseDelay: .zero)
         let owner = UUID()
         #expect(!audio.acquire(owner: owner, stopPlayback: {}))
         #expect(session.category == .ambient)
@@ -164,10 +312,12 @@ private final class PlaybackAudioSessionSpy: VideoAudioSessionControlling {
     var activationRequests: [Bool] = []
     var lastDeactivationOptions: AVAudioSession.SetActiveOptions = []
     var rejectActivation = false
+    var categoryChanges: [AVAudioSession.Category] = []
 
     func setCategory(_ category: AVAudioSession.Category, mode: AVAudioSession.Mode,
                      options: AVAudioSession.CategoryOptions) throws {
         self.category = category
+        categoryChanges.append(category)
         self.mode = mode
         categoryOptions = options
     }
