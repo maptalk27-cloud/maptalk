@@ -223,6 +223,96 @@ private struct PrivateHighlightCover: View {
     }
 }
 
+/// A visible entrance to the same private folders, not a second Story feed.
+/// The parent places this inside its List so it scrolls away with the memories.
+@MainActor
+struct PrivateHighlightShelf: View {
+    let folders: [JourneyFolder]
+    let recordsForFolder: (JourneyFolder) -> [UserMapRecord]
+    let onOpen: (JourneyFolder) -> Void
+    let onSeeAll: () -> Void
+    let onCreate: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Highlights")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Spacer()
+
+                if folders.isEmpty == false {
+                    Button(action: onSeeAll) {
+                        Text("See all")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("See all highlights")
+                    .accessibilityIdentifier("mymap.collections-entry")
+                }
+            }
+            .frame(minHeight: 32)
+            .padding(.horizontal, 16)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(folders) { folder in
+                        let records = recordsForFolder(folder)
+                        Button {
+                            onOpen(folder)
+                        } label: {
+                            VStack(spacing: 7) {
+                                PrivateHighlightCover(records: records, size: 64)
+                                title(folder.title)
+                            }
+                            .frame(width: 80)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open \(folder.title)")
+                        .accessibilityValue("\(records.count == 1 ? "1 memory" : "\(records.count) memories"), Only you")
+                        .accessibilityIdentifier("mymap.highlight.\(folder.id.uuidString)")
+                    }
+
+                    Button(action: onCreate) {
+                        VStack(spacing: 7) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 22, weight: .light))
+                                .foregroundStyle(.primary)
+                                .frame(width: 64, height: 64)
+                                .background(Color(.secondarySystemBackground), in: Circle())
+                            title("New")
+                        }
+                        .frame(width: 80)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("New highlight")
+                    .accessibilityIdentifier("mymap.highlights-new")
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 4)
+            }
+        }
+        .padding(.top, 4)
+        .padding(.bottom, 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("mymap.highlights-shelf")
+    }
+
+    private func title(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
+    }
+}
+
 /// The private Highlights directory reached from MyMap.
 /// It is deliberately just a directory: selecting and adding memories stays
 /// in the main MyMap list, where search and filters already live.

@@ -540,6 +540,8 @@ struct UserMapHomeView: View {
     @State private var journeyFolderRenameRequest: JourneyFolderRenameRequest?
     @State private var isJourneyCollectionsPresented = false
     @State private var activeCollection: JourneyFolder?
+    @State private var isCreatingHighlight = false
+    @State private var newHighlightTitle = ""
     @State private var recordPendingRemoval: UserMapRecord?
     @State private var journeyOrganizerRenamePendingFolder: JourneyFolder?
     @State private var isOrganizingMapJourneys = false
@@ -752,18 +754,6 @@ struct UserMapHomeView: View {
                     .disabled(records.isEmpty)
                     .accessibilityIdentifier("mymap.select-memories")
                 }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        presentCollectionsDirectory()
-                    } label: {
-                        Image(systemName: "rectangle.stack")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Highlights")
-                    .accessibilityIdentifier("mymap.collections-entry")
-                }
             }
 
             if display == .map, mapFocusedJourney == nil, isOrganizingMapJourneys {
@@ -789,6 +779,15 @@ struct UserMapHomeView: View {
                 onRemove: onRemoveFromMyMap
             )
         )
+        .alert("New highlight", isPresented: $isCreatingHighlight) {
+            TextField("Highlight name", text: $newHighlightTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Create") {
+                let title = newHighlightTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let folder = onCreateJourneyFolder(title.isEmpty ? "Untitled Highlight" : title, []) else { return }
+                presentCollection(folder)
+            }
+        }
         .sheet(item: $filterPresentation) { presentation in
             UserMapFilterSheet(
                 presentation: presentation,
@@ -1095,16 +1094,17 @@ struct UserMapHomeView: View {
     }
 
     private func presentCollectionsDirectory() {
+        isSearchFocused = false
         activeCollection = nil
         isJourneyCollectionsPresented = true
     }
 
     private func presentCollection(_ folder: JourneyFolder) {
-        activeCollection = nil
+        isSearchFocused = false
+        // Resolve the destination before presentation: opening a cover should
+        // show its contents immediately, without flashing the directory first.
+        activeCollection = folder
         isJourneyCollectionsPresented = true
-        DispatchQueue.main.async {
-            activeCollection = folder
-        }
     }
 
     private var isJourneyOrganizerTransactionActive: Bool {
@@ -1999,6 +1999,27 @@ struct UserMapHomeView: View {
     private var listContent: some View {
         ScrollViewReader { proxy in
             List {
+                if canEditJourneyFolders,
+                   isSelectingCollectionMemories == false,
+                   searchText.isEmpty,
+                   hasActiveFilters == false {
+                    PrivateHighlightShelf(
+                        folders: journeyFolders,
+                        // Use authored member order, matching the directory's
+                        // cover, not the map organizer's newest-first receiver.
+                        recordsForFolder: { Array(mapJourneyRecords(for: $0).reversed()) },
+                        onOpen: presentCollection,
+                        onSeeAll: presentCollectionsDirectory,
+                        onCreate: {
+                            newHighlightTitle = ""
+                            isCreatingHighlight = true
+                        }
+                    )
+                    .listRowInsets(.init())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+
                 if filteredRecords.isEmpty {
                     archiveEmptyState
                         .listRowInsets(.init())
@@ -2011,6 +2032,9 @@ struct UserMapHomeView: View {
                 }
             }
             .listStyle(.plain)
+            // The shelf and date headers already own their breathing room;
+            // avoid List inserting a second section gap between them.
+            .listSectionSpacing(0)
             .scrollContentBackground(.hidden)
             .contentMargins(.top, 0, for: .scrollContent)
             .contentMargins(.bottom, 94, for: .scrollContent)

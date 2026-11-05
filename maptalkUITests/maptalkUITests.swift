@@ -466,7 +466,8 @@ final class maptalkUITests: XCTestCase {
         let title = app.navigationBars["MyMap"].staticTexts["MyMap"]
         XCTAssertTrue(title.exists)
         XCTAssertLessThan(select.frame.maxX, title.frame.minX)
-        XCTAssertGreaterThan(collections.frame.minX, title.frame.maxX)
+        XCTAssertEqual(collections.label, "See all highlights")
+        XCTAssertGreaterThan(collections.frame.minY, app.textFields["Search memories"].frame.maxY)
         select.tap()
 
         let addSelected = app.buttons["mymap.add-selected-memories"]
@@ -474,6 +475,7 @@ final class maptalkUITests: XCTestCase {
         XCTAssertFalse(addSelected.isEnabled)
         XCTAssertEqual(addSelected.value as? String, "0 selected")
         XCTAssertFalse(app.buttons["Show map"].exists)
+        XCTAssertFalse(collections.exists, "Browsing highlights must not interrupt memory selection")
 
         let record = app.buttons[
             "mymap.list-record.00000000-0000-0000-0000-000000009118"
