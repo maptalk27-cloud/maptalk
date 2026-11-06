@@ -26,7 +26,9 @@ struct MapTalkView: View {
     @State private var currentRegion: MKCoordinateRegion?
     @State private var currentCamera: MapCamera?
     @State private var settledFriendFootprintRegion: MKCoordinateRegion?
+    @State private var friendFootprintLayoutRegion: MKCoordinateRegion?
     @State private var friendFootprintVisibility: FriendFootprintScreenVisibility?
+    @StateObject private var friendFootprintLayoutScheduler = FriendFootprintLayoutScheduler()
     @State private var mapControlsFrame: CGRect = .zero
     @StateObject private var friendFootprintInteractionGate =
         FriendFootprintMapInteractionGate()
@@ -549,10 +551,27 @@ struct MapTalkView: View {
                     .accessibilityValue(currentCamera.map {
                         "\($0.centerCoordinate.latitude),\($0.centerCoordinate.longitude)"
                     } ?? "")
+                    .onAppear {
+                        refreshFriendFootprintVisibility(
+                            using: mapProxy, canvasSize: geometry.size,
+                            topChromeBottom: friendFootprintTopExclusion,
+                            region: currentRegion ?? viewModel.region
+                        )
+                    }
+                    .onChangeCompat(of: mapWorkEnabled) { active in
+                        if active {
+                            refreshFriendFootprintVisibility(
+                                using: mapProxy, canvasSize: geometry.size,
+                                topChromeBottom: friendFootprintTopExclusion,
+                                region: currentRegion ?? viewModel.region
+                            )
+                        }
+                    }
                     .onMapCameraChange(frequency: .continuous) { context in
                         guard mapWorkEnabled else { return }
                         flightController.observeCamera(region: context.region, camera: context.camera)
                         friendFootprintInteractionGate.noteCameraMotion()
+                        friendFootprintLayoutScheduler.noteCameraMotion(region: context.region)
                         if cameraPosition.positionedByUser {
                             viewModel.cancelPendingLocationFocus()
                         }
@@ -561,16 +580,11 @@ struct MapTalkView: View {
                         guard mapWorkEnabled else { return }
                         flightController.observeCamera(region: context.region, camera: context.camera)
                         flightController.observeCameraEnd()
+                        friendFootprintLayoutScheduler.noteCameraMotion(region: context.region)
                         // A replaced flight can emit an old onEnd during the
                         // next flight. Do not rebuild around its temporary frame.
                         guard !flightController.isTransitionInProgress else { return }
                         friendFootprintInteractionGate.noteCameraMotion()
-                        let preservesSettledRepresentatives =
-                            FriendFootprintSamplingContinuityPolicy
-                                .shouldPreserveRepresentatives(
-                                    from: settledFriendFootprintRegion,
-                                    to: context.region
-                                )
                         // Browsing still tracks the visible camera for normal map
                         // behavior. Publishing deliberately ignores this value
                         // and always uses the device's live location instead.
@@ -585,8 +599,7 @@ struct MapTalkView: View {
                             using: mapProxy,
                             canvasSize: geometry.size,
                             topChromeBottom: friendFootprintTopExclusion,
-                            region: context.region,
-                            preserveVisibleRepresentatives: preservesSettledRepresentatives
+                            region: context.region
                         )
                     }
                     .onChangeCompat(of: friendFootprintTopExclusion) { _ in
@@ -594,8 +607,7 @@ struct MapTalkView: View {
                             using: mapProxy,
                             canvasSize: geometry.size,
                             topChromeBottom: friendFootprintTopExclusion,
-                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region,
-                            preserveVisibleRepresentatives: false
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region
                         )
                     }
                     .onChangeCompat(of: geometry.size) { _ in
@@ -603,8 +615,7 @@ struct MapTalkView: View {
                             using: mapProxy,
                             canvasSize: geometry.size,
                             topChromeBottom: friendFootprintTopExclusion,
-                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region,
-                            preserveVisibleRepresentatives: false
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region
                         )
                     }
                     .onChangeCompat(of: mapControlsFrame) { _ in
@@ -620,8 +631,7 @@ struct MapTalkView: View {
                             using: mapProxy,
                             canvasSize: geometry.size,
                             topChromeBottom: friendFootprintTopExclusion,
-                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region,
-                            preserveVisibleRepresentatives: false
+                            region: settledFriendFootprintRegion ?? currentRegion ?? viewModel.region
                         )
                     }
                     .onChangeCompat(of: selectedFriendFootprintID) { _ in
@@ -1117,6 +1127,7 @@ struct MapTalkView: View {
                     reconcileFriendStories(geometry: geometry)
                 }
             }
+            .onDisappear { friendFootprintLayoutScheduler.cancel() }
             .onChangeCompat(of: isTabActive) { active in
                 updateMapActivity()
                 if active && scenePhase == .active {
@@ -1277,6 +1288,7 @@ private extension MapTalkView {
     func updateMapActivity() {
         viewModel.setMapActivity(mapWorkEnabled)
         guard !mapWorkEnabled else { return }
+        friendFootprintLayoutScheduler.cancel()
         // Finish at the selected post while offscreen, without animating or
         // leaving a queued flight to fight the newly selected tab.
         let landing = flightController.pendingLandingRegion
@@ -1286,6 +1298,7 @@ private extension MapTalkView {
             transaction.disablesAnimations = true
             withTransaction(transaction) { cameraPosition = .region(landing) }
             currentRegion = landing
+            settledFriendFootprintRegion = landing
             currentCamera = nil
             viewModel.rememberVisibleRegion(landing)
         }
@@ -1606,14 +1619,41 @@ private extension MapTalkView {
         using mapProxy: MapProxy,
         canvasSize: CGSize,
         topChromeBottom: CGFloat,
-        region: MKCoordinateRegion,
-        preserveVisibleRepresentatives: Bool = true
+        region: MKCoordinateRegion
     ) {
         guard mapWorkEnabled else { return }
         guard focusedJourneyHeader == nil, viewModel.isUserScope == false else {
+            friendFootprintLayoutScheduler.cancel()
             friendFootprintVisibility = nil
             return
         }
+
+        // Data, GPS and chrome changes can arrive during a pan or flight.
+        // Project them only after the actual camera settles, using the latest
+        // settled region rather than pairing an old region with a moving MapProxy.
+        friendFootprintLayoutScheduler.request(canApply: {
+            mapWorkEnabled && !flightController.isTransitionInProgress
+        }) {
+            applyFriendFootprintVisibility(
+                using: mapProxy, canvasSize: canvasSize,
+                topChromeBottom: topChromeBottom,
+                region: friendFootprintLayoutScheduler.visibleRegion
+                    ?? settledFriendFootprintRegion ?? region
+            )
+        }
+    }
+
+    func applyFriendFootprintVisibility(
+        using mapProxy: MapProxy,
+        canvasSize: CGSize,
+        topChromeBottom: CGFloat,
+        region: MKCoordinateRegion
+    ) {
+        guard mapWorkEnabled, focusedJourneyHeader == nil, !viewModel.isUserScope else { return }
+        // A data refresh at the same zoom keeps existing representatives.
+        // Only an actual scale change gets a fresh spatial sample.
+        let preserveVisibleRepresentatives = FriendFootprintSamplingContinuityPolicy
+            .shouldPreserveRepresentatives(from: friendFootprintLayoutRegion, to: region)
 
         let layout = FriendFootprintViewportPolicy.layout(
             footprints: viewModel.friendFootprints,
@@ -1665,8 +1705,15 @@ private extension MapTalkView {
             previousDensityStyle: friendFootprintVisibility?.densityStyle
         )
 
-        if friendFootprintVisibility != newVisibility {
-            friendFootprintVisibility = newVisibility
+        // Automatic layout must not inherit a sheet/flight animation and blink
+        // annotations. A deliberate marker tap keeps its own selection feedback.
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            friendFootprintLayoutRegion = region
+            if friendFootprintVisibility != newVisibility {
+                friendFootprintVisibility = newVisibility
+            }
         }
     }
 

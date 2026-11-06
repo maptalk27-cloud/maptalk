@@ -221,6 +221,10 @@ enum FriendFootprintScreenLayoutPolicy {
     // corner clearance for quiet history prevents a compact marker from
     // sitting in a live marker's real tap region with no way to select it.
     static let historyPointYieldClearance = primaryPointClearance
+    // Keep an already-visible place until the safe clearance is crossed, but
+    // wait for a little more room before revealing a hidden one again.
+    static let historyPointEntryClearance: CGFloat = 78
+    static let retainedScreenEdgeClearance: CGFloat = 32
     static let automaticMarkerCollapseSpacing: CGFloat = 66
     static let expandedMarkerAreaBudget: CGFloat = 42_000
     static let minimumExpandedMarkerCapacity = 4
@@ -256,12 +260,15 @@ enum FriendFootprintScreenLayoutPolicy {
         let usableArea = max(1, canvasSize.width) * usableHeight
         let candidates = projectedPlaces.filter { place in
             let point = place.point
+            let edgeClearance = previouslyVisibleIDs.contains(place.id)
+                ? retainedScreenEdgeClearance
+                : FriendFootprintScreenOcclusionPolicy.compactMarkerClearance
             guard point.x.isFinite,
                   point.y.isFinite,
-                  point.x >= -FriendFootprintScreenOcclusionPolicy.compactMarkerClearance,
-                  point.x <= canvasSize.width + FriendFootprintScreenOcclusionPolicy.compactMarkerClearance,
-                  point.y >= -FriendFootprintScreenOcclusionPolicy.compactMarkerClearance,
-                  point.y <= canvasSize.height + FriendFootprintScreenOcclusionPolicy.compactMarkerClearance else {
+                  point.x >= -edgeClearance,
+                  point.x <= canvasSize.width + edgeClearance,
+                  point.y >= -edgeClearance,
+                  point.y <= canvasSize.height + edgeClearance else {
                 return false
             }
 
@@ -298,23 +305,24 @@ enum FriendFootprintScreenLayoutPolicy {
         // it. A selected history place is retained so an open preview never
         // loses its visual anchor.
         let renderCandidates = candidates.filter { candidate in
-            candidate.id == selectedID
+            let clearance = previouslyVisibleIDs.contains(candidate.id)
+                ? historyPointYieldClearance
+                : historyPointEntryClearance
+            return candidate.id == selectedID
                 || primaryIndex.contains(
                     candidate.point,
-                    within: historyPointYieldClearance
+                    within: clearance
                 ) == false
         }
-        let stablePreviousIDs = previousDensityStyle == nil
-            || previousDensityStyle == densityStyle
-            ? previouslyVisibleIDs
-            : []
         let sampledCandidates = visibleRepresentatives(
             from: renderCandidates,
             canvasSize: canvasSize,
             topChromeBottom: topChromeBottom,
             densityStyle: densityStyle,
             selectedID: selectedID,
-            previouslyVisibleIDs: stablePreviousIDs
+            // A density tier changes the budget, not the identity of every
+            // place on screen. Sampling below still enforces the new budget.
+            previouslyVisibleIDs: previouslyVisibleIDs
         )
         let visibleIDs = Set(sampledCandidates.map(\.id))
 
@@ -1473,6 +1481,7 @@ struct FriendFootprintOverlay: MapContent {
         ForEach(visiblePlaces) { footprint in
             Annotation("", coordinate: footprint.coordinate) {
                 let isExpanded = visibility.expandedPlaceIDs.contains(footprint.id)
+                    || selectedID == footprint.id
 
                 ZStack {
                     FriendVisitedPlaceMarker(
@@ -1559,20 +1568,18 @@ private struct FriendVisitedPlaceMarker: View {
         ZStack {
             if showsDetail {
                 expandedMarker
-                    .transition(.scale(scale: 0.7).combined(with: .opacity))
+                    .transition(.identity)
             } else {
                 compactMarker
-                    .transition(.scale(scale: 0.82).combined(with: .opacity))
+                    .transition(.identity)
             }
         }
-        .frame(
-            width: showsDetail ? 44 : 28,
-            height: showsDetail ? 44 : 28
-        )
+        // Keep the annotation anchor fixed when detail is promoted. The
+        // separate button above still has its exact 16pt / 44pt hit target.
+        .frame(width: 44, height: 44)
         .contentShape(Circle())
-        .animation(.snappy(duration: 0.18, extraBounce: 0), value: isExpanded)
+        .animation(nil, value: isExpanded)
         .animation(.snappy(duration: 0.17, extraBounce: 0), value: isSelected)
-        .animation(.easeOut(duration: 0.14), value: densityStyle)
     }
 
     private var expandedMarker: some View {

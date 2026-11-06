@@ -527,12 +527,8 @@ struct UserMapHomeView: View {
     @State private var mapJourneyEntryRecord: UserMapRecord?
     @State private var mapJourneyEntryRegion: MKCoordinateRegion?
     @StateObject private var mapCapsulePresentation: MapExperiencePresentation
-    @StateObject private var mapFlightController = MapFlightController()
-    @StateObject private var cameraPositionStore: MapCameraPositionStore
-    private var cameraPosition: MapCameraPosition {
-        get { cameraPositionStore.position }
-        nonmutating set { cameraPositionStore.setCommand(newValue) }
-    }
+    @State private var mapFlightController = MyMapFlightController()
+    @State private var cameraPosition: MapCameraPosition
     @State private var currentMapRegion: MKCoordinateRegion
     @State private var mapSize: CGSize = .zero
     @State private var mapSafeAreaBottom: CGFloat = 0
@@ -608,7 +604,7 @@ struct UserMapHomeView: View {
         self.onRemoveFromMyMap = onRemoveFromMyMap
         self.onMapUserNavigation = onMapUserNavigation
         self.userProvider = userProvider
-        _cameraPositionStore = StateObject(wrappedValue: MapCameraPositionStore(.region(region)))
+        _cameraPosition = State(initialValue: .region(region))
         _currentMapRegion = State(initialValue: region)
         _mapCapsulePresentation = StateObject(
             wrappedValue: MapExperiencePresentation(compactDetent: Self.mapCapsuleCompactDetent)
@@ -903,6 +899,11 @@ struct UserMapHomeView: View {
                   cameraPosition.positionedByUser == false else { return }
             cameraPosition = .region(region)
             currentMapRegion = region
+        }
+        .onChangeCompat(of: cameraPosition.positionedByUser) { positionedByUser in
+            guard positionedByUser else { return }
+            hasUserNavigatedMap = true
+            onMapUserNavigation()
         }
         .onChange(of: records.compactMap(\.journeyMemberReference)) { _, references in
             // Refresh and pending-upload reconciliation can replace records.
@@ -2366,16 +2367,7 @@ struct UserMapHomeView: View {
                 )
 
                 Map(
-                    position: Binding(get: { cameraPosition }, set: { position in
-                        if position.positionedByUser {
-                            mapFlightController.cancelActiveTransition()
-                            if cameraPosition.positionedByUser == false {
-                                hasUserNavigatedMap = true
-                                onMapUserNavigation()
-                            }
-                        }
-                        cameraPositionStore.observeNativePosition(position)
-                    }),
+                    position: $cameraPosition,
                     // Empty map space remains fully explorable in organize
                     // mode. Once a memory is in a transaction, freeze the
                     // canvas until it reaches its frozen destination.
@@ -2405,13 +2397,8 @@ struct UserMapHomeView: View {
                 }
                 .ignoresSafeArea(edges: .bottom)
                 .onMapCameraChange(frequency: .continuous) { context in
-                    mapFlightController.observeCamera(region: context.region, camera: context.camera)
                     currentMapRegion = context.region
                     mapOverlayRevision &+= 1
-                }
-                .onMapCameraChange(frequency: .onEnd) { context in
-                    mapFlightController.observeCamera(region: context.region, camera: context.camera)
-                    mapFlightController.observeCameraEnd()
                 }
                 .onAppear {
                     mapSize = geometry.size
@@ -3334,12 +3321,6 @@ struct UserMapHomeView: View {
         }
     }
 
-    private var mapBrowsingCoordinates: [CLLocationCoordinate2D] {
-        // Match the capsule's current filtered/folder scope, excluding folders
-        // themselves: they are navigation routes rather than pageable stops.
-        mapCapsuleRecords.filter(\.isMapExperienceItem).map(\.coordinate)
-    }
-
     private var mapSequenceSelection: Binding<UUID> {
         Binding(
             get: {
@@ -3365,12 +3346,7 @@ struct UserMapHomeView: View {
             // The large sheet covers the map now, but it may be collapsed at
             // any point. Keep its pending camera framed for the compact card
             // rather than letting the pin reappear behind the card later.
-            mapFlightController.cancelActiveTransition()
-            let landingRegion = mapFlightController.neighborhoodRegion(
-                for: targetRegion,
-                coordinates: mapBrowsingCoordinates
-            ) ?? targetRegion
-            let framedTarget = mapStoryViewport?.framed(landingRegion) ?? landingRegion
+            let framedTarget = mapStoryViewport?.framed(targetRegion) ?? targetRegion
             currentMapRegion = framedTarget
             cameraPosition = .region(framedTarget)
             return
@@ -3392,8 +3368,7 @@ struct UserMapHomeView: View {
             targetRegion: storyRegion(for: record),
             cause: mapFlightCause(for: record),
             viewport: mapStoryViewport,
-            browsingCoordinates: mapBrowsingCoordinates,
-            cameraPosition: cameraPositionStore.commandBinding
+            cameraPosition: $cameraPosition
         ) { region in
             currentMapRegion = region
         }
@@ -3503,7 +3478,6 @@ struct UserMapHomeView: View {
     private func focusMap(on records: [UserMapRecord]) {
         guard let targetRegion = mapRegion(for: records) else { return }
 
-        mapFlightController.cancelActiveTransition()
         withAnimation(.easeInOut(duration: 0.3)) {
             cameraPosition = .region(targetRegion)
         }
