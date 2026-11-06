@@ -141,6 +141,8 @@ struct MapExperienceCapsule: View {
     let pager: ExperienceDetailView.SequencePager
     @Binding private var selection: UUID
     let isExpanded: Bool
+    let poiBrowsingUserID: UUID?
+    let poiOverviewID: UUID?
     let onCollapsedTap: (() -> Void)?
     let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
@@ -152,6 +154,8 @@ struct MapExperienceCapsule: View {
         pager: ExperienceDetailView.SequencePager,
         selection: Binding<UUID>,
         isExpanded: Bool,
+        poiBrowsingUserID: UUID? = nil,
+        poiOverviewID: UUID? = nil,
         onCollapsedTap: (() -> Void)? = nil,
         journeyProvider: @escaping (UUID) -> JourneyPost? = { PreviewData.journey(for: $0) },
         userProvider: @escaping (UUID) -> User? = { _ in nil },
@@ -162,6 +166,8 @@ struct MapExperienceCapsule: View {
         self.pager = pager
         _selection = selection
         self.isExpanded = isExpanded
+        self.poiBrowsingUserID = poiBrowsingUserID
+        self.poiOverviewID = poiOverviewID
         self.onCollapsedTap = onCollapsedTap
         self.journeyProvider = journeyProvider
         self.userProvider = userProvider
@@ -175,6 +181,8 @@ struct MapExperienceCapsule: View {
             sequencePager: pager,
             selection: $selection,
             isExpanded: isExpanded,
+            poiBrowsingUserID: poiBrowsingUserID,
+            poiOverviewID: poiOverviewID,
             onCollapsedTap: onCollapsedTap,
             onJourneyAvatarStackTap: onJourneyAvatarStackTap,
             journeyProvider: journeyProvider,

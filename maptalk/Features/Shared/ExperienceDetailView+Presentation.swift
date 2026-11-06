@@ -40,7 +40,8 @@ extension ExperienceDetailView {
                             onPOIContributorViewed: onPOIContributorViewed,
                             isPOIContributorUnseen: isPOIContributorUnseen,
                             isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id,
-                            commentTarget: item.mode.commentTarget
+                            commentTarget: item.mode.commentTarget,
+                            featuredPOIMedia: browsingPOIMedia(for: item.mode)
                         )
                         .background(ExperiencePagerVerticalBounceGuard())
                         .tag(item.id)
@@ -61,7 +62,7 @@ extension ExperienceDetailView {
                     isPOIContributorUnseen: isPOIContributorUnseen,
                     isPlaybackActive: isMediaPlaybackActive,
                     commentTarget: currentMode.commentTarget,
-                    featuredPOIMedia: expandedPOIMedia,
+                    featuredPOIMedia: expandedPOIMedia ?? browsingPOIMedia(for: currentMode),
                     featuredPOIMediaContent: expandedPOIMediaContent
                 )
             }
@@ -75,7 +76,10 @@ extension ExperienceDetailView {
                 if let context = sequenceContext {
                     TabView(selection: context.selection) {
                         ForEach(context.pager.items) { item in
-                            collapsedPreviewContent(for: item.mode)
+                            collapsedPreviewContent(
+                                for: item.mode,
+                                isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id
+                            )
                                 .collapsedPreviewTap(onCollapsedTap)
                                 .tag(item.id)
                                 .frame(width: size.width, height: size.height)
@@ -95,9 +99,18 @@ extension ExperienceDetailView {
     }
 
     @ViewBuilder
-    private func collapsedPreviewContent(for mode: Mode) -> some View {
-        let data = contentData(for: mode)
-        collapsedPreviewLayer(using: data)
+    private func collapsedPreviewContent(for mode: Mode, isPlaybackActive: Bool) -> some View {
+        if case let .poi(place) = mode,
+           let media = browsingPOISelection(for: place)?.media {
+            FriendStoryPOIPreview(place: place, media: media, isPlaybackActive: isPlaybackActive)
+        } else {
+            collapsedPreviewLayer(using: contentData(for: mode))
+        }
+    }
+
+    private func browsingPOIMedia(for mode: Mode) -> RatedPOI.Media? {
+        guard case let .poi(place) = mode else { return nil }
+        return browsingPOISelection(for: place)?.media
     }
 
     @ViewBuilder

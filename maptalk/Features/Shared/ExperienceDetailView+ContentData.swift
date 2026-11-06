@@ -220,8 +220,23 @@ extension ExperienceDetailView {
         return "\(base) · \(descriptor)"
     }
 
+    func browsingPOISelection(for ratedPOI: RatedPOI) -> POIStorySelection? {
+        guard ratedPOI.id != poiOverviewID,
+              let ownerID = poiBrowsingUserID,
+              let visit = ratedPOI.checkInPeople().first(where: { $0.userID == ownerID })?.latest else {
+            return nil
+        }
+        // A location-only visit stays location-only. Never borrow a previous
+        // visit's photo, another person's media, or apply active-feed expiry.
+        return POIStorySelection(checkIn: visit, media: visit.media.first)
+    }
+
+    private func compactPOISelection(for ratedPOI: RatedPOI) -> POIStorySelection? {
+        poiStorySelection ?? (isExpanded ? nil : browsingPOISelection(for: ratedPOI))
+    }
+
     func galleryItems(for ratedPOI: RatedPOI) -> [MediaDisplayItem] {
-        if let selection = poiStorySelection {
+        if let selection = compactPOISelection(for: ratedPOI) {
             return selection.media.map { [mediaDisplayItem($0)] } ?? []
         }
         return ratedPOI.media.map(mediaDisplayItem)
@@ -230,7 +245,7 @@ extension ExperienceDetailView {
     /// Only the media/people interaction is scoped. Counts, comments, category
     /// and endorsements continue to describe the original shared place.
     func poiStoryCheckIns(for ratedPOI: RatedPOI) -> [RatedPOI.CheckIn] {
-        guard let selection = poiStorySelection else { return ratedPOI.checkIns }
+        guard let selection = compactPOISelection(for: ratedPOI) else { return ratedPOI.checkIns }
         var visit = selection.checkIn
         visit.media = selection.media.map { [$0] } ?? []
         return [visit]

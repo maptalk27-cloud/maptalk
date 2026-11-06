@@ -1,5 +1,6 @@
 import CoreLocation
 import Foundation
+import SwiftUI
 import Testing
 @testable import maptalk
 
@@ -158,6 +159,66 @@ struct POIStorySelectionTests {
         #expect(data.engagement.friendLikes.first?.timestamp == locationOnly.activityDate)
         #expect(detail.poiStoryCheckIns(for: place).map(\.id) == [locationOnly.id])
         #expect(data.poiStats?.checkIns == 2)
+    }
+
+    @Test
+    func personalBrowsingSelectsOwnersLatestVisitEvenAfterFeedExpiry() {
+        let latest = visit(202, author: alice, media: [photo(102), photo(103)], secondsAgo: 30 * 86_400)
+        let place = rated([
+            visit(201, author: alice, media: [photo(101)], secondsAgo: 60 * 86_400),
+            latest,
+            visit(203, author: bob, media: [photo(104)], secondsAgo: 1)
+        ])
+        let pager = ExperienceDetailView.SequencePager(items: [.init(id: place.id, mode: .poi(place))])
+        let detail = ExperienceDetailView(sequencePager: pager, selection: .constant(place.id),
+            isExpanded: false, poiBrowsingUserID: alice, userProvider: user)
+
+        #expect(detail.browsingPOISelection(for: place)?.checkIn.id == latest.id)
+        #expect(detail.browsingPOISelection(for: place)?.media == latest.media.first)
+        #expect(detail.poiStoryCheckIns(for: place).map(\.userId) == [alice])
+        #expect(detail.galleryItems(for: place).map(\.content) == [.photo(url(102))])
+
+        let expanded = ExperienceDetailView(sequencePager: pager, selection: .constant(place.id),
+            isExpanded: true, poiBrowsingUserID: alice, userProvider: user)
+        #expect(expanded.browsingPOISelection(for: place)?.media == latest.media.first)
+        #expect(expanded.poiStoryCheckIns(for: place) == place.checkIns)
+    }
+
+    @Test
+    func personalBrowsingDoesNotBorrowMediaForAnEmptyOrMissingVisit() {
+        let latest = visit(202, author: alice, media: [], secondsAgo: 10)
+        let place = rated([
+            visit(201, author: alice, media: [photo(101)], secondsAgo: 30),
+            latest,
+            visit(203, author: bob, media: [photo(102)], secondsAgo: 1)
+        ])
+        let pager = ExperienceDetailView.SequencePager(items: [.init(id: place.id, mode: .poi(place))])
+        let detail = ExperienceDetailView(sequencePager: pager, selection: .constant(place.id),
+            isExpanded: false, poiBrowsingUserID: alice, userProvider: user)
+        #expect(detail.browsingPOISelection(for: place)?.checkIn.id == latest.id)
+        #expect(detail.browsingPOISelection(for: place)?.media == nil)
+        #expect(detail.galleryItems(for: place).isEmpty)
+        #expect(detail.poiStoryCheckIns(for: place) == [latest])
+
+        let missingOwner = ExperienceDetailView(sequencePager: pager, selection: .constant(place.id),
+            isExpanded: false, poiBrowsingUserID: uuid(999), userProvider: user)
+        #expect(missingOwner.browsingPOISelection(for: place) == nil)
+    }
+
+    @Test
+    func explicitMapPinKeepsPlaceOverviewWithoutChangingOtherPages() {
+        let place = rated([visit(201, author: alice, media: [photo(101)], secondsAgo: 30),
+                           visit(202, author: bob, media: [photo(102)], secondsAgo: 10)])
+        let pager = ExperienceDetailView.SequencePager(items: [.init(id: place.id, mode: .poi(place))])
+        let detail = ExperienceDetailView(sequencePager: pager, selection: .constant(place.id),
+            isExpanded: false, poiBrowsingUserID: alice, poiOverviewID: place.id, userProvider: user)
+        #expect(detail.browsingPOISelection(for: place) == nil)
+        #expect(detail.poiStoryCheckIns(for: place) == place.checkIns)
+        #expect(detail.galleryItems(for: place).count == place.media.count)
+
+        let differentPin = ExperienceDetailView(sequencePager: pager, selection: .constant(place.id),
+            isExpanded: false, poiBrowsingUserID: alice, poiOverviewID: uuid(999), userProvider: user)
+        #expect(differentPin.browsingPOISelection(for: place)?.checkIn.userId == alice)
     }
 
     private func user(_ id: UUID) -> User? {

@@ -18,6 +18,7 @@ struct MapTalkView: View {
     }
     @State private var selectedRealId: UUID?
     @State private var selectedStoryId: UUID?
+    @State private var poiOverviewID: UUID?
     @State private var selectedFriendFootprintID: String?
     @State private var activeExperience: ActiveExperience?
     @StateObject private var experiencePresentation = MapExperiencePresentation(
@@ -261,6 +262,7 @@ struct MapTalkView: View {
 
             let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
                 viewModel.cancelPendingLocationFocus()
+                poiOverviewID = nil
                 flushPendingViewedStory(item.readKey)
                 viewModel.retainActiveFeedItem(id: item.id)
                 selectedFriendFootprintID = nil
@@ -318,6 +320,7 @@ struct MapTalkView: View {
 
             let handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void = { journey, presentSheet, parent in
                 viewModel.cancelPendingLocationFocus()
+                poiOverviewID = nil
                 selectedFriendFootprintID = nil
                 let isTappingCurrentFocusedJourney = (focusedJourneyHeader?.id == journey.id)
                 if experiencePresentation.isPresented,
@@ -525,6 +528,11 @@ struct MapTalkView: View {
                                 viewModel.cancelPendingLocationFocus()
                                 if let item = storyItemForPOI(rated) {
                                     selectStoryItem(item, true, false, nil)
+                                    // A map pin asks about the place, while the
+                                    // profile rail and pager browse its owner's visits.
+                                    if viewModel.isUserScope {
+                                        poiOverviewID = rated.id
+                                    }
                                     reelAlignTrigger &+= 1
                                     return
                                 }
@@ -867,6 +875,7 @@ struct MapTalkView: View {
                                         suppressJourneySelectionUpdate = false
                                         return
                                     }
+                                    guard newValue != selectedStoryId else { return }
                                     selectedStoryId = newValue
                                     if let item = storyItemForId(newValue) {
                                         selectStoryItem(item, false, true, nil)
@@ -884,6 +893,7 @@ struct MapTalkView: View {
                                         return sequenceItems.first!.id
                                     },
                                     set: { newValue in
+                                        guard newValue != selectedStoryId else { return }
                                         guard let item = storyItemForId(newValue) else { return }
                                         if shouldAnimateSelection {
                                             selectStoryItem(item, false, true, nil)
@@ -904,6 +914,8 @@ struct MapTalkView: View {
                                     pager: pager,
                                     selection: selectionBinding,
                                     isExpanded: isExpanded,
+                                    poiBrowsingUserID: viewModel.scopedUser?.id,
+                                    poiOverviewID: poiOverviewID,
                                     onCollapsedTap: experiencePresentation.expand,
                                     journeyProvider: viewModel.journey(for:),
                                     userProvider: viewModel.user(for:),

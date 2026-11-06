@@ -533,7 +533,7 @@ private struct FriendStoryPlacePageDots: View {
 
 /// Only the person's compact POI preview changes. Native sheet expansion,
 /// the original place details and the outer post pager keep their ownership.
-private struct FriendStoryPOIPreview: View {
+struct FriendStoryPOIPreview: View {
     let place: RatedPOI
     let media: RatedPOI.Media
     let isPlaybackActive: Bool

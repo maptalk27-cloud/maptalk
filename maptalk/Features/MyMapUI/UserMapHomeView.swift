@@ -425,6 +425,28 @@ struct UserMapHomeView: View {
     private struct CollectionMemorySelectionContext: Identifiable {
         let id = UUID()
         let destinationFolderID: UUID?
+        var returnsToHighlightMap = false
+    }
+
+    /// A Highlight is a temporary scope of the existing MyMap canvas, not a
+    /// second map or a published Journey. Keep its reading position while
+    /// contents are being organized, and remember where the person entered.
+    private struct HighlightMapSession {
+        let folderID: UUID
+        let returnsToDirectory: Bool
+        let entryRegion: MKCoordinateRegion
+        var selectedRecordID: UUID?
+        var region: MKCoordinateRegion
+    }
+
+    private struct HighlightJourneyReturnFrame {
+        let recordID: UUID?
+        let region: MKCoordinateRegion
+    }
+
+    private enum HighlightSheetDestination {
+        case directory
+        case contents(UUID)
     }
 
     fileprivate enum RecordType: String, CaseIterable, Identifiable, Hashable {
@@ -518,6 +540,7 @@ struct UserMapHomeView: View {
     @State private var filterDraft = FilterState()
     @State private var filterPresentation: FilterPresentation?
     @State private var mapSelectedRecord: UserMapRecord?
+    @State private var mapOverviewPOIID: UUID?
     /// A record opened from List creates a temporary map focus that has a
     /// clear, local way back to the archive.
     @State private var listFocusRecordID: UUID?
@@ -539,7 +562,12 @@ struct UserMapHomeView: View {
     @State private var selectedCollectionMemoryReferences: Set<JourneyFolder.MemberReference> = []
     @State private var journeyFolderRenameRequest: JourneyFolderRenameRequest?
     @State private var isJourneyCollectionsPresented = false
+    @State private var collectionSheetRoot: JourneyCollectionsSheet.Root = .directory
     @State private var activeCollection: JourneyFolder?
+    @State private var highlightMapSession: HighlightMapSession?
+    @State private var highlightJourneyReturnFrames: [HighlightJourneyReturnFrame] = []
+    @State private var pendingHighlightSheet: HighlightSheetDestination?
+    @State private var isHighlightSheetDismissing = false
     @State private var isCreatingHighlight = false
     @State private var newHighlightTitle = ""
     @State private var recordPendingRemoval: UserMapRecord?
@@ -646,6 +674,14 @@ struct UserMapHomeView: View {
                 if isSelectingCollectionMemories {
                     collectionSelectionAction
                         .zIndex(100)
+                }
+
+                if display == .map,
+                   let folder = focusedHighlight,
+                   storyRecords(for: privateMapJourney(for: folder)).isEmpty {
+                    emptyHighlightMap(folder)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 70)
                 }
 
                 if mapJourneyIsActive == false,
@@ -785,7 +821,7 @@ struct UserMapHomeView: View {
             Button("Create") {
                 let title = newHighlightTitle.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let folder = onCreateJourneyFolder(title.isEmpty ? "Untitled Highlight" : title, []) else { return }
-                presentCollection(folder)
+                openHighlightOnMap(folder)
             }
         }
         .sheet(item: $filterPresentation) { presentation in
@@ -819,8 +855,15 @@ struct UserMapHomeView: View {
             .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $isJourneyCollectionsPresented) {
+        .sheet(isPresented: $isJourneyCollectionsPresented, onDismiss: {
+            isHighlightSheetDismissing = false
+            guard presentPendingHighlightSheet() == false else { return }
+            if highlightMapSession != nil, isSelectingCollectionMemories == false, display == .map {
+                restoreHighlightMap()
+            }
+        }) {
             JourneyCollectionsSheet(
+                root: $collectionSheetRoot,
                 folders: journeyFolders,
                 reels: reels,
                 footprints: footprints,
@@ -828,19 +871,39 @@ struct UserMapHomeView: View {
                 onCreate: { title in
                     onCreateJourneyFolder(title, [])
                 },
+                onOpenFolder: { folder in
+                    openHighlightOnMap(folder, returnsToDirectory: true)
+                },
                 onAddMemories: { folder in
                     isJourneyCollectionsPresented = false
                     beginCollectionMemorySelection(for: folder.id)
                 },
                 onOpenMemory: { record in
                     isJourneyCollectionsPresented = false
-                    activeCollection = nil
-                    DispatchQueue.main.async {
-                        openRecordFromList(record)
+                    if highlightMapSession != nil {
+                        mapOverviewPOIID = nil
+                        mapSelectedRecord = record
+                        focusListPreview(on: record)
+                        rememberHighlightPosition()
+                    } else {
+                        activeCollection = nil
+                        DispatchQueue.main.async {
+                            openRecordFromList(record)
+                        }
                     }
                 },
-                onSave: onSaveJourneyFolder,
-                onDelete: onDeleteJourneyFolder
+                onSave: { folder in
+                    onSaveJourneyFolder(folder)
+                    if mapFocusedJourney?.id == folder.id {
+                        mapFocusedJourney = privateMapJourney(for: folder)
+                    }
+                },
+                onDelete: { folderID in
+                    onDeleteJourneyFolder(folderID)
+                    if highlightMapSession?.folderID == folderID {
+                        exitHighlightMap()
+                    }
+                }
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
@@ -856,6 +919,11 @@ struct UserMapHomeView: View {
         }
         .sheet(isPresented: $mapCapsulePresentation.isPresented, onDismiss: {
             guard mapCapsulePresentation.didDismiss() == false else { return }
+            isHighlightSheetDismissing = false
+            guard presentPendingHighlightSheet() == false else { return }
+            // Closing the card is not leaving the Highlight. Keep its current
+            // member instead of silently resetting to the first one.
+            if highlightMapSession != nil { return }
             if let journey = mapFocusedJourney {
                 // MapTalk keeps the folder alive after a user dismisses its
                 // capsule; the next map interaction begins from its first
@@ -871,6 +939,7 @@ struct UserMapHomeView: View {
                     // in-flight gesture; selection is content state, not view identity.
                     .id(mapCapsulePresentation.contentRevision)
                     .accessibilityIdentifier("mymap.compact-capsule")
+                    .accessibilityValue(mapSelectedRecord?.title ?? "")
                     .mapExperienceSheetChrome(
                         compactDetent: Self.mapCapsuleCompactDetent,
                         selection: $mapCapsulePresentation.detent
@@ -908,6 +977,10 @@ struct UserMapHomeView: View {
             // Refresh and pending-upload reconciliation can replace records.
             // Never keep a count for memories that can no longer be added.
             selectedCollectionMemoryReferences.formIntersection(references)
+            reconcileHighlightMap()
+        }
+        .onChange(of: journeyFolders) { _, _ in
+            reconcileHighlightMap()
         }
         // Both the map markers and the folder dock participate in one drag.
         // Their hit frames must therefore use exactly the same coordinate
@@ -1029,8 +1102,12 @@ struct UserMapHomeView: View {
         .accessibilityIdentifier("mymap.add-selected-memories")
     }
 
-    private func beginCollectionMemorySelection(for folderID: UUID? = nil) {
+    private func beginCollectionMemorySelection(
+        for folderID: UUID? = nil,
+        returnsToHighlightMap: Bool = false
+    ) {
         guard canEditJourneyFolders else { return }
+        rememberHighlightPosition()
         isSearchFocused = false
         listFocusRecordID = nil
         listReturnRecordID = nil
@@ -1038,7 +1115,8 @@ struct UserMapHomeView: View {
         mapCapsulePresentation.dismiss()
         selectedCollectionMemoryReferences.removeAll()
         collectionMemorySelection = CollectionMemorySelectionContext(
-            destinationFolderID: folderID
+            destinationFolderID: folderID,
+            returnsToHighlightMap: returnsToHighlightMap
         )
         withAnimation(.easeInOut(duration: 0.2)) {
             display = .list
@@ -1070,8 +1148,13 @@ struct UserMapHomeView: View {
             return
         }
 
+        let returnsToMap = collectionMemorySelection?.returnsToHighlightMap == true
         finishCollectionMemorySelection()
-        presentCollection(updatedFolder)
+        if returnsToMap {
+            restoreHighlightMap()
+        } else {
+            reopenCollection(updatedFolder)
+        }
     }
 
     private func finishCollectionMemorySelection() {
@@ -1084,10 +1167,13 @@ struct UserMapHomeView: View {
     private func cancelCollectionMemorySelection() {
         let target = collectionSelectionTarget
         let returnsToCollection = collectionMemorySelection?.destinationFolderID != nil
+        let returnsToMap = collectionMemorySelection?.returnsToHighlightMap == true
         finishCollectionMemorySelection()
 
-        if let target {
-            presentCollection(target)
+        if returnsToMap {
+            restoreHighlightMap()
+        } else if let target {
+            reopenCollection(target)
         } else if returnsToCollection {
             presentCollectionsDirectory()
         }
@@ -1095,16 +1181,196 @@ struct UserMapHomeView: View {
 
     private func presentCollectionsDirectory() {
         isSearchFocused = false
+        collectionSheetRoot = .directory
         activeCollection = nil
         isJourneyCollectionsPresented = true
     }
 
     private func presentCollection(_ folder: JourneyFolder) {
+        collectionSheetRoot = .highlight
+        reopenCollection(folder)
+    }
+
+    private func reopenCollection(_ folder: JourneyFolder) {
         isSearchFocused = false
-        // Resolve the destination before presentation: opening a cover should
-        // show its contents immediately, without flashing the directory first.
+        if highlightMapSession != nil {
+            mapFocusedJourney = privateMapJourney(for: folder)
+            display = .map
+        }
+        // Adding memories temporarily closes the sheet. Keep its original root
+        // so returning never inserts or removes a directory navigation level.
         activeCollection = folder
         isJourneyCollectionsPresented = true
+    }
+
+    private var focusedHighlight: JourneyFolder? {
+        guard let journey = mapFocusedJourney else { return nil }
+        return journeyFolders.first { $0.id == journey.id }
+    }
+
+    private func openHighlightOnMap(_ folder: JourneyFolder, returnsToDirectory: Bool = false) {
+        mapOverviewPOIID = nil
+        let waitsForDirectoryDismissal = isJourneyCollectionsPresented || isHighlightSheetDismissing
+        isHighlightSheetDismissing = waitsForDirectoryDismissal
+        pendingHighlightSheet = nil
+        isSearchFocused = false
+        listFocusRecordID = nil
+        listReturnRecordID = nil
+        mapJourneyStack.removeAll()
+        highlightJourneyReturnFrames.removeAll()
+        mapJourneyEntryRecord = nil
+        mapJourneyEntryRegion = nil
+        highlightMapSession = HighlightMapSession(
+            folderID: folder.id,
+            returnsToDirectory: returnsToDirectory,
+            entryRegion: currentMapRegion,
+            selectedRecordID: nil,
+            region: currentMapRegion
+        )
+        mapFocusedJourney = privateMapJourney(for: folder)
+        mapSelectedRecord = storyRecords(for: privateMapJourney(for: folder)).first
+        // A theme may span the globe. Start at an actual memory, not the
+        // midpoint of its places, before revealing the already-mounted map.
+        if let record = mapSelectedRecord { focusListPreview(on: record) }
+        rememberHighlightPosition()
+        // This scoped visit must not consume the archive map's first-arrival framing.
+        isJourneyCollectionsPresented = false
+        withAnimation(.easeOut(duration: 0.16)) { display = .map }
+
+        if !waitsForDirectoryDismissal {
+            DispatchQueue.main.async {
+                guard highlightMapSession?.folderID == folder.id, display == .map else { return }
+                restoreHighlightMap()
+            }
+        }
+    }
+
+    private func rememberHighlightPosition() {
+        guard var session = highlightMapSession,
+              mapFocusedJourney?.id == session.folderID else { return }
+        session.selectedRecordID = mapSelectedRecord?.id
+        // During a cross-city flight, return to its destination rather than
+        // freezing the temporary zoomed-out cruising view behind Contents.
+        session.region = mapFlightController.pendingLandingRegion ?? currentMapRegion
+        highlightMapSession = session
+    }
+
+    private func restoreHighlightMap() {
+        guard var session = highlightMapSession else { return }
+        // A dismiss callback can still hold the list from before creation.
+        // Actual deletion is handled by the live folders onChange below;
+        // never mistake a newly created Highlight for a deleted one here.
+        guard let folder = journeyFolders.first(where: { $0.id == session.folderID }) else { return }
+        let journey = privateMapJourney(for: folder)
+        mapFocusedJourney = journey
+        let members = storyRecords(for: journey)
+        let selection = members.first { $0.id == session.selectedRecordID } ?? members.first
+        mapSelectedRecord = selection
+        mapFlightController.cancelActiveTransition()
+        if let selection, selection.id != session.selectedRecordID {
+            focusListPreview(on: selection)
+        } else {
+            cameraPosition = .region(session.region)
+            currentMapRegion = session.region
+        }
+        session.selectedRecordID = selection?.id
+        session.region = currentMapRegion
+        highlightMapSession = session
+        display = .map
+        if selection != nil {
+            mapCapsulePresentation.presentNewContent()
+        } else {
+            mapCapsulePresentation.dismiss()
+        }
+    }
+
+    private func showHighlightContents() {
+        guard let folder = focusedHighlight else { return }
+        rememberHighlightPosition()
+        requestHighlightSheet(.contents(folder.id))
+    }
+
+    /// Native sheets must finish dismissing before the next one is presented.
+    /// The map and its selected memory stay alive through this handoff.
+    private func requestHighlightSheet(_ destination: HighlightSheetDestination) {
+        pendingHighlightSheet = destination
+        guard !isHighlightSheetDismissing else { return }
+        if mapCapsulePresentation.isPresented || mapCapsulePresentation.isResettingPresentation {
+            isHighlightSheetDismissing = true
+            mapCapsulePresentation.dismiss()
+        } else if isJourneyCollectionsPresented {
+            isHighlightSheetDismissing = true
+            isJourneyCollectionsPresented = false
+        } else {
+            _ = presentPendingHighlightSheet()
+        }
+    }
+
+    @discardableResult
+    private func presentPendingHighlightSheet() -> Bool {
+        guard let destination = pendingHighlightSheet else { return false }
+        pendingHighlightSheet = nil
+        switch destination {
+        case .directory:
+            presentCollectionsDirectory()
+        case let .contents(id):
+            guard let folder = journeyFolders.first(where: { $0.id == id }) else { return false }
+            presentCollection(folder)
+        }
+        return true
+    }
+
+    private func exitHighlightMap() {
+        guard let session = highlightMapSession else { return }
+        pendingHighlightSheet = nil
+        highlightMapSession = nil
+        highlightJourneyReturnFrames.removeAll()
+        mapFocusedJourney = nil
+        mapJourneyStack.removeAll()
+        mapJourneyEntryRecord = nil
+        mapJourneyEntryRegion = nil
+        mapSelectedRecord = nil
+        listFocusRecordID = nil
+        mapFlightController.cancelActiveTransition()
+        cameraPosition = .region(session.entryRegion)
+        currentMapRegion = session.entryRegion
+        withAnimation(.easeOut(duration: 0.16)) { display = .list }
+        if session.returnsToDirectory {
+            requestHighlightSheet(.directory)
+        } else {
+            mapCapsulePresentation.dismiss()
+            isJourneyCollectionsPresented = false
+        }
+    }
+
+    private func reconcileHighlightMap() {
+        guard let session = highlightMapSession else { return }
+        guard let folder = journeyFolders.first(where: { $0.id == session.folderID }) else {
+            exitHighlightMap()
+            return
+        }
+        let journey = privateMapJourney(for: folder)
+        mapJourneyStack = mapJourneyStack.map { $0.id == folder.id ? journey : $0 }
+        guard mapFocusedJourney?.id == folder.id else { return }
+        mapFocusedJourney = journey
+        guard !isSelectingCollectionMemories else { return }
+        let members = storyRecords(for: journey)
+        let selected = members.first { $0.id == (mapSelectedRecord?.id ?? session.selectedRecordID) }
+        if let selected {
+            mapSelectedRecord = selected
+        } else {
+            mapSelectedRecord = members.first
+            if let record = mapSelectedRecord, display == .map {
+                focusListPreview(on: record)
+                // The first addition to an empty Highlight arrives through
+                // this live update, after the Add action's older snapshot.
+                if !isJourneyCollectionsPresented && !isHighlightSheetDismissing {
+                    mapCapsulePresentation.presentNewContent()
+                }
+            }
+            if members.isEmpty { mapCapsulePresentation.dismiss() }
+            rememberHighlightPosition()
+        }
     }
 
     private var isJourneyOrganizerTransactionActive: Bool {
@@ -2008,7 +2274,7 @@ struct UserMapHomeView: View {
                         // Use authored member order, matching the directory's
                         // cover, not the map organizer's newest-first receiver.
                         recordsForFolder: { Array(mapJourneyRecords(for: $0).reversed()) },
-                        onOpen: presentCollection,
+                        onOpen: { openHighlightOnMap($0) },
                         onSeeAll: presentCollectionsDirectory,
                         onCreate: {
                             newHighlightTitle = ""
@@ -2894,6 +3160,9 @@ struct UserMapHomeView: View {
     @ViewBuilder
     private var mapJourneyControls: some View {
         if let journey = mapFocusedJourney {
+            if let folder = focusedHighlight {
+                highlightMapControls(folder)
+            } else {
             let journeyScope = scope(for: journey)
             let isPrivateFolder = journeyFolders.contains(where: { $0.id == journey.id })
 
@@ -2967,7 +3236,73 @@ struct UserMapHomeView: View {
                         )
                     }
             }
+            }
         }
+    }
+
+    private func highlightMapControls(_ folder: JourneyFolder) -> some View {
+        let count = folderStoryItems(for: folder).count
+        return HStack(spacing: 8) {
+            Button(action: exitHighlightMap) {
+                Image(systemName: "chevron.left")
+                    .font(.headline)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel(highlightMapSession?.returnsToDirectory == true ? "Back to highlights" : "Back to MyMap")
+            .accessibilityIdentifier("mymap.map-folder-exit")
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(folder.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("\(count == 1 ? "1 memory" : "\(count) memories") · Only you")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button(action: showHighlightContents) {
+                Image(systemName: "list.bullet")
+                    .font(.body.weight(.medium))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Highlight contents")
+            .accessibilityIdentifier("mymap.highlight-contents")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .padding(6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Highlight: \(folder.title)")
+        .accessibilityValue("\(count) memories, Only you")
+        .accessibilityIdentifier("mymap.map-folder-scope.\(folder.id.uuidString)")
+    }
+
+    private func emptyHighlightMap(_ folder: JourneyFolder) -> some View {
+        VStack(spacing: 12) {
+            Text("No memories yet")
+                .font(.headline)
+            Button {
+                beginCollectionMemorySelection(for: folder.id, returnsToHighlightMap: true)
+            } label: {
+                Label("Add memories", systemImage: "plus")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .foregroundStyle(.white)
+                    .background(.black, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("mymap.highlight-add-memories")
+        }
+        .frame(maxWidth: .infinity)
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 
     private var showsAllTypes: Bool {
@@ -3047,10 +3382,15 @@ struct UserMapHomeView: View {
 
         // Pin taps stay in this map. They replace the compact capsule without
         // automatically moving the camera, matching the main MapTalk map.
-        presentMapCapsule(record)
+        presentMapCapsule(record, opensPlaceOverview: true)
     }
 
-    private func presentMapCapsule(_ record: UserMapRecord) {
+    private func presentMapCapsule(_ record: UserMapRecord, opensPlaceOverview: Bool = false) {
+        if opensPlaceOverview, case .poi = record.kind {
+            mapOverviewPOIID = record.id
+        } else {
+            mapOverviewPOIID = nil
+        }
         mapSelectedRecord = record
         mapCapsulePresentation.presentNewContent()
     }
@@ -3062,12 +3402,19 @@ struct UserMapHomeView: View {
         safeAreaBottom: CGFloat
     ) {
         let isCurrentJourney = mapFocusedJourney?.id == journey.id
+        mapOverviewPOIID = nil
 
         if mapFocusedJourney == nil, savesEntryRecord, mapJourneyEntryRegion == nil {
             mapJourneyEntryRecord = mapSelectedRecord
             mapJourneyEntryRegion = currentMapRegion
         }
         if let parent = mapFocusedJourney, parent.id != journey.id {
+            if highlightMapSession != nil {
+                highlightJourneyReturnFrames.append(HighlightJourneyReturnFrame(
+                    recordID: mapSelectedRecord?.id,
+                    region: mapFlightController.pendingLandingRegion ?? currentMapRegion
+                ))
+            }
             mapJourneyStack.append(parent)
         }
 
@@ -3101,8 +3448,18 @@ struct UserMapHomeView: View {
         size: CGSize,
         safeAreaBottom: CGFloat
     ) {
+        if highlightMapSession != nil, mapFocusedJourney?.id == journey.id { return }
+        var returnFrame: HighlightJourneyReturnFrame?
         if let index = mapJourneyStack.firstIndex(where: { $0.id == journey.id }) {
+            if highlightMapSession != nil, highlightJourneyReturnFrames.indices.contains(index) {
+                returnFrame = highlightJourneyReturnFrames[index]
+                highlightJourneyReturnFrames = Array(highlightJourneyReturnFrames.prefix(upTo: index))
+            }
             mapJourneyStack = Array(mapJourneyStack.prefix(upTo: index))
+        }
+        if let returnFrame {
+            restoreHighlightJourney(journey, frame: returnFrame)
+            return
         }
         mapFocusedJourney = journey
         focusMapJourneyCamera(journey, size: size, safeAreaBottom: safeAreaBottom)
@@ -3116,6 +3473,10 @@ struct UserMapHomeView: View {
 
     private func exitMapJourneyFocus(size: CGSize, safeAreaBottom: CGFloat) {
         if let parent = mapJourneyStack.popLast() {
+            if highlightMapSession != nil, let frame = highlightJourneyReturnFrames.popLast() {
+                restoreHighlightJourney(parent, frame: frame)
+                return
+            }
             mapFocusedJourney = parent
             focusMapJourneyCamera(parent, size: size, safeAreaBottom: safeAreaBottom)
             if let firstChild = storyRecords(for: parent).first {
@@ -3124,6 +3485,11 @@ struct UserMapHomeView: View {
                 mapCapsulePresentation.dismiss()
             }
             mapReelAlignTrigger &+= 1
+            return
+        }
+
+        if highlightMapSession != nil {
+            exitHighlightMap()
             return
         }
 
@@ -3150,6 +3516,27 @@ struct UserMapHomeView: View {
             }
             currentMapRegion = entryRegion
         }
+        mapReelAlignTrigger &+= 1
+    }
+
+    private func restoreHighlightJourney(_ journey: JourneyPost, frame: HighlightJourneyReturnFrame) {
+        mapFocusedJourney = journey
+        let members = storyRecords(for: journey)
+        let record = members.first { $0.id == frame.recordID } ?? members.first
+        mapSelectedRecord = record
+        mapFlightController.cancelActiveTransition()
+        if let record, record.id != frame.recordID {
+            focusListPreview(on: record)
+        } else {
+            cameraPosition = .region(frame.region)
+            currentMapRegion = frame.region
+        }
+        if let record {
+            presentMapCapsule(record)
+        } else {
+            mapCapsulePresentation.dismiss()
+        }
+        rememberHighlightPosition()
         mapReelAlignTrigger &+= 1
     }
 
@@ -3302,6 +3689,8 @@ struct UserMapHomeView: View {
                 pager: .init(items: mapSequenceItems),
                 selection: mapSequenceSelection,
                 isExpanded: mapCapsulePresentation.isExpanded,
+                poiBrowsingUserID: user.id,
+                poiOverviewID: mapOverviewPOIID,
                 onCollapsedTap: mapCapsulePresentation.expand,
                 journeyProvider: privateJourney(for:),
                 userProvider: userProvider,
@@ -3362,6 +3751,8 @@ struct UserMapHomeView: View {
     }
 
     private func selectFromMapCapsulePager(_ record: UserMapRecord) {
+        guard record.id != mapSelectedRecord?.id else { return }
+        mapOverviewPOIID = nil
         mapSelectedRecord = record
         mapReelAlignTrigger &+= 1
         let targetRegion = storyRegion(for: record)
@@ -3407,7 +3798,9 @@ struct UserMapHomeView: View {
 
         let archiveChromeInset = 10.0 + 38.0 + 11.0 + (hasActiveFilters ? 40.0 : 0.0)
         let topInset: CGFloat
-        if mapFocusedJourney != nil {
+        if focusedHighlight != nil {
+            topInset = 76
+        } else if mapFocusedJourney != nil {
             topInset = MapJourneyCamera.journeyChromeInset
         } else if isListRecordFocusActive {
             // The preview only keeps the native back affordance. Do not

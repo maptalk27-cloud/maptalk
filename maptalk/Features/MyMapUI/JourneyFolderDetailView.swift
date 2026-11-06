@@ -320,11 +320,18 @@ struct PrivateHighlightShelf: View {
 struct JourneyCollectionsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
+    enum Root {
+        case directory
+        case highlight
+    }
+
+    @Binding var root: Root
     let folders: [JourneyFolder]
     let reels: [RealPost]
     let footprints: [UserMapViewModel.Footprint]
     @Binding var selectedFolder: JourneyFolder?
     let onCreate: (String) -> JourneyFolder?
+    let onOpenFolder: (JourneyFolder) -> Void
     let onAddMemories: (JourneyFolder) -> Void
     let onOpenMemory: (UserMapRecord) -> Void
     let onSave: (JourneyFolder) -> Void
@@ -335,77 +342,98 @@ struct JourneyCollectionsSheet: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if folders.isEmpty {
-                    ContentUnavailableView(
-                        "No highlights yet",
-                        systemImage: "rectangle.stack",
-                        description: Text("Keep memories together. Only you can see your highlights.")
-                    )
-                    .listRowSeparator(.hidden)
-                } else {
-                    ForEach(folders) { folder in
-                        collectionRow(for: folder)
-                    }
+            switch root {
+            case .highlight:
+                if let folder = selectedFolder {
+                    folderDetail(folder)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Close") { dismiss() }
+                                    .accessibilityIdentifier("mymap.highlight-close")
+                            }
+                        }
                 }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .background(Color(.systemBackground))
-            .navigationTitle("Highlights")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        newCollectionTitle = ""
-                        isCreatingCollection = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel("New highlight")
-                    .accessibilityIdentifier("mymap.collections-add")
-                }
-            }
-            .alert("New highlight", isPresented: $isCreatingCollection) {
-                TextField("Highlight name", text: $newCollectionTitle)
-                Button("Cancel", role: .cancel) {}
-                Button("Create", action: createCollection)
-            }
-            .accessibilityIdentifier("mymap.collections-screen")
-            .navigationDestination(item: $selectedFolder) { folder in
-                JourneyFolderDetailView(
-                    folder: folder,
-                    reels: reels,
-                    footprints: footprints,
-                    onAddMemories: { folder in
-                        onAddMemories(folder)
-                    },
-                    onOpenMemory: onOpenMemory,
-                    onSave: { updatedFolder in
-                        selectedFolder = updatedFolder
-                        onSave(updatedFolder)
-                    },
-                    onDelete: { folderID in
-                        selectedFolder = nil
-                        onDelete(folderID)
-                    }
-                )
+            case .directory:
+                directory
             }
         }
+    }
+
+    private var directory: some View {
+        List {
+            if folders.isEmpty {
+                ContentUnavailableView(
+                    "No highlights yet",
+                    systemImage: "rectangle.stack",
+                    description: Text("Keep memories together. Only you can see your highlights.")
+                )
+                .listRowSeparator(.hidden)
+            } else {
+                ForEach(folders) { folder in
+                    collectionRow(for: folder)
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color(.systemBackground))
+        .navigationTitle("Highlights")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close") { dismiss() }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    newCollectionTitle = ""
+                    isCreatingCollection = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("New highlight")
+                .accessibilityIdentifier("mymap.collections-add")
+            }
+        }
+        .alert("New highlight", isPresented: $isCreatingCollection) {
+            TextField("Highlight name", text: $newCollectionTitle)
+            Button("Cancel", role: .cancel) {}
+            Button("Create", action: createCollection)
+        }
+        .accessibilityIdentifier("mymap.collections-screen")
+    }
+
+    private func folderDetail(_ folder: JourneyFolder) -> some View {
+        JourneyFolderDetailView(
+            folder: folder,
+            reels: reels,
+            footprints: footprints,
+            onAddMemories: onAddMemories,
+            onOpenMemory: onOpenMemory,
+            onSave: { updatedFolder in
+                selectedFolder = updatedFolder
+                onSave(updatedFolder)
+            },
+            onDelete: { folderID in
+                onDelete(folderID)
+                switch root {
+                case .directory:
+                    selectedFolder = nil
+                case .highlight:
+                    dismiss()
+                }
+            }
+        )
     }
 
     private func createCollection() {
         let title = newCollectionTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let folder = onCreate(title.isEmpty ? "Untitled Highlight" : title) else { return }
-        selectedFolder = folder
+        onOpenFolder(folder)
     }
 
     private func collectionRow(for folder: JourneyFolder) -> some View {
         Button {
-            selectedFolder = folder
+            onOpenFolder(folder)
         } label: {
             HStack(spacing: 12) {
                 PrivateHighlightCover(records: records(for: folder), size: 60)

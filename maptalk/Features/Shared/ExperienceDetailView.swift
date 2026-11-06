@@ -151,6 +151,10 @@ struct ExperienceDetailView: View {
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
     let poiStorySelection: POIStorySelection?
+    /// Personal browsing opens the owner's latest visit, while an explicit
+    /// map-pin selection can still ask for the shared place overview.
+    let poiBrowsingUserID: UUID?
+    let poiOverviewID: UUID?
     // A featured story slice does not filter the shared place's visitor history.
     let expandedPOIMedia: RatedPOI.Media?
     // Person stories can supply their one existing pager as the media slot.
@@ -195,6 +199,8 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.poiStorySelection = poiStorySelection
+        self.poiBrowsingUserID = nil
+        self.poiOverviewID = nil
         self.expandedPOIMedia = expandedPOIMedia
         self.expandedPOIMediaContent = expandedPOIMediaContent
         self.onCollapsedTap = onCollapsedTap
@@ -220,6 +226,8 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.poiStorySelection = nil
+        self.poiBrowsingUserID = nil
+        self.poiOverviewID = nil
         self.expandedPOIMedia = nil
         self.expandedPOIMediaContent = nil
         self.onCollapsedTap = onCollapsedTap
@@ -234,6 +242,8 @@ struct ExperienceDetailView: View {
         sequencePager: SequencePager,
         selection: Binding<UUID>,
         isExpanded: Bool,
+        poiBrowsingUserID: UUID? = nil,
+        poiOverviewID: UUID? = nil,
         onCollapsedTap: (() -> Void)? = nil,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         journeyProvider: @escaping (UUID) -> JourneyPost? = { PreviewData.journey(for: $0) },
@@ -246,6 +256,8 @@ struct ExperienceDetailView: View {
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
         self.poiStorySelection = nil
+        self.poiBrowsingUserID = poiBrowsingUserID
+        self.poiOverviewID = poiOverviewID
         self.expandedPOIMedia = nil
         self.expandedPOIMediaContent = nil
         self.onCollapsedTap = onCollapsedTap

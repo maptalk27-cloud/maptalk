@@ -326,7 +326,7 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
-    func testMyMapCollectionsOpenAsListAndAddThroughMyMap() throws {
+    func testMyMapHighlightsOpenMapAndOrganizeThroughMyMap() throws {
         let app = XCUIApplication()
         app.launchArguments = ["--mock-data"]
         app.launch()
@@ -346,14 +346,23 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(afterDark.waitForExistence(timeout: 3))
         afterDark.tap()
 
+        let highlightMap = app.descendants(matching: .any)[
+            "mymap.map-folder-scope.00000000-0000-0000-0000-000000008101"
+        ].firstMatch
+        XCTAssertTrue(highlightMap.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.descendants(matching: .any)["mymap.map-canvas"].firstMatch.value as? String,
+                       "Highlight: After dark")
+        XCTAssertTrue(app.collectionViews["mymap.compact-capsule"].firstMatch.waitForExistence(timeout: 5))
+        let contents = app.buttons["mymap.highlight-contents"]
+        XCTAssertTrue(contents.waitForExistence(timeout: 3))
+        contents.tap()
+
         let collectionList = app.descendants(matching: .any)[
             "mymap.collection-list.00000000-0000-0000-0000-000000008101"
         ]
         XCTAssertTrue(collectionList.waitForExistence(timeout: 5))
         XCTAssertTrue(app.navigationBars["After dark"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)[
-            "mymap.map-folder-scope.00000000-0000-0000-0000-000000008101"
-        ].exists)
+        XCTAssertTrue(app.buttons["mymap.highlight-close"].exists)
         XCTAssertFalse(app.buttons["Done"].exists)
 
         let addMemories = app.buttons["Add memories"]
@@ -392,6 +401,12 @@ final class maptalkUITests: XCTestCase {
             "mymap.collection-memory.00000000-0000-0000-0000-000000009122"
         ].exists)
         XCTAssertFalse(app.descendants(matching: .any)["mymap.collection-picker"].exists)
+        app.buttons["mymap.highlight-close"].tap()
+        XCTAssertTrue(highlightMap.waitForExistence(timeout: 5))
+        let back = app.buttons["mymap.map-folder-exit"]
+        XCTAssertTrue(back.waitForExistence(timeout: 3))
+        back.tap()
+        XCTAssertTrue(collectionsSheet.waitForExistence(timeout: 3))
     }
 
     @MainActor
@@ -425,7 +440,11 @@ final class maptalkUITests: XCTestCase {
         nameField.typeText("Weekend plans")
         newCollection.buttons["Create"].tap()
 
-        XCTAssertTrue(app.navigationBars["Weekend plans"].waitForExistence(timeout: 5))
+        let map = app.descendants(matching: .any)["mymap.map-canvas"].firstMatch
+        XCTAssertTrue(map.waitForExistence(timeout: 5))
+        XCTAssertEqual(map.value as? String, "Highlight: Weekend plans")
+        XCTAssertTrue(app.staticTexts["No memories yet"].exists)
+        XCTAssertTrue(app.buttons["mymap.highlight-add-memories"].exists)
     }
 
     @MainActor
@@ -619,6 +638,9 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(folder.waitForExistence(timeout: 3))
         XCTAssertEqual(folder.value as? String, "2 memories, Only you")
         folder.tap()
+        let contents = app.buttons["mymap.highlight-contents"]
+        XCTAssertTrue(contents.waitForExistence(timeout: 5))
+        contents.tap()
         XCTAssertTrue(app.navigationBars["Selected weekend"].waitForExistence(timeout: 3))
 
         let memberRows = app.buttons.matching(NSPredicate(
@@ -671,6 +693,9 @@ final class maptalkUITests: XCTestCase {
         XCTAssertTrue(folder.waitForExistence(timeout: 3))
         XCTAssertEqual(folder.value as? String, "4 memories, Only you")
         folder.tap()
+        let contents = app.buttons["mymap.highlight-contents"]
+        XCTAssertTrue(contents.waitForExistence(timeout: 5))
+        contents.tap()
         XCTAssertTrue(app.navigationBars["After dark"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["4 memories"].exists)
         XCTAssertEqual(app.buttons.matching(identifier:
