@@ -10,6 +10,12 @@ final class MyMapFlightController: ObservableObject {
     private var activeTransitionID: UUID?
     private var stagedLandingRegion: MKCoordinateRegion?
 
+    /// Highlight navigation saves the destination during a staged flight,
+    /// but uses the visible map again once that flight finishes or is cancelled.
+    var pendingLandingRegion: MKCoordinateRegion? {
+        activeTransitionID == nil ? nil : stagedLandingRegion
+    }
+
     func cancelActiveTransition() {
         activeTransitionID = nil
         stagedLandingRegion = nil
@@ -263,6 +269,7 @@ final class MyMapFlightController: ObservableObject {
             guard let self, self.activeTransitionID == id else { return }
             onRegionUpdate(framedTarget)
             self.activeTransitionID = nil
+            self.stagedLandingRegion = nil
         }
     }
 
