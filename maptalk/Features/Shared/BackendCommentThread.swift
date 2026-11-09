@@ -71,6 +71,7 @@ struct BackendCommentThread: View {
     @ObservedObject var store: BackendStore
     let target: BackendCommentTarget
     let onUserSelected: (User) -> Void
+    @Environment(\.experienceNeutralAppearance) private var usesNeutralAppearance
     @State private var draft = ExperienceCommentDraft()
     @State private var isLoading = false
     @State private var isSending = false
@@ -89,8 +90,8 @@ struct BackendCommentThread: View {
                     HStack(alignment: .bottom, spacing: 8) {
                         TextField("Add a comment…", text: $draft.text, axis: .vertical)
                             .font(.subheadline)
-                            .foregroundStyle(.white)
-                            .tint(.white)
+                            .foregroundStyle(usesNeutralAppearance ? Color.primary : .white)
+                            .tint(usesNeutralAppearance ? Color.primary : .white)
                             .lineLimit(1...4)
                             .focused($isFocused)
                             .disabled(isSending)
@@ -100,10 +101,10 @@ struct BackendCommentThread: View {
 
                         Button(action: send) {
                             Group {
-                                if isSending { ProgressView().tint(.white) }
+                                if isSending { ProgressView().tint(usesNeutralAppearance ? Color.primary : .white) }
                                 else { Image(systemName: "arrow.up").font(.body.weight(.semibold)) }
                             }
-                            .foregroundStyle(.white.opacity(draft.isValid ? 1 : 0.35))
+                            .foregroundStyle((usesNeutralAppearance ? Color.primary : .white).opacity(draft.isValid ? 1 : 0.35))
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                         }
@@ -112,26 +113,28 @@ struct BackendCommentThread: View {
                         .accessibilityLabel("Send comment")
                         .accessibilityIdentifier("experience.comment.send")
                     }
-                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 22))
+                    .background(usesNeutralAppearance ? Color(uiColor: .secondarySystemBackground) : .white.opacity(0.08),
+                                in: RoundedRectangle(cornerRadius: 22))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 22).strokeBorder(.white.opacity(0.12), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 22)
+                            .strokeBorder((usesNeutralAppearance ? Color.primary : .white).opacity(usesNeutralAppearance ? 0.08 : 0.12), lineWidth: 1)
                     }
 
                     if draft.trimmedText.utf16.count > 1_000 {
                         Text("Keep your comment under 1,000 characters.")
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.65))
                     } else if let sendError {
                         Text(sendError)
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.65))
                             .accessibilityIdentifier("experience.comment.error")
                     }
 
                     if loadFailed {
                         Button("Couldn't load comments. Retry") { Task { await load() } }
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.65))
                             .disabled(isLoading)
                     }
                 }

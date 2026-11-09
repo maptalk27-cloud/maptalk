@@ -27,6 +27,26 @@ final class MapExperiencePresentation: ObservableObject {
         detent == .large
     }
 
+    /// Native sheet callbacks can arrive after the browsing flow has changed.
+    /// Keep the old sheet from selecting a detent owned by the new flow.
+    func nativeDetentSelection(expandedDetent: PresentationDetent = .large) -> Binding<PresentationDetent> {
+        let compact = compactDetent
+        let revision = contentRevision
+        return Binding(
+            get: { self.isExpanded ? expandedDetent : compact },
+            set: { selection in
+                guard self.compactDetent == compact,
+                      self.contentRevision == revision,
+                      !self.isResettingPresentation else { return }
+                if selection == expandedDetent {
+                    self.detent = .large
+                } else if selection == compact {
+                    self.detent = compact
+                }
+            }
+        )
+    }
+
     /// A scoped navigation header needs room in addition to the unchanged
     /// card. Changing that allowance must not collapse an expanded story.
     func configureCompactDetent(_ compactDetent: PresentationDetent) {
@@ -39,6 +59,16 @@ final class MapExperiencePresentation: ObservableObject {
     /// Use when a pin, list entry, or pager changes the selected content.
     func presentNewContent() {
         resetToCompact(presentIfNeeded: true)
+    }
+
+    /// Posts opens the original expanded card directly. Invalidate any queued
+    /// compact reset before showing it, just as dismiss invalidates old work.
+    func presentExpandedContent() {
+        resetToken = UUID()
+        shouldReopenAfterDismiss = false
+        isResettingPresentation = false
+        detent = .large
+        isPresented = true
     }
 
     /// Use when a host needs to return an already visible capsule to its
@@ -236,7 +266,7 @@ private struct ObservedMapExperienceSheetChrome: ViewModifier {
     func body(content: Content) -> some View {
         content.mapExperienceSheetChrome(
             compactDetent: presentation.compactDetent,
-            selection: $presentation.detent
+            selection: presentation.nativeDetentSelection()
         )
     }
 }

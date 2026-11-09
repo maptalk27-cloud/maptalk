@@ -40,6 +40,7 @@ struct LikesAvatarGrid: View {
 
     @State private var viewerState: POIStoryViewerState?
     @State private var containerWidth: CGFloat = 0
+    @Environment(\.experienceNeutralAppearance) private var usesNeutralAppearance
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
     @State private var childPresentationID = UUID()
     private var columns: [GridItem] {
@@ -51,7 +52,7 @@ struct LikesAvatarGrid: View {
         VStack(alignment: .leading, spacing: 12) {
             Image(systemName: iconName)
                 .font(.headline.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.85))
 
             LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
                 ForEach(entries) { entry in
@@ -1081,12 +1082,13 @@ struct AvatarSquare: View {
 struct CommentThreadList: View {
     let entries: [FriendEngagement]
     let onUserSelected: (User) -> Void
+    @Environment(\.experienceNeutralAppearance) private var usesNeutralAppearance
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Image(systemName: "text.bubble")
                 .font(.headline.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.85))
 
             VStack(spacing: 14) {
                 ForEach(entries) { entry in
@@ -1101,6 +1103,7 @@ struct CommentThreadList: View {
 struct CommentThreadRow: View {
     let entry: FriendEngagement
     let onUserSelected: (User) -> Void
+    @Environment(\.experienceNeutralAppearance) private var usesNeutralAppearance
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -1113,19 +1116,19 @@ struct CommentThreadRow: View {
                     profileButton(for: entry.user) {
                         Text(entry.user?.handle ?? "Friend")
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(usesNeutralAppearance ? Color.primary : .white)
                     }
                     Spacer()
                     if let timestamp = entry.timestamp?.formatted(.relative(presentation: .named)) {
                         Text(timestamp)
                             .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.6))
+                            .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.6))
                     }
                 }
 
                 Text(entry.message)
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.95))
+                    .foregroundStyle(usesNeutralAppearance ? Color.primary : .white.opacity(0.95))
 
                 if entry.replies.isEmpty == false {
                     VStack(alignment: .leading, spacing: 10) {
@@ -1134,12 +1137,14 @@ struct CommentThreadRow: View {
                         }
                     }
                     .padding(12)
-                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(usesNeutralAppearance ? Color(uiColor: .tertiarySystemBackground) : .white.opacity(0.05),
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
             }
         }
         .padding(16)
-        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(usesNeutralAppearance ? Color(uiColor: .secondarySystemBackground) : .white.opacity(0.05),
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .modifier(ExperienceCommentFocusModifier(commentID: entry.id))
     }
 
@@ -1164,6 +1169,7 @@ struct CommentThreadRow: View {
 struct CommentReplyRow: View {
     let entry: FriendEngagement
     let onUserSelected: (User) -> Void
+    @Environment(\.experienceNeutralAppearance) private var usesNeutralAppearance
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -1176,19 +1182,19 @@ struct CommentReplyRow: View {
                     profileButton(for: entry.user) {
                         Text(entry.user?.handle ?? "Friend")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(usesNeutralAppearance ? Color.primary : .white)
                     }
                     Spacer()
                     if let timestamp = entry.timestamp?.formatted(.relative(presentation: .named)) {
                         Text(timestamp)
                             .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.6))
+                            .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.6))
                     }
                 }
 
                 Text(entry.message)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(usesNeutralAppearance ? Color.primary : .white.opacity(0.85))
             }
         }
         .modifier(ExperienceCommentFocusModifier(commentID: entry.id))

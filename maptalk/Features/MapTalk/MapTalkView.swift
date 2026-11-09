@@ -51,6 +51,10 @@ struct MapTalkView: View {
     @State private var isActivityPresented = false
     @State private var isActivityOverExperiencePresented = false
     @State private var viewedActivityIDs = Set<String>()
+    @State private var isBrowsingPostPreview = false
+    @State private var postPreviewResumePageID: String?
+    @State private var previewStoryResumePageIDs: [UUID: String] = [:]
+    @State private var compactExperienceSheetFrame = CGRect.null
     @Namespace private var heroNamespace
     private let initialStoryId: UUID?
     private let isTabActive: Bool
@@ -78,7 +82,17 @@ struct MapTalkView: View {
             // The rail is a stable public feed snapshot. Map search results
             // live in `ratedPOIs` and never decide membership here.
             let baseStoryItems = viewModel.activeFeedItems
-            let friendGroups = usesFriendStories ? friendStoryGroups : []
+            let allFriendGroups = usesFriendStories ? friendStoryGroups : []
+            let friendGroups = showsSocialFeedPreview
+                ? previewGroups(allFriendGroups, posts: false) : allFriendGroups
+            let postGroups = showsSocialFeedPreview ? previewGroups(allFriendGroups, posts: true) : []
+            let previewPage = postPreviewPage(in: postGroups)
+            let showsPostPreviewEntry = showsSocialFeedPreview && mapWorkEnabled
+                && !isBrowsingPostPreview
+                && !experiencePresentation.isExpanded
+                && !experiencePresentation.isResettingPresentation && focusedJourneyHeader == nil
+                && publishDestination == nil && !isActivityPresented
+                && !isActivityOverExperiencePresented && previewPage != nil
 
             let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
             let nestedStoryJourney: JourneyPost? = {
@@ -172,9 +186,25 @@ struct MapTalkView: View {
                 }
             }
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
-            let previewControlsPadding = ControlsLayout.previewPadding(for: geometry,
-                fraction: ControlsLayout.previewFraction)
-                + (friendStoryNavigation.isActive ? FriendStoryLayout.floatingHeight : 0)
+            // Both floating controls use the same card edge and breathing
+            // room. Neither should reserve the tab bar's height twice.
+            let previewControlsPadding: CGFloat = {
+                let accessoryHeight = friendStoryNavigation.isActive && !isBrowsingPostPreview
+                    ? FriendStoryLayout.floatingHeight : 0
+                let estimate = ControlsLayout.previewPadding(for: geometry,
+                    fraction: activePreviewFraction) + accessoryHeight
+                guard showsSocialFeedPreview else { return estimate }
+                if !compactExperienceSheetFrame.isNull {
+                    return MapTalkPostEntryGeometry.sheetClearance(
+                        mapFrame: geometry.frame(in: .global), sheetFrame: compactExperienceSheetFrame,
+                        baseBottomInset: baseControlsPadding,
+                        accessoryHeight: accessoryHeight)
+                }
+                // First presentation only: the sheet also occupies the tab
+                // bar area, which isn't part of the map's layout height.
+                return max(baseControlsPadding, estimate
+                    - geometry.safeAreaInsets.bottom * (1 - activePreviewFraction) + 12)
+            }()
             let collapseDetent = {
                 experiencePresentation.collapseToCompact()
             }
@@ -710,8 +740,10 @@ struct MapTalkView: View {
                     if usesFriendStories && focusedJourneyHeader == nil {
                         if !friendGroups.isEmpty {
                             FriendStoriesRow(
-                                groups: friendStoryNavigation.session?.groups ?? friendGroups,
-                                selectedAuthorID: friendStoryNavigation.session?.currentGroup?.authorID,
+                                groups: isBrowsingPostPreview ? friendGroups
+                                    : friendStoryNavigation.session?.groups ?? friendGroups,
+                                selectedAuthorID: isBrowsingPostPreview ? nil
+                                    : friendStoryNavigation.session?.currentGroup?.authorID,
                                 userProvider: viewModel.user(for:),
                                 isUnseen: { group in group.readKeys.contains { !storyReadStore.isViewed($0) } },
                                 onSelect: { authorID in
@@ -768,10 +800,21 @@ struct MapTalkView: View {
                     }
                 }
                 .ignoresSafeArea(edges: .top)
-                .opacity(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded) ? 1 : 0)
-                .allowsHitTesting(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded))
+                .opacity(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded && !isBrowsingPostPreview) ? 1 : 0)
+                .allowsHitTesting(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded && !isBrowsingPostPreview))
                 .animation(.easeOut(duration: 0.16), value: publishDestination)
                 .animation(.easeOut(duration: 0.16), value: experiencePresentation.isExpanded)
+
+                if showsPostPreviewEntry, let page = previewPage, case let .reel(post) = page.content {
+                    MapTalkPostCoverEntry(post: post,
+                        isResuming: postPreviewResumePageID != nil,
+                        isActive: false,
+                        canvasSize: geometry.size,
+                        bottomInset: controlsBottomPadding) {
+                            resumePostPreview(pageID: page.id, geometry: geometry)
+                    }
+                    .zIndex(1)
+                }
 
                 if focusedJourneyHeader == nil {
                     VStack {
@@ -803,7 +846,8 @@ struct MapTalkView: View {
                                 onTapReel: {
                                     requestPublish(.reel)
                                 },
-                                showsPublishActions: viewModel.isUserScope == false
+                                showsPublishActions: viewModel.isUserScope == false,
+                                usesPostPreviewLayout: showsSocialFeedPreview
                             )
                             .onGeometryChange(for: CGRect.self) { controlsGeometry in
                                 controlsGeometry.frame(in: .global)
@@ -849,11 +893,12 @@ struct MapTalkView: View {
                             focusContent: { mode in focusFriendStoryContent(mode, geometry: geometry) },
                             onRead: { storyReadStore.markViewed($0) },
                             onClose: {
-                                // Keep the current card mounted throughout the native
-                                // dismissal; onDismiss clears the session and restores the map.
+                                // Keep the current card mounted until native
+                                // dismissal completes, then restore the map.
                                 experiencePresentation.dismiss(preservingDetent: true)
                             },
-                            allowsPlayback: mapWorkEnabled && !isActivityOverExperiencePresented
+                            allowsPlayback: mapWorkEnabled && !isActivityOverExperiencePresented,
+                            feedPresentation: isBrowsingPostPreview ? .posts : .personStory
                         ))
                     }
                     switch activeExperience {
@@ -985,9 +1030,21 @@ struct MapTalkView: View {
 
                 content
                     .id(experiencePresentation.contentRevision)
+                    .background {
+                        if showsSocialFeedPreview {
+                            MapTalkSheetFrameReader { frame in
+                                guard experiencePresentation.isPresented,
+                                      !experiencePresentation.isExpanded,
+                                      frame.minY < geometry.frame(in: .global).maxY,
+                                      frame.height < geometry.size.height * 0.6 else { return }
+                                compactExperienceSheetFrame = frame
+                            }
+                        }
+                    }
                     .environment(\.friendStoryPlaybackEnabled, mapWorkEnabled)
                     .modifier(FriendStorySheetChrome(presentation: experiencePresentation,
-                                                     navigation: friendStoryNavigation))
+                                                     navigation: friendStoryNavigation,
+                                                     feedPresentation: isBrowsingPostPreview ? .posts : .personStory))
                     .fullScreenCover(isPresented: $isActivityOverExperiencePresented) {
                         activityContent
                             .presentationBackground(Color(.systemBackground))
@@ -1148,7 +1205,7 @@ struct MapTalkView: View {
                     reconcileFriendStories(geometry: geometry)
                 }
             }
-            .onChange(of: friendStoryRevision(friendGroups)) { _, _ in
+            .onChange(of: friendStoryRevision(allFriendGroups)) { _, _ in
                 guard mapWorkEnabled else { return }
                 reconcileFriendStories(geometry: geometry)
             }
@@ -1157,6 +1214,8 @@ struct MapTalkView: View {
                     finishFriendStory(restoreMap: false)
                     experiencePresentation.dismiss()
                 }
+                postPreviewResumePageID = nil
+                previewStoryResumePageIDs = [:]
                 storyReadStore.configure(accountID: accountID,
                     server: environment.backend?.api.baseURL.absoluteString ?? "preview")
             }
@@ -1247,39 +1306,35 @@ struct MapTalkView: View {
                     flushPendingViewedStory(nil)
                 }
                 let target = isActive ? previewControlsPadding : baseControlsPadding
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
-                    controlsBottomPadding = target
-                }
+                setControlsPaddingForPresentation(target)
             }
             .onChangeCompat(of: experiencePresentation.detent) { detent in
                 if friendStoryNavigation.isActive,
+                   !(showsSocialFeedPreview && isBrowsingPostPreview),
                    detent == experiencePresentation.compactDetent,
                    let page = friendStoryNavigation.session?.currentPage,
                    friendStoryNavigation.routes.isEmpty {
                     focusFriendStoryPage(page, geometry: geometry)
                 }
                 if detent == experiencePresentation.compactDetent, experiencePresentation.isPresented {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
-                        controlsBottomPadding = previewControlsPadding
-                    }
+                    setControlsPaddingForPresentation(previewControlsPadding)
                 } else if experiencePresentation.isPresented == false {
-                    withAnimation(.spring(response: 0.34, dampingFraction: 0.8)) {
-                        controlsBottomPadding = baseControlsPadding
-                    }
+                    setControlsPaddingForPresentation(baseControlsPadding)
                 }
             }
             .onChangeCompat(of: geometry.size) { _ in
-                experiencePresentation.configureCompactDetent(.fraction(ControlsLayout.previewFraction))
-                let recalculatedBase = ControlsLayout.basePadding(for: geometry)
-                let recalculatedPreview = ControlsLayout.previewPadding(for: geometry,
-                    fraction: ControlsLayout.previewFraction)
-                    + (friendStoryNavigation.isActive ? FriendStoryLayout.floatingHeight : 0)
-                let isElevated = controlsBottomPadding > recalculatedBase + 1
-                controlsBottomPadding = isElevated ? recalculatedPreview : recalculatedBase
+                compactExperienceSheetFrame = .null
+                experiencePresentation.configureCompactDetent(.fraction(activePreviewFraction))
+                controlsBottomPadding = experiencePresentation.isPresented
+                    ? previewControlsPadding : baseControlsPadding
                 if friendStoryNavigation.isActive, friendStoryNavigation.routes.isEmpty,
                    let page = friendStoryNavigation.session?.currentPage {
                     focusFriendStoryPage(page, geometry: geometry)
                 }
+            }
+            .onChangeCompat(of: activePreviewFraction) { fraction in
+                compactExperienceSheetFrame = .null
+                experiencePresentation.configureCompactDetent(.fraction(fraction))
             }
             .onChangeCompat(of: baseControlsPadding) { newValue in
                 guard experiencePresentation.isPresented == false else { return }
@@ -1287,7 +1342,7 @@ struct MapTalkView: View {
             }
             .onChangeCompat(of: previewControlsPadding) { newValue in
                 guard experiencePresentation.isPresented else { return }
-                controlsBottomPadding = newValue
+                setControlsPaddingForPresentation(newValue)
             }
             .onChangeCompat(of: viewModel.mode) { _ in
                 collapseDetent()
@@ -1297,6 +1352,20 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    var activePreviewFraction: CGFloat {
+        // Only the root Posts card gets more reading room. POIs and Bubble
+        // routes keep their original map/card balance, including on return.
+        showsSocialFeedPreview && isBrowsingPostPreview && friendStoryNavigation.routes.isEmpty
+            ? ControlsLayout.postPreviewFraction : ControlsLayout.previewFraction
+    }
+
+    func setControlsPaddingForPresentation(_ padding: CGFloat) {
+        guard abs(controlsBottomPadding - padding) >= 1 else { return }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            controlsBottomPadding = padding
+        }
+    }
+
     func updateMapActivity() {
         viewModel.setMapActivity(mapWorkEnabled)
         guard !mapWorkEnabled else { return }
@@ -1323,6 +1392,67 @@ private extension MapTalkView {
 #else
         return true
 #endif
+    }
+
+    var showsSocialFeedPreview: Bool {
+        // The presentation works with the active environment's feed. Mock
+        // data remains an explicit launch option, never a UI requirement.
+        !viewModel.isUserScope
+    }
+
+    // Split the existing feed for presentation without changing membership
+    // or publication visibility on the server.
+    func previewGroups(_ groups: [FriendStoryGroup], posts: Bool) -> [FriendStoryGroup] {
+        groups.compactMap { group in
+            let pages = group.pages.filter { page in
+                if case .reel = page.content { return posts }
+                return !posts
+            }
+            guard !pages.isEmpty else { return nil }
+            return FriendStoryGroup(authorID: group.authorID, user: group.user,
+                pages: pages, viewedKeys: storyReadStore.viewedKeys)
+        }
+    }
+
+    func postPreviewPage(in groups: [FriendStoryGroup]) -> FriendStoryPage? {
+        MapTalkPostEntryPage.resolve(in: groups, resumePageID: postPreviewResumePageID)
+    }
+
+    @discardableResult
+    func resumePostPreview(pageID: String, geometry: GeometryProxy) -> Bool {
+        guard showsSocialFeedPreview, mapWorkEnabled,
+              publishDestination == nil, queuedPublishDestination == nil,
+              !isActivityPresented, !isActivityOverExperiencePresented else { return false }
+        let groups = previewGroups(friendStoryGroups, posts: true)
+        guard let page = MapTalkPostEntryPage.resolve(in: groups, resumePageID: pageID) else {
+            return false
+        }
+        if !isBrowsingPostPreview, let origin = friendStoryNavigation.origin {
+            restoreFriendStoryCamera(origin)
+        }
+        openFriendStory(authorID: page.authorID, groups: groups,
+            geometry: geometry, postPreviewPageID: page.id)
+        return true
+    }
+
+    func refreshPostPreview(groups: [FriendStoryGroup], geometry: GeometryProxy) {
+        guard showsSocialFeedPreview,
+              let page = MapTalkPostEntryPage.refreshTarget(in: groups,
+                currentPageID: friendStoryNavigation.session?.currentPage?.id,
+                viewedKeys: storyReadStore.viewedKeys) else { return }
+        // A deliberate refresh adopts the latest mock feed snapshot, while
+        // keeping the native card open and the POI/map browsing state separate.
+        openFriendStory(authorID: page.authorID, groups: groups,
+            geometry: geometry, postPreviewPageID: page.id)
+    }
+
+    func rememberPreviewCursor() {
+        guard showsSocialFeedPreview, let session = friendStoryNavigation.session else { return }
+        if isBrowsingPostPreview {
+            postPreviewResumePageID = session.currentPage?.id ?? postPreviewResumePageID
+        } else {
+            previewStoryResumePageIDs.merge(session.resumePageIDs) { _, latest in latest }
+        }
     }
 
     var friendStoryGroups: [FriendStoryGroup] {
@@ -1382,24 +1512,39 @@ private extension MapTalkView {
         currentCamera = snapshot.camera
     }
 
-    func openFriendStory(authorID: UUID, groups: [FriendStoryGroup], geometry: GeometryProxy) {
+    func openFriendStory(authorID: UUID, groups: [FriendStoryGroup], geometry: GeometryProxy,
+                         postPreviewPageID: String? = nil) {
         let alreadyOpen = friendStoryNavigation.isActive
+        let wasBrowsingPosts = isBrowsingPostPreview
+        rememberPreviewCursor()
+        isBrowsingPostPreview = showsSocialFeedPreview && postPreviewPageID != nil
+        let isChangingFeed = wasBrowsingPosts != isBrowsingPostPreview
         viewModel.cancelPendingLocationFocus()
         pendingViewedStoryKey = nil
         if let parent = friendStoryNavigation.routes.first {
             restoreFriendStoryCamera(parent.returnCamera)
-            experiencePresentation.detent = parent.returnDetent == .large ? .large : experiencePresentation.compactDetent
+            if !isChangingFeed {
+                experiencePresentation.detent = postPreviewPageID == nil && parent.returnDetent == .large
+                    ? .large : experiencePresentation.compactDetent
+            }
         }
         friendStoryNavigation.begin(groups: groups, authorID: authorID,
             viewedKeys: storyReadStore.viewedKeys, origin: friendStoryMapSnapshot())
+        if showsSocialFeedPreview,
+           let pageID = postPreviewPageID ?? previewStoryResumePageIDs[authorID] {
+            friendStoryNavigation.session?.selectPage(id: pageID)
+        }
         guard let page = friendStoryNavigation.session?.currentPage else { return }
         activeExperience = nil
         focusedJourneyHeader = nil
         journeyEntry = nil
         journeyStack = []
         selectedFriendFootprintID = nil
-        if !alreadyOpen {
-            experiencePresentation.configureCompactDetent(.fraction(ControlsLayout.previewFraction))
+        if isChangingFeed { compactExperienceSheetFrame = .null }
+        // Compact-to-compact switches also need their own height; do not
+        // wait for a brand-new presentation to configure the native sheet.
+        experiencePresentation.configureCompactDetent(.fraction(activePreviewFraction))
+        if !alreadyOpen || !experiencePresentation.isPresented || isChangingFeed {
             experiencePresentation.presentNewContent()
         }
         focusFriendStoryPage(page, geometry: geometry)
@@ -1408,6 +1553,8 @@ private extension MapTalkView {
 
     func finishFriendStory(restoreMap: Bool) {
         guard friendStoryNavigation.isActive || friendStoryNavigation.origin != nil else { return }
+        rememberPreviewCursor()
+        isBrowsingPostPreview = false
         flightController.cancelActiveTransition()
         if restoreMap, let origin = friendStoryNavigation.origin { restoreFriendStoryCamera(origin) }
         friendStoryNavigation.clear()
@@ -1424,7 +1571,9 @@ private extension MapTalkView {
         guard friendStoryNavigation.isActive else { return }
         let previousPage = friendStoryNavigation.session?.currentPage?.id
         friendStoryNavigation.session?.invalidate(memoryIDs: viewModel.withdrawnPublicMemoryIDs)
-        friendStoryNavigation.session?.reconcile(with: friendStoryGroups)
+        let refreshedGroups = showsSocialFeedPreview
+            ? previewGroups(friendStoryGroups, posts: isBrowsingPostPreview) : friendStoryGroups
+        friendStoryNavigation.session?.reconcile(with: refreshedGroups)
         guard let page = friendStoryNavigation.session?.currentPage else {
             finishFriendStory(restoreMap: true)
             experiencePresentation.dismiss()
@@ -1471,6 +1620,13 @@ private extension MapTalkView {
 
     func focusFriendStoryPage(_ page: FriendStoryPage, geometry: GeometryProxy) {
         guard mapWorkEnabled else { return }
+        if showsSocialFeedPreview && isBrowsingPostPreview && friendStoryNavigation.routes.isEmpty {
+            postPreviewResumePageID = page.id
+            // Post browsing does not commandeer the map. Explicit Bubble
+            // navigation still uses the original focusContent route.
+            flightController.cancelActiveTransition()
+            return
+        }
         switch page.content {
         case let .reel(reel):
             selectedStoryId = reel.id
@@ -1524,7 +1680,7 @@ private extension MapTalkView {
         case let .journey(journey):
             guard let target = MapJourneyCamera.target(for: journey, size: geometry.size,
                 safeAreaBottom: geometry.safeAreaInsets.bottom,
-                compactFraction: ControlsLayout.previewFraction) else { return }
+                compactFraction: activePreviewFraction) else { return }
             flightController.cancelActiveTransition()
             withAnimation(.easeInOut(duration: 0.28)) { cameraPosition = .region(target.region) }
             currentRegion = target.region
@@ -1538,8 +1694,8 @@ private extension MapTalkView {
             height: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom)
         let viewport = MapCameraViewport(size: canvasSize,
             topInset: MapTalkTopChromeLayout.height(safeAreaTop: geometry.safeAreaInsets.top, showsStories: true),
-            bottomInset: geometry.size.height * ControlsLayout.previewFraction
-                + geometry.safeAreaInsets.bottom + FriendStoryLayout.floatingHeight)
+            bottomInset: geometry.size.height * activePreviewFraction
+                + geometry.safeAreaInsets.bottom + (isBrowsingPostPreview ? 0 : FriendStoryLayout.floatingHeight))
         flightController.handleRegionChange(currentRegion: currentRegion, targetRegion: region,
             cause: cause, viewport: viewport, browsingCoordinates: browsingCoordinates,
             cameraPosition: cameraPositionStore.commandBinding) { currentRegion = $0 }
@@ -2177,6 +2333,7 @@ private struct MapTalkControls: View {
     let onTapPlace: () -> Void
     let onTapReel: () -> Void
     let showsPublishActions: Bool
+    var usesPostPreviewLayout = false
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 12) {
@@ -2189,10 +2346,15 @@ private struct MapTalkControls: View {
                     .accessibilityIdentifier("maptalk.locate")
             }
             if showsPublishActions {
-                PlacePublishButton(action: onTapPlace)
+                PlacePublishButton(action: onTapPlace, usesMomentMark: usesPostPreviewLayout)
                     .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
-                ReelPublishButton(action: onTapReel)
-                    .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+                if usesPostPreviewLayout {
+                    PostPublishButton(action: onTapReel)
+                        .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+                } else {
+                    ReelPublishButton(action: onTapReel)
+                        .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
+                }
             }
         }
     }
@@ -2266,6 +2428,7 @@ private enum ControlsLayout {
     static let baseSafeAreaMultiplier: CGFloat = 0.2
     static let previewGap: CGFloat = 1
     static let previewFraction: CGFloat = 0.35
+    static let postPreviewFraction: CGFloat = 0.44
     static let controlButtonSize: CGFloat = 54
 
     static func basePadding(for geometry: GeometryProxy) -> CGFloat {

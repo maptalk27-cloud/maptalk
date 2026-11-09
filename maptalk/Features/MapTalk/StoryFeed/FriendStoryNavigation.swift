@@ -2,6 +2,11 @@ import Combine
 import MapKit
 import SwiftUI
 
+enum MapTalkFeedPresentation: Equatable {
+    case personStory
+    case posts
+}
+
 enum FriendStoryLayout {
     static let headerHeight: CGFloat = 68
     static let headerGap: CGFloat = 12
@@ -29,22 +34,18 @@ private struct FriendStoryExpandedDetent: CustomPresentationDetent {
 struct FriendStorySheetChrome: ViewModifier {
     @ObservedObject var presentation: MapExperiencePresentation
     @ObservedObject var navigation: FriendStoryNavigation
+    var feedPresentation: MapTalkFeedPresentation = .personStory
 
     func body(content: Content) -> some View {
-        if navigation.isActive {
-            let expanded = PresentationDetent.custom(FriendStoryExpandedDetent.self)
-            content
-                .mapExperienceSheetChrome(compactDetent: presentation.compactDetent,
-                                          expandedDetent: expanded, selection: Binding(
-                    get: { presentation.isExpanded ? expanded : presentation.compactDetent },
-                    set: { presentation.detent = $0 == expanded ? .large : presentation.compactDetent }
-                ))
-        } else {
-            // Direct map cards keep the original native detents and binding.
-            // Person-story navigation must not translate their presentation.
-            content.mapExperienceSheetChrome(compactDetent: presentation.compactDetent,
-                                             selection: $presentation.detent)
-        }
+        let expanded: PresentationDetent = navigation.isActive && feedPresentation == .personStory
+            ? .custom(FriendStoryExpandedDetent.self) : .large
+        // One native sheet modifier across both flows. Replacing the modifier
+        // branch while changing its detents can trigger a fallback size.
+        content.mapExperienceSheetChrome(
+            compactDetent: presentation.compactDetent,
+            expandedDetent: expanded,
+            selection: presentation.nativeDetentSelection(expandedDetent: expanded)
+        )
     }
 }
 
@@ -193,6 +194,7 @@ struct FriendStoryFlow: View {
     let onRead: (String) -> Void
     let onClose: () -> Void
     var allowsPlayback = true
+    var feedPresentation: MapTalkFeedPresentation = .personStory
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
     @State private var placeHistoryStatus: [UUID: PlaceHistoryStatus] = [:]
@@ -247,7 +249,8 @@ struct FriendStoryFlow: View {
                     onReadReady: onRead,
                     journeyProvider: journeyProvider,
                     userProvider: userProvider,
-                    placeProvider: placeProvider
+                    placeProvider: placeProvider,
+                    feedPresentation: feedPresentation
                 )
                 .opacity(navigation.routes.isEmpty ? 1 : 0)
                 .allowsHitTesting(navigation.routes.isEmpty)

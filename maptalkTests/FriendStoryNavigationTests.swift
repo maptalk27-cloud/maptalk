@@ -6,6 +6,12 @@ import Testing
 import UIKit
 @testable import maptalk
 
+private struct NativeStoryExpandedTestDetent: CustomPresentationDetent {
+    static func height(in context: Context) -> CGFloat? {
+        max(1, context.maxDetentValue - 80)
+    }
+}
+
 @MainActor
 struct FriendStoryNavigationTests {
     private let now = Date(timeIntervalSince1970: 1_790_000_000)
@@ -689,6 +695,129 @@ struct FriendStoryNavigationTests {
     }
 
     @Test
+    func expandedPostEntryCancelsPendingCompactReset() async {
+        let presentation = MapExperiencePresentation(compactDetent: .fraction(0.35))
+        presentation.collapseToCompact()
+        presentation.presentExpandedContent()
+
+        // Drain the reset queued by collapseToCompact before checking the result.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+
+        #expect(presentation.isPresented)
+        #expect(presentation.isExpanded)
+        #expect(!presentation.isResettingPresentation)
+
+        presentation.dismiss(preservingDetent: true)
+        #expect(!presentation.didDismiss())
+        presentation.presentNewContent()
+        #expect(presentation.detent == .fraction(0.35), "POI entries still open compact")
+    }
+
+    @Test
+    func largerPostPreviewDoesNotLeakIntoCompactPOIBrowsing() {
+        let poi = PresentationDetent.fraction(0.35)
+        let post = PresentationDetent.fraction(0.44)
+        let presentation = MapExperiencePresentation(compactDetent: poi)
+        presentation.isPresented = true
+        for detent in [post, poi, post, poi] {
+            presentation.configureCompactDetent(detent)
+            #expect(presentation.compactDetent == detent)
+            #expect(presentation.detent == detent)
+            #expect(presentation.isPresented)
+            #expect(!presentation.isResettingPresentation,
+                    "Switching compact flows resizes the same native sheet")
+        }
+    }
+
+    @Test
+    func nativeCompactCallbacksCannotRestoreThePreviousFlowHeight() {
+        let poi = PresentationDetent.fraction(0.35)
+        let post = PresentationDetent.fraction(0.44)
+        for (previous, target) in [(poi, post), (post, poi)] {
+            let presentation = MapExperiencePresentation(compactDetent: previous)
+            presentation.isPresented = true
+            let outgoing = presentation.nativeDetentSelection()
+
+            presentation.configureCompactDetent(target)
+            presentation.presentNewContent()
+            let incoming = presentation.nativeDetentSelection()
+
+            // UIKit may finish the outgoing sheet's selection after SwiftUI
+            // has already supplied the new compact height and content.
+            outgoing.wrappedValue = previous
+            outgoing.wrappedValue = .large
+            incoming.wrappedValue = previous
+            #expect(presentation.compactDetent == target)
+            #expect(presentation.detent == target)
+            #expect(incoming.wrappedValue == target)
+            #expect(!presentation.isResettingPresentation)
+
+            incoming.wrappedValue = .large
+            #expect(presentation.isExpanded)
+            incoming.wrappedValue = target
+            #expect(presentation.detent == target)
+        }
+    }
+
+    @Test
+    func nativeCallbacksFromReplacedContentAreIgnoredEvenAtTheSameHeight() {
+        let compact = PresentationDetent.fraction(0.35)
+        let presentation = MapExperiencePresentation(compactDetent: compact)
+        presentation.isPresented = true
+        let outgoing = presentation.nativeDetentSelection()
+        presentation.presentNewContent()
+
+        outgoing.wrappedValue = .large
+        #expect(presentation.detent == compact)
+        let incoming = presentation.nativeDetentSelection()
+        incoming.wrappedValue = .large
+        #expect(presentation.isExpanded)
+        incoming.wrappedValue = compact
+        #expect(!presentation.isExpanded)
+    }
+
+    @Test
+    func nativeDetentBindingMapsCustomExpansionAndRejectsUnknownValues() {
+        let compact = PresentationDetent.fraction(0.35)
+        let expanded = PresentationDetent.custom(NativeStoryExpandedTestDetent.self)
+        let presentation = MapExperiencePresentation(compactDetent: compact)
+        presentation.isPresented = true
+        let story = presentation.nativeDetentSelection(expandedDetent: expanded)
+
+        story.wrappedValue = .fraction(0.8)
+        story.wrappedValue = .large
+        #expect(presentation.detent == compact)
+        story.wrappedValue = expanded
+        #expect(presentation.detent == .large)
+        #expect(story.wrappedValue == expanded)
+        story.wrappedValue = compact
+        #expect(story.wrappedValue == compact)
+
+        let post = presentation.nativeDetentSelection()
+        post.wrappedValue = expanded
+        #expect(presentation.detent == compact)
+        post.wrappedValue = .large
+        #expect(post.wrappedValue == .large)
+    }
+
+    @Test
+    func nativeDetentCallbacksCannotInterruptAnInternalPresentationReset() {
+        let compact = PresentationDetent.fraction(0.35)
+        let presentation = MapExperiencePresentation(compactDetent: compact)
+        presentation.isPresented = true
+        presentation.detent = .large
+        presentation.presentNewContent()
+        #expect(presentation.isResettingPresentation)
+
+        let duringReset = presentation.nativeDetentSelection()
+        duringReset.wrappedValue = .large
+        #expect(presentation.detent == compact)
+        #expect(presentation.isResettingPresentation)
+    }
+
+    @Test
     func compactGeometryChangesPreserveExpandedStateAndRestoreOrdinaryDetent() {
         let base = PresentationDetent.fraction(0.35)
         let story = PresentationDetent.fraction(0.4)
@@ -1086,5 +1215,261 @@ struct FriendStoryNavigationTests {
                 }
             })
         }
+    }
+}
+
+@MainActor
+struct MapTalkPostEntryGeometryTests {
+    private let canvas = CGSize(width: 390, height: 760)
+    private let baseBottomInset: CGFloat = 16
+    private let compactBottomInset: CGFloat = 292
+
+    @Test
+    func sheetClearanceUsesTheActualCardEdgeNotTheWholeSheetHeight() {
+        // The map ends above the tab bar, but the native sheet extends below it.
+        let mapFrame = CGRect(x: 0, y: 59, width: 393, height: 710)
+        let sheetFrame = CGRect(x: 8, y: 558, width: 377, height: 286)
+        let inset = MapTalkPostEntryGeometry.sheetClearance(
+            mapFrame: mapFrame, sheetFrame: sheetFrame, baseBottomInset: 17)
+        #expect(inset == 223)
+        #expect(mapFrame.maxY - inset == sheetFrame.minY - 12)
+        let withPersonHeader = MapTalkPostEntryGeometry.sheetClearance(
+            mapFrame: mapFrame, sheetFrame: sheetFrame, baseBottomInset: 17, accessoryHeight: 80)
+        #expect(withPersonHeader == inset + 80)
+    }
+
+    @Test
+    func idleCoverHasAFixedLowerLeftPosition() {
+        let center = MapTalkPostEntryGeometry.center(
+            canvasSize: canvas, bottomInset: baseBottomInset)
+        let cover = coverFrame(at: center)
+
+        #expect(cover.minX == 22)
+        #expect(cover.maxY == canvas.height - baseBottomInset)
+    }
+
+    @Test
+    func compactCardLiftsCoverWithoutChangingItsHorizontalPosition() {
+        let closed = MapTalkPostEntryGeometry.center(
+            canvasSize: canvas, bottomInset: baseBottomInset)
+        let open = MapTalkPostEntryGeometry.center(
+            canvasSize: canvas, bottomInset: compactBottomInset)
+
+        #expect(open.x == closed.x)
+        #expect(open.y < closed.y)
+        #expect(coverFrame(at: open).maxY == canvas.height - compactBottomInset)
+    }
+
+    @Test
+    func closingCardRestoresIdlePositionOnBothCanvasSizes() {
+        for size in [canvas, CGSize(width: 320, height: 640)] {
+            let before = MapTalkPostEntryGeometry.center(
+                canvasSize: size, bottomInset: baseBottomInset)
+            let open = MapTalkPostEntryGeometry.center(
+                canvasSize: size, bottomInset: compactBottomInset)
+            let after = MapTalkPostEntryGeometry.center(
+                canvasSize: size, bottomInset: baseBottomInset)
+
+            #expect(open.y < before.y)
+            #expect(after == before)
+            #expect(coverFrame(at: after).minX == 22)
+            #expect(coverFrame(at: after).maxY == size.height - baseBottomInset)
+        }
+    }
+
+    private func coverFrame(at center: CGPoint) -> CGRect {
+        let size = MapTalkPostEntryGeometry.size
+        return CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+}
+
+@MainActor
+struct MapTalkPostEntryPageTests {
+    private let now = Date(timeIntervalSince1970: 1_790_000_000)
+
+    @Test
+    func classicPostPreviewIsOptInAndLeavesExistingDetailsAlone() {
+        let author = user("alice")
+        let post = reel(author: author, ago: 60)
+        #expect(!ExperienceDetailView(mode: .real(post, author), isExpanded: false).isClassicPostPreview)
+        #expect(!ExperienceDetailView(mode: .real(post, author), isExpanded: true).isClassicPostPreview)
+        #expect(ExperienceDetailView(mode: .real(post, author), isExpanded: false,
+                                    usesClassicPostPreview: true).isClassicPostPreview)
+        #expect(ExperienceDetailView(mode: .real(post, author), isExpanded: true,
+                                    usesClassicPostPreview: true).isClassicPostPreview)
+
+        let place = RatedPOI(
+            poi: .init(id: UUID(), name: "Place", coordinate: .init(latitude: 47.6, longitude: -122.3),
+                       category: .coffee),
+            highlight: nil, secondary: nil, media: [], checkIns: [], comments: [],
+            endorsements: .init(hype: 0, solid: 0, meh: 0, questionable: 0), tags: [],
+            isFavoritedByCurrentUser: false, favoritesCount: 0
+        )
+        for expanded in [false, true] {
+            #expect(!ExperienceDetailView(mode: .poi(place), isExpanded: expanded,
+                                         usesClassicPostPreview: true).isClassicPostPreview)
+        }
+    }
+
+    @Test
+    func firstTextOnlyPostIsNotSkippedForAPhotoCover() {
+        let alice = user("alice")
+        let text = reel(author: alice, ago: 120)
+        let photo = reel(author: alice, ago: 60,
+            attachments: [.init(kind: .photo(URL(string: "https://example.com/cover.jpg")!))])
+        let groups = FriendStoryFeed.groups(reals: [photo, text], ratedPOIs: [],
+            userProvider: { _ in nil }, now: now)
+
+        #expect(MapTalkPostEntryPage.resolve(in: groups, resumePageID: nil)?.memoryID == text.id)
+    }
+
+    @Test
+    func resumeWinsWhenReadStateReordersTheFeed() throws {
+        let alice = user("alice"), bob = user("bob")
+        let posts = [reel(author: alice, ago: 10), reel(author: bob, ago: 20)]
+        let initial = FriendStoryFeed.groups(reals: posts, ratedPOIs: [],
+            userProvider: { _ in nil }, now: now)
+        let saved = try #require(initial.first?.pages.first)
+        let reordered = FriendStoryFeed.groups(reals: posts, ratedPOIs: [],
+            viewedKeys: [saved.readKey], userProvider: { _ in nil }, now: now)
+
+        #expect(initial.first?.authorID == alice.id)
+        #expect(reordered.first?.authorID == bob.id)
+        #expect(MapTalkPostEntryPage.resolve(in: reordered, resumePageID: saved.id)?.id == saved.id)
+        #expect(MapTalkPostEntryPage.resolve(in: Array(reordered.reversed()),
+            resumePageID: saved.id)?.id == saved.id)
+    }
+
+    @Test
+    func removedResumeFallsBackToAvailablePostAndEmptyFeedHasNoCover() throws {
+        let alice = user("alice")
+        let removed = reel(author: alice, ago: 120), remaining = reel(author: alice, ago: 60)
+        let initial = FriendStoryFeed.groups(reals: [removed, remaining], ratedPOIs: [],
+            userProvider: { _ in nil }, now: now)
+        let saved = try #require(initial.first?.pages.first)
+        let refreshed = FriendStoryFeed.groups(reals: [remaining], ratedPOIs: [],
+            userProvider: { _ in nil }, now: now)
+
+        #expect(MapTalkPostEntryPage.resolve(in: refreshed, resumePageID: saved.id)?.memoryID == remaining.id)
+        #expect(MapTalkPostEntryPage.resolve(in: [], resumePageID: saved.id) == nil)
+        #expect(MapTalkPostEntryPage.resolve(in: [], resumePageID: nil) == nil)
+    }
+
+    @Test
+    func openingCoverSelectsItsExactPageInsteadOfAnotherUnreadPost() throws {
+        let alice = user("alice")
+        let posts = [reel(author: alice, ago: 120), reel(author: alice, ago: 60)]
+        let groups = FriendStoryFeed.groups(reals: posts, ratedPOIs: [],
+            userProvider: { _ in nil }, now: now)
+        let cover = try #require(MapTalkPostEntryPage.resolve(in: groups, resumePageID: nil))
+        let navigation = FriendStoryNavigation()
+        navigation.begin(groups: groups, authorID: cover.authorID,
+            viewedKeys: [cover.readKey], origin: .init(camera: nil, region: nil))
+
+        #expect(navigation.session?.currentPage?.id != cover.id,
+                "The unread entry rule would otherwise open the later Post")
+        navigation.session?.selectPage(id: cover.id)
+        #expect(navigation.session?.currentPage?.id == cover.id)
+    }
+
+    @Test
+    func refreshAvoidsCurrentCardAndPrefersAnotherUnreadPost() throws {
+        let alice = user("alice")
+        let groups = FriendStoryFeed.groups(
+            reals: [reel(author: alice, ago: 180), reel(author: alice, ago: 120),
+                    reel(author: alice, ago: 60)],
+            ratedPOIs: [], userProvider: { _ in nil }, now: now)
+        let pages = try #require(groups.first?.pages)
+
+        #expect(MapTalkPostEntryPage.refreshTarget(in: groups,
+            currentPageID: pages[0].id, viewedKeys: [pages[1].readKey])?.id == pages[2].id,
+            "The current card is excluded even if its read marker has not fired yet")
+        #expect(MapTalkPostEntryPage.refreshTarget(in: groups,
+            currentPageID: pages[2].id, viewedKeys: [pages[1].readKey])?.id == pages[0].id)
+    }
+
+    @Test
+    func repeatedRefreshCyclesForwardBeforeAndAfterReadMarkers() throws {
+        let alice = user("alice")
+        let groups = FriendStoryFeed.groups(
+            reals: [reel(author: alice, ago: 180), reel(author: alice, ago: 120),
+                    reel(author: alice, ago: 60)],
+            ratedPOIs: [], userProvider: { _ in nil }, now: now)
+        let pages = try #require(groups.first?.pages)
+        let readStates: [Set<String>] = [[], Set(pages.map(\.readKey))]
+
+        for viewedKeys in readStates {
+            var current = pages[0]
+            for expected in [pages[1], pages[2], pages[0]] {
+                current = try #require(MapTalkPostEntryPage.refreshTarget(in: groups,
+                    currentPageID: current.id, viewedKeys: viewedKeys))
+                #expect(current.id == expected.id,
+                    "Rapid taps must not bounce between only the first two posts")
+            }
+        }
+    }
+
+    @Test
+    func refreshHandlesEmptySingletonAndRemovedCursor() throws {
+        let alice = user("alice")
+        let groups = FriendStoryFeed.groups(reals: [reel(author: alice, ago: 60)],
+            ratedPOIs: [], userProvider: { _ in nil }, now: now)
+        let only = try #require(groups.first?.pages.first)
+
+        #expect(MapTalkPostEntryPage.refreshTarget(in: [], currentPageID: only.id,
+            viewedKeys: []) == nil)
+        #expect(MapTalkPostEntryPage.refreshTarget(in: groups, currentPageID: only.id,
+            viewedKeys: [only.readKey])?.id == only.id)
+        #expect(MapTalkPostEntryPage.refreshTarget(in: groups, currentPageID: "removed",
+            viewedKeys: [])?.id == only.id)
+        #expect(MapTalkPostEntryPage.refreshTarget(in: groups, currentPageID: nil,
+            viewedKeys: [])?.id == only.id)
+    }
+
+    @Test
+    func refreshAdoptsNewPostWithoutReplacingOriginalMapOrigin() throws {
+        let alice = user("alice")
+        let oldPost = reel(author: alice, ago: 120)
+        let newPost = reel(author: alice, ago: 60)
+        let initial = FriendStoryFeed.groups(reals: [oldPost], ratedPOIs: [],
+            userProvider: { _ in nil }, now: now)
+        let fresh = FriendStoryFeed.groups(reals: [oldPost, newPost], ratedPOIs: [],
+            userProvider: { _ in nil }, now: now)
+        let oldPage = try #require(initial.first?.pages.first)
+        let originalRegion = MKCoordinateRegion(center: .init(latitude: 47.6, longitude: -122.3),
+            span: .init(latitudeDelta: 0.1, longitudeDelta: 0.1))
+        let navigation = FriendStoryNavigation()
+        navigation.begin(groups: initial, authorID: alice.id, viewedKeys: [],
+            origin: .init(camera: nil, region: originalRegion))
+        let target = try #require(MapTalkPostEntryPage.refreshTarget(in: fresh,
+            currentPageID: oldPage.id, viewedKeys: []))
+
+        navigation.begin(groups: fresh, authorID: target.authorID, viewedKeys: [],
+            origin: .init(camera: nil, region: nil))
+        #expect(navigation.session?.currentPage?.id == oldPage.id,
+            "Beginning a fresh snapshot deliberately retains the author's saved cursor")
+        navigation.session?.selectPage(id: target.id)
+
+        #expect(navigation.isActive)
+        #expect(navigation.session?.currentPage?.memoryID == newPost.id)
+        #expect(navigation.origin?.region?.center.latitude == originalRegion.center.latitude)
+        #expect(navigation.origin?.region?.center.longitude == originalRegion.center.longitude)
+        #expect(!navigation.selectPagerPage(id: target.id, fromAuthorID: alice.id,
+            fromPageID: oldPage.id), "The old pager callback cannot overwrite refreshed selection")
+    }
+
+    private func user(_ handle: String) -> User {
+        .init(id: UUID(), handle: handle, avatarURL: nil)
+    }
+
+    private func reel(author: User, ago: TimeInterval,
+                      attachments: [RealPost.Attachment] = []) -> RealPost {
+        let created = now.addingTimeInterval(-ago)
+        return .init(id: UUID(), userId: author.id,
+            center: .init(latitude: 47.6, longitude: -122.3), radiusMeters: 220,
+            message: "Post entry fixture", attachments: attachments, likes: [], comments: [],
+            visibility: .publicAll, createdAt: created,
+            expiresAt: created.addingTimeInterval(StoryReadKeys.freshWindow))
     }
 }

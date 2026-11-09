@@ -150,6 +150,7 @@ struct ExperienceDetailView: View {
     let standaloneMode: Mode?
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
+    let usesClassicPostPreview: Bool
     let poiStorySelection: POIStorySelection?
     /// Personal browsing opens the owner's latest visit, while an explicit
     /// map-pin selection can still ask for the shared place overview.
@@ -180,6 +181,7 @@ struct ExperienceDetailView: View {
     init(
         mode: Mode,
         isExpanded: Bool = true,
+        usesClassicPostPreview: Bool = false,
         poiStorySelection: POIStorySelection? = nil,
         expandedPOIMedia: RatedPOI.Media? = nil,
         expandedPOIMediaContent: AnyView? = nil,
@@ -198,6 +200,7 @@ struct ExperienceDetailView: View {
         self.standaloneMode = mode
         self.sequenceContext = nil
         self.isExpanded = isExpanded
+        self.usesClassicPostPreview = usesClassicPostPreview
         self.poiStorySelection = poiStorySelection
         self.poiBrowsingUserID = nil
         self.poiOverviewID = nil
@@ -225,6 +228,7 @@ struct ExperienceDetailView: View {
         self.standaloneMode = nil
         self.sequenceContext = nil
         self.isExpanded = isExpanded
+        self.usesClassicPostPreview = false
         self.poiStorySelection = nil
         self.poiBrowsingUserID = nil
         self.poiOverviewID = nil
@@ -255,6 +259,7 @@ struct ExperienceDetailView: View {
         self.standaloneMode = nil
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
+        self.usesClassicPostPreview = false
         self.poiStorySelection = nil
         self.poiBrowsingUserID = poiBrowsingUserID
         self.poiOverviewID = poiOverviewID
@@ -283,10 +288,14 @@ struct ExperienceDetailView: View {
         // particular, a full-resolution portrait poster must not enlarge the
         // sheet and push its author/footer outside the compact detent.
         .background {
-            background(for: currentData, isExpanded: isExpanded)
-                .accessibilityHidden(true)
+            if usesNeutralPreviewBackground {
+                Color(uiColor: .systemBackground).ignoresSafeArea()
+            } else {
+                background(for: currentData, isExpanded: isExpanded)
+                    .accessibilityHidden(true)
+            }
         }
-        .background(Color.black.ignoresSafeArea())
+        .background((usesNeutralPreviewBackground ? Color(uiColor: .systemBackground) : .black).ignoresSafeArea())
         .overlay(alignment: .topTrailing) {
             if isExpanded, let backend = environment.backend, !actionablePosts.isEmpty {
                 BackendContentSafetyMenu(store: backend, posts: actionablePosts,
@@ -339,6 +348,11 @@ struct ExperienceDetailView: View {
 
     var isMediaPlaybackActive: Bool {
         parentPlaybackEnabled && storyViewerState == nil && selectedProfileContext == nil && !isEditingCaption
+    }
+
+    var isClassicPostPreview: Bool {
+        guard usesClassicPostPreview, case .real = currentMode else { return false }
+        return true
     }
 
     private var hasPresentedChildContent: Bool {

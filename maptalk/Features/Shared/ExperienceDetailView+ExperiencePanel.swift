@@ -1,5 +1,16 @@
 import SwiftUI
 
+private struct ExperienceNeutralAppearanceKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var experienceNeutralAppearance: Bool {
+        get { self[ExperienceNeutralAppearanceKey.self] }
+        set { self[ExperienceNeutralAppearanceKey.self] = newValue }
+    }
+}
+
 // MARK: - Experience panel
 
 extension ExperienceDetailView {
@@ -13,6 +24,7 @@ struct ExperiencePanel: View {
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
     var isPlaybackActive = true
+    var usesNeutralAppearance = false
     var commentTarget: BackendCommentTarget? = nil
     var featuredPOIMedia: RatedPOI.Media? = nil
     var featuredPOIMediaContent: AnyView? = nil
@@ -35,6 +47,7 @@ struct ExperiencePanel: View {
         }
         .scrollBounceBehavior(.basedOnSize, axes: .vertical)
         .padding(.horizontal, isSingleVideoHero ? 0 : -ExperienceSheetLayout.horizontalInset)
+        .environment(\.experienceNeutralAppearance, usesNeutralAppearance)
     }
 
     private var panelContent: some View {
@@ -68,6 +81,7 @@ struct ExperiencePanel: View {
                         style: .standard,
                         journeyProvider: journeyProvider,
                         userProvider: userProvider,
+                        usesNeutralAppearance: usesNeutralAppearance && !isSingleVideoHero,
                         isPlaybackActive: isPlaybackActive,
                         onUserSelected: onUserSelected,
                         onCapsuleTap: onJourneyAvatarStackTap
@@ -805,6 +819,7 @@ struct HeroSection: View {
     let userProvider: (UUID) -> User?
     let hideMedia: Bool
     let useTallLayout: Bool
+    let usesNeutralAppearance: Bool
     let isPlaybackActive: Bool
     let onUserSelected: ((User) -> Void)?
     let onCapsuleTap: ((JourneyPost) -> Void)?
@@ -816,6 +831,7 @@ struct HeroSection: View {
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
+        usesNeutralAppearance: Bool = false,
         isPlaybackActive: Bool = true,
         onUserSelected: ((User) -> Void)? = nil,
         onCapsuleTap: ((JourneyPost) -> Void)? = nil
@@ -826,6 +842,7 @@ struct HeroSection: View {
         self.userProvider = userProvider
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.usesNeutralAppearance = usesNeutralAppearance
         self.isPlaybackActive = isPlaybackActive
         self.onUserSelected = onUserSelected
         self.onCapsuleTap = onCapsuleTap
@@ -844,6 +861,7 @@ struct HeroSection: View {
             hideHeader: false,
             hideMedia: hideMedia,
             useTallLayout: useTallLayout,
+            usesNeutralAppearance: usesNeutralAppearance,
             isPlaybackActive: isPlaybackActive,
             onUserSelected: onUserSelected,
             onCapsuleTap: onCapsuleTap

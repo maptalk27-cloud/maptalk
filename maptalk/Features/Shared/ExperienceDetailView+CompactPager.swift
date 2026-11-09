@@ -20,6 +20,7 @@ struct CompactRealCard: View {
     let hideHeader: Bool
     let hideMedia: Bool
     let useTallLayout: Bool
+    let usesNeutralAppearance: Bool
     let isPlaybackActive: Bool
     let onUserSelected: ((User) -> Void)?
     let onCapsuleTap: ((JourneyPost) -> Void)?
@@ -44,6 +45,7 @@ struct CompactRealCard: View {
         hideHeader: Bool = false,
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
+        usesNeutralAppearance: Bool = false,
         isPlaybackActive: Bool = true,
         onUserSelected: ((User) -> Void)? = nil,
         onCapsuleTap: ((JourneyPost) -> Void)? = nil
@@ -59,6 +61,7 @@ struct CompactRealCard: View {
         self.hideHeader = hideHeader
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
+        self.usesNeutralAppearance = usesNeutralAppearance
         self.isPlaybackActive = isPlaybackActive
         self.onUserSelected = onUserSelected
         self.onCapsuleTap = onCapsuleTap
@@ -124,6 +127,7 @@ struct CompactRealCard: View {
                             journey: capsule,
                             userProvider: userProvider,
                             style: style,
+                            usesNeutralAppearance: usesNeutralAppearance,
                             onTap: onCapsuleTap
                         )
                         .frame(maxWidth: style == .standard ? 280 : nil, alignment: .leading)
@@ -139,6 +143,7 @@ struct CompactRealCard: View {
                         journey: capsule,
                         userProvider: userProvider,
                         style: style,
+                        usesNeutralAppearance: usesNeutralAppearance,
                         isCompact: true,
                         maxVisibleCount: 3,
                         onTap: onCapsuleTap
@@ -306,7 +311,7 @@ struct CompactRealCard: View {
         profileButton {
             Text(displayName)
                 .font(.headline.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(usesNeutralAppearance ? Color.primary : .white)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("experience.real.author.\(real.id.uuidString)")
         }
@@ -372,7 +377,7 @@ struct CompactRealCard: View {
         if let caption = PostCaption.visibleText(real.message) {
             Text(caption)
                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(usesNeutralAppearance ? Color.primary : .white)
                 .lineLimit(textLineLimit)
                 .accessibilityIdentifier("experience.real.caption.\(real.id.uuidString)")
         }
@@ -545,6 +550,7 @@ struct CompactRealCard: View {
                 journey: capsule,
                 userProvider: userProvider,
                 style: style,
+                usesNeutralAppearance: usesNeutralAppearance,
                 isCompact: true,
                 maxVisibleCount: 3,
                 onTap: onCapsuleTap
@@ -605,7 +611,7 @@ struct CompactRealCard: View {
         HStack {
             Text(real.cardDisplayDate.formatted(.relative(presentation: .named)))
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.7))
                 .accessibilityIdentifier("experience.real.timestamp.\(real.id.uuidString)")
 
             Spacer()
@@ -636,6 +642,7 @@ struct CompactRealCard: View {
                     journey: capsule,
                     userProvider: userProvider,
                     style: style,
+                    usesNeutralAppearance: usesNeutralAppearance,
                     isCompact: true,
                     maxVisibleCount: 3,
                     onTap: onCapsuleTap
@@ -720,10 +727,11 @@ struct CompactRealCard: View {
             ExperienceCommentCount(target: commentTarget, fallback: text)
                 .font(.caption.weight(.semibold))
         }
-        .foregroundStyle(.white.opacity(0.85))
+        .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.85))
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(.white.opacity(0.12), in: Capsule(style: .continuous))
+        .background(usesNeutralAppearance ? Color(uiColor: .secondarySystemBackground) : .white.opacity(0.12),
+                    in: Capsule(style: .continuous))
     }
 
     struct POICategoryAvatar: View {
@@ -777,11 +785,13 @@ struct CompactRealCard: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
             .overlay {
-                LinearGradient(
-                    colors: [.black.opacity(0.05), .black.opacity(0.3)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+                if !usesNeutralAppearance {
+                    LinearGradient(
+                        colors: [.black.opacity(0.05), .black.opacity(0.3)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
             }
         case let .video(_, poster):
             ZStack {
@@ -803,7 +813,7 @@ struct CompactRealCard: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
-                    .overlay { Color.black.opacity(0.25) }
+                    .overlay { Color.black.opacity(usesNeutralAppearance ? 0 : 0.25) }
                 } else {
                     previewFallback(symbol: "play.rectangle.fill")
                 }
@@ -833,24 +843,31 @@ struct CompactRealCard: View {
         }
     }
 
+    @ViewBuilder
     private func previewFallback(symbol: String) -> some View {
-        LinearGradient(
-            colors: [Theme.neonPrimary.opacity(0.35), Color.black.opacity(0.75)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .overlay {
-            Image(systemName: symbol)
-                .font(.system(size: 30, weight: .bold))
-                .foregroundStyle(.white.opacity(0.85))
+        if usesNeutralAppearance {
+            Color(uiColor: .secondarySystemBackground).overlay {
+                Image(systemName: symbol).font(.system(size: 28)).foregroundStyle(.secondary)
+            }
+        } else {
+            LinearGradient(
+                colors: [Theme.neonPrimary.opacity(0.35), Color.black.opacity(0.75)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .overlay {
+                Image(systemName: symbol)
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
         }
     }
 
     private var loadingMediaTile: some View {
         ProgressView()
-            .tint(.white.opacity(0.8))
+            .tint(usesNeutralAppearance ? .secondary : .white.opacity(0.8))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.white.opacity(0.06))
+            .background(usesNeutralAppearance ? Color(uiColor: .secondarySystemBackground) : Color.white.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .accessibilityLabel("Loading media")
     }
@@ -875,6 +892,7 @@ struct CompactRealCard: View {
         let journey: JourneyPost
         let userProvider: (UUID) -> User?
         let style: CompactRealCard.Style
+        let usesNeutralAppearance: Bool
         let isCompact: Bool
         let maxVisibleCount: Int?
         let onTap: ((JourneyPost) -> Void)?
@@ -883,6 +901,7 @@ struct CompactRealCard: View {
             journey: JourneyPost,
             userProvider: @escaping (UUID) -> User?,
             style: CompactRealCard.Style,
+            usesNeutralAppearance: Bool = false,
             isCompact: Bool = false,
             maxVisibleCount: Int? = nil,
             onTap: ((JourneyPost) -> Void)? = nil
@@ -890,6 +909,7 @@ struct CompactRealCard: View {
             self.journey = journey
             self.userProvider = userProvider
             self.style = style
+            self.usesNeutralAppearance = usesNeutralAppearance
             self.isCompact = isCompact
             self.maxVisibleCount = maxVisibleCount
             self.onTap = onTap
@@ -897,6 +917,13 @@ struct CompactRealCard: View {
 
         var body: some View {
             label
+                .background {
+                    if usesNeutralAppearance {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color(white: 0.24))
+                            .padding(.leading, isCompact ? -8 : 0)
+                    }
+                }
         }
 
         private var label: some View {

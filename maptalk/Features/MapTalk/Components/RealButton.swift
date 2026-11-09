@@ -1,5 +1,23 @@
 import SwiftUI
 
+struct PostPublishButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "plus")
+                .font(.system(size: 21, weight: .medium))
+                .foregroundStyle(.primary)
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+                .glassEffect(.regular.interactive(), in: Circle())
+        }
+        .buttonStyle(MomentBadgeButtonStyle())
+        .accessibilityLabel("Create post")
+        .accessibilityIdentifier("maptalk.add-post")
+    }
+}
+
 /// The public-facing name is Reel. In this first version it is a short text
 /// expression tied to the person's live location; the visual keeps the
 /// original MapTalk creation mark instead of adding generic toolbar chrome.
@@ -17,7 +35,7 @@ struct ReelPublishButton: View {
     }
 }
 
-private struct MomentBadgeIcon: View {
+struct MomentBadgeIcon: View {
     var body: some View {
         ZStack {
             Circle()

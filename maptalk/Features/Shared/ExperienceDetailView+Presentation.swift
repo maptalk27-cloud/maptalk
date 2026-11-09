@@ -40,6 +40,7 @@ extension ExperienceDetailView {
                             onPOIContributorViewed: onPOIContributorViewed,
                             isPOIContributorUnseen: isPOIContributorUnseen,
                             isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id,
+                            usesNeutralAppearance: isClassicPostPreview,
                             commentTarget: item.mode.commentTarget,
                             featuredPOIMedia: browsingPOIMedia(for: item.mode)
                         )
@@ -61,6 +62,7 @@ extension ExperienceDetailView {
                     onPOIContributorViewed: onPOIContributorViewed,
                     isPOIContributorUnseen: isPOIContributorUnseen,
                     isPlaybackActive: isMediaPlaybackActive,
+                    usesNeutralAppearance: isClassicPostPreview,
                     commentTarget: currentMode.commentTarget,
                     featuredPOIMedia: expandedPOIMedia ?? browsingPOIMedia(for: currentMode),
                     featuredPOIMediaContent: expandedPOIMediaContent
@@ -154,14 +156,15 @@ extension ExperienceDetailView {
     private func collapsedPreviewLayer(using data: ContentData) -> some View {
         if let hero = data.hero {
             let isSplitLayout = shouldHideMediaTile(for: data)
-            let useTallLayout = true
             ExperienceDetailView.HeroSection(
                 model: hero,
                 style: .collapsed,
                 journeyProvider: journeyProvider,
                 userProvider: userProvider,
                 hideMedia: isSplitLayout,
-                useTallLayout: useTallLayout,
+                useTallLayout: true,
+                usesNeutralAppearance: usesNeutralPreviewBackground,
+                isPlaybackActive: isMediaPlaybackActive,
                 onUserSelected: openProfile,
                 onCapsuleTap: onJourneyAvatarStackTap
             )
@@ -187,6 +190,11 @@ extension ExperienceDetailView {
 
     private func shouldHideMediaTile(for data: ContentData) -> Bool {
         backgroundVideo(for: data) != nil
+    }
+
+    var usesNeutralPreviewBackground: Bool {
+        // Single-video cards retain their original video backdrop and white text.
+        isClassicPostPreview && (isExpanded || !shouldHideMediaTile(for: contentData(for: currentMode)))
     }
 
     @ViewBuilder

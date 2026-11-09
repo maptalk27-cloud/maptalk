@@ -1,6 +1,70 @@
 import SwiftUI
 import UIKit
 
+/// Measures the native card, not the SwiftUI content's independent hosting
+/// coordinate space. This is layout-only: no display link or map updates.
+struct MapTalkSheetFrameReader: UIViewControllerRepresentable {
+    let onChange: (CGRect) -> Void
+
+    func makeUIViewController(context: Context) -> MapTalkSheetFrameController {
+        MapTalkSheetFrameController(onChange: onChange)
+    }
+
+    func updateUIViewController(_ controller: MapTalkSheetFrameController, context: Context) {
+        controller.onChange = onChange
+        controller.reportFrame()
+    }
+}
+
+final class MapTalkSheetFrameController: UIViewController {
+    var onChange: (CGRect) -> Void
+    private var lastFrame = CGRect.null
+
+    init(onChange: @escaping (CGRect) -> Void) {
+        self.onChange = onChange
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func loadView() {
+        view = UIView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        reportFrame()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        reportFrame()
+    }
+
+    func reportFrame() {
+        guard let window = viewIfLoaded?.window else { return }
+        var ancestor = parent
+        while let current = ancestor {
+            if let sheet = current.presentationController as? UISheetPresentationController,
+               let card = sheet.presentedView {
+                let frame = card.convert(card.bounds, to: window)
+                guard frame.height > 0, frame != lastFrame else { return }
+                lastFrame = frame
+                // Don't publish SwiftUI state during UIKit's layout pass.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.viewIfLoaded?.window != nil else { return }
+                    self.onChange(frame)
+                }
+                return
+            }
+            ancestor = current.parent
+        }
+    }
+}
+
 /// An accessory to the native presentation, not part of its glass platter.
 /// Keep the real card/scroll/drag machinery unchanged and place only the
 /// identity in the presentation container's uncovered map area.

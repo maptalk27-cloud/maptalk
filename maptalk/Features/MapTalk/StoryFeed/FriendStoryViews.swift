@@ -108,8 +108,8 @@ struct FriendStoriesRow: View {
     }
 }
 
-/// Owns only person-story navigation. The original Reel card continues to own
-/// its image viewer, comments, author controls and Bubble interaction.
+/// Reuses the original cards for person stories and the separate Posts feed.
+/// Cards keep ownership of media, comments, author controls and Bubbles.
 struct FriendStoryContentView: View {
     let group: FriendStoryGroup
     let page: FriendStoryPage
@@ -130,6 +130,7 @@ struct FriendStoryContentView: View {
     let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
     let placeProvider: (UUID) -> RatedPOI?
+    var feedPresentation: MapTalkFeedPresentation = .personStory
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
@@ -154,39 +155,41 @@ struct FriendStoryContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            postPager
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .clipped()
-                .overlay(alignment: .bottom) {
-                    if !isExpanded,
-                       let momentIndex = group.momentIndex(containing: pageIndex),
-                       group.moments[momentIndex].placeID != nil {
-                        let range = group.moments[momentIndex].pageRange
-                        FriendStoryPlacePageDots(count: range.count,
-                            index: pageIndex - range.lowerBound)
-                            .padding(.bottom, showsFullBleedPOIPreview ? 24 : 12)
-                            .allowsHitTesting(false)
-                    }
+        postPager
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .clipped()
+            .overlay(alignment: .bottom) {
+                if feedPresentation == .personStory, !isExpanded,
+                   let momentIndex = group.momentIndex(containing: pageIndex),
+                   group.moments[momentIndex].placeID != nil {
+                    let range = group.moments[momentIndex].pageRange
+                    FriendStoryPlacePageDots(count: range.count,
+                        index: pageIndex - range.lowerBound)
+                        .padding(.bottom, showsFullBleedPOIPreview ? 24 : 12)
+                        .allowsHitTesting(false)
                 }
-        }
-        .background(Color.black)
+            }
+        .background(feedPresentation == .posts
+            ? Color(uiColor: .systemBackground) : .black)
         // The pager itself must reach the sheet's bottom edge; a child cannot
         // fill the home-indicator inset while its parent clips above it.
         .ignoresSafeArea(.container, edges: showsFullBleedPOIPreview ? .bottom : [])
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("friend-story.card")
+        .accessibilityIdentifier(feedPresentation == .posts ? "maptalk.posts.card" : "friend-story.card")
         .accessibilityValue(isExpanded ? "Expanded" : "Compact")
+        .accessibilityAction(.escape, onClose)
         .background {
-            FriendStoryFloatingAccessory(
-                isVisible: isPlaybackActive && selectedProfile == nil
-                    && activeChildPresentations.isEmpty
-            ) {
-                navigationHeader
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22))
-                    .environment(\.colorScheme, .dark)
-                    .environment(\.appEnv, environment)
+            if feedPresentation == .personStory {
+                FriendStoryFloatingAccessory(
+                    isVisible: isPlaybackActive && selectedProfile == nil
+                        && activeChildPresentations.isEmpty
+                ) {
+                    navigationHeader
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22))
+                        .environment(\.colorScheme, .dark)
+                        .environment(\.appEnv, environment)
+                }
             }
         }
         .onChangeCompat(of: page.id) { _ in
@@ -407,6 +410,7 @@ struct FriendStoryContentView: View {
             ExperienceDetailView(
                 mode: .real(displayedReel(real), pagerUserProvider(candidate.authorID)),
                 isExpanded: isExpanded,
+                usesClassicPostPreview: feedPresentation == .posts,
                 onCollapsedTap: onExpand,
                 onJourneyAvatarStackTap: onJourney,
                 journeyProvider: journeyProvider,
@@ -719,5 +723,151 @@ private struct FriendStoryAvatar: View {
             .font(.system(size: diameter * 0.27, weight: .semibold))
             .foregroundStyle(.black)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The cover and its tap target use the same page. Resume takes precedence
+/// over feed reordering, without skipping text-only posts for a prettier cover.
+enum MapTalkPostEntryPage {
+    static func resolve(in groups: [FriendStoryGroup], resumePageID: String?) -> FriendStoryPage? {
+        let pages = groups.flatMap(\.pages)
+        return pages.first { $0.id == resumePageID } ?? pages.first
+    }
+
+    static func refreshTarget(in groups: [FriendStoryGroup], currentPageID: String?,
+                              viewedKeys: Set<String>) -> FriendStoryPage? {
+        let pages = groups.flatMap(\.pages)
+        let candidates: [FriendStoryPage]
+        if let index = pages.firstIndex(where: { $0.id == currentPageID }) {
+            // Continue around the feed, avoiding the current card. Once all
+            // posts are read, repeated taps still move forward rather than
+            // bouncing between the same two cards.
+            candidates = Array(pages.dropFirst(index + 1)) + Array(pages.prefix(index))
+        } else {
+            candidates = pages
+        }
+        return candidates.first { !viewedKeys.contains($0.readKey) }
+            ?? candidates.first ?? pages.first
+    }
+}
+
+/// A small, fixed postcard into Posts; the native tab bar keeps its navigation role.
+struct MapTalkPostCoverEntry: View {
+    let post: RealPost
+    let isResuming: Bool
+    let isActive: Bool
+    let canvasSize: CGSize
+    let bottomInset: CGFloat
+    let action: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private let shape = RoundedRectangle(cornerRadius: 17, style: .continuous)
+
+    private var restingCenter: CGPoint {
+        MapTalkPostEntryGeometry.center(canvasSize: canvasSize, bottomInset: bottomInset)
+    }
+
+    private var coverURL: URL? {
+        post.attachments.compactMap { attachment -> URL? in
+            switch attachment.kind {
+            case let .photo(url): return url
+            case let .video(_, poster): return poster
+            case .emoji: return nil
+            }
+        }.first
+    }
+
+    var body: some View {
+        coverButton
+        .position(restingCenter)
+        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.86),
+                   value: restingCenter)
+        .frame(width: canvasSize.width, height: canvasSize.height)
+        .transaction { if reduceMotion { $0.animation = nil } }
+    }
+
+    private var coverButton: some View {
+        Button(action: action) {
+            Color(white: 0.22)
+                .frame(width: MapTalkPostEntryGeometry.size.width,
+                       height: MapTalkPostEntryGeometry.size.height)
+                .overlay {
+                    if let coverURL {
+                        MapImage(url: coverURL) { phase in
+                            if case let .success(image) = phase {
+                                image.resizable().scaledToFill()
+                            } else {
+                                textCover
+                            }
+                        }
+                    } else {
+                        textCover
+                    }
+                }
+                .overlay {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.3),
+                            .init(color: .black.opacity(0.12), location: 0.5),
+                            .init(color: .black.opacity(0.72), location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+                .overlay(alignment: .bottom) {
+                    HStack(spacing: 3) {
+                        Text("Posts")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                        if isActive {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 7, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .shadow(color: .black.opacity(0.3), radius: 2, y: 1)
+                    .padding(.bottom, 7)
+                }
+                .clipShape(shape)
+                .overlay { shape.strokeBorder(.white.opacity(0.92), lineWidth: 1.5) }
+                .shadow(color: .black.opacity(0.16), radius: 5, x: 0, y: 3)
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Posts")
+        .accessibilityValue(isActive ? "Open" : "Closed")
+        .accessibilityHint(isActive ? "Refresh posts. Swipe down on the card to close."
+            : isResuming ? "Continue where you left off." : "Browse posts.")
+        .accessibilityIdentifier("maptalk.post-entry")
+    }
+
+    private var textCover: some View {
+        LinearGradient(colors: [Color(white: 0.33), Color(white: 0.12)],
+                       startPoint: .topLeading, endPoint: .bottomTrailing)
+            .overlay(alignment: .topLeading) {
+                Image(systemName: "quote.opening")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(9)
+            }
+    }
+}
+
+/// A stable lower-left entry that only moves to clear the native card.
+enum MapTalkPostEntryGeometry {
+    static let size = CGSize(width: 50, height: 58)
+    private static let edgeInset: CGFloat = 22
+
+    static func sheetClearance(mapFrame: CGRect, sheetFrame: CGRect,
+                               baseBottomInset: CGFloat, accessoryHeight: CGFloat = 0) -> CGFloat {
+        max(baseBottomInset, mapFrame.maxY - sheetFrame.minY + accessoryHeight + 12)
+    }
+
+    static func center(canvasSize: CGSize, bottomInset: CGFloat) -> CGPoint {
+        CGPoint(x: min(canvasSize.width / 2, edgeInset + size.width / 2),
+                y: max(min(canvasSize.height / 2, size.height / 2),
+                       canvasSize.height - max(0, bottomInset) - size.height / 2))
     }
 }
