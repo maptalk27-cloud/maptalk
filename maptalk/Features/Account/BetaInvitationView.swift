@@ -25,7 +25,7 @@ struct BetaInvitationView: View {
                 .font(.system(size: 30, weight: .semibold))
             Text(access.status == "revoked"
                 ? "Contact the person who invited you to rejoin the private test."
-                : "Enter your invitation code to join the private MapTalk test.")
+                : "Enter your invitation code to join the private \(AppBrand.name) test.")
                 .foregroundStyle(.secondary)
             if access.status != "revoked" {
                 TextField("Invitation code", text: $code)
@@ -35,7 +35,7 @@ struct BetaInvitationView: View {
                     .background(Color.black.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
                     .accessibilityIdentifier("account.invite.code")
                 Button { Task { await account.redeemInvite(code) } } label: {
-                    Text(account.isSubmitting ? "Joining…" : "Join MapTalk")
+                    Text(account.isSubmitting ? "Joining…" : "Join \(AppBrand.name)")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity, minHeight: 52)

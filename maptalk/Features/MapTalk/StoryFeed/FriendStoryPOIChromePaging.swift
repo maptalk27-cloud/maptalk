@@ -121,8 +121,11 @@ private struct FriendStoryFixedPOIChrome: ViewModifier {
 }
 
 extension View {
-    func poiChromePageAnchor(id: String) -> some View {
-        anchorPreference(key: FriendStoryPOIChromeAnchors.self, value: .bounds) { [id: $0] }
+    func poiChromePageAnchor(id: String?) -> some View {
+        anchorPreference(key: FriendStoryPOIChromeAnchors.self, value: .bounds) { anchor in
+            guard let id else { return [:] }
+            return [id: anchor]
+        }
     }
 
     func fixedPOIChrome(pages: [FriendStoryPOIChromePage], selectedID: String,

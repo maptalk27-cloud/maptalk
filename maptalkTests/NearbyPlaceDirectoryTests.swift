@@ -123,6 +123,119 @@ struct NearbyPlaceDirectoryTests {
         #expect(searched.isInMyMap)
         #expect(searched.publicVisitorCount == 0, "Private visits must never become public social proof")
         #expect(searched.place.checkIns.count == 1)
+        #expect(searched.ownCheckIns.count == 1)
+        #expect(searched.hasHistory)
+        #expect(choices.first?.id == namedMatch.id, "Search additions must not bury personal history")
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func oldPersonalVisitsRankBeforePublicHistoryAndUnusedCloserPlaces() async throws {
+        let archive = MyMapArchiveStore(startsEmpty: true)
+        let older = RatedPOI.CheckIn(userId: archive.currentUserID, createdAt: .now.addingTimeInterval(-30 * 86_400))
+        let newer = RatedPOI.CheckIn(userId: archive.currentUserID, createdAt: .now.addingTimeInterval(-14 * 86_400))
+        let visitedDirectory = place(metersNorth: 140)
+        var visited = visitedDirectory
+        visited.checkIns = [older, newer, newer]
+        archive.savePOI(visited, publicVersion: nil, audience: .privateMyMap)
+        var outside = place(metersNorth: 200)
+        outside.checkIns = [newer]
+        archive.savePOI(outside, publicVersion: nil, audience: .privateMyMap)
+        var publicHistory = place(metersNorth: 70)
+        publicHistory.checkIns = [.init(userId: UUID(), createdAt: .now)]
+        let unused = place(metersNorth: 5)
+        let social = NearbyTestRepository([publicHistory])
+        let directory = NearbyTestRepository([unused, publicHistory, visitedDirectory])
+        let model = MapTalkViewModel(environment: AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: []), location: NearbyTestLocation(origin),
+            notifications: NotificationServiceImpl(), activePOIRepo: social, poiRepo: social,
+            nearbyPOIRepo: directory, realRepo: NearbyTestReelRepository(), myMapArchive: archive))
+        try await waitForDirectory(model, searches: 1, repository: directory)
+        let choices = model.nearbyPlaceOptions(near: CLLocation(latitude: origin.latitude, longitude: origin.longitude))
+
+        #expect(choices.map(\.id) == [visited.id, publicHistory.id, unused.id])
+        try #require(choices.count == 3)
+        #expect(choices.map(\.historyPriority) == [0, 1, 2])
+        #expect(MapTalkNearbyPlaceOption.ranked(Array(choices.reversed())).map(\.id) == choices.map(\.id))
+        let ownHistory = try #require(choices.first)
+        #expect(ownHistory.ownCheckIns.map(\.id) == [newer.id, older.id])
+        #expect(ownHistory.hasHistory, "Personal visits must not expire with the 72-hour live feed")
+        #expect(ownHistory.publicVisitorCount == 0)
+        #expect(ownHistory.historyBadge == "Been here")
+        #expect(ownHistory.historyDetail?.hasPrefix("You · 2 check-ins · Last ") == true)
+        #expect(ownHistory.locationSubtitle.contains(visited.poi.category.displayName))
+        #expect(choices[1].publicVisitorCount == 1)
+        #expect(choices[1].historyBadge == "Check-ins")
+        #expect(choices[1].historyDetail == "1 person checked in")
+        #expect(!choices[2].hasHistory)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func savedPlacesAndOtherPeoplesPrivateVisitsDoNotClaimPersonalHistory() async throws {
+        let archive = MyMapArchiveStore(startsEmpty: true)
+        let saved = place(metersNorth: 10)
+        var foreignPrivateVisit = place(metersNorth: 20)
+        foreignPrivateVisit.checkIns = [.init(userId: UUID(), createdAt: .now)]
+        archive.savePOI(saved, publicVersion: nil, audience: .privateMyMap)
+        archive.savePOI(foreignPrivateVisit, publicVersion: nil, audience: .privateMyMap)
+        let directory = NearbyTestRepository([saved])
+        let empty = NearbyTestRepository([])
+        let model = MapTalkViewModel(environment: AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: []), location: NearbyTestLocation(origin),
+            notifications: NotificationServiceImpl(), activePOIRepo: empty, poiRepo: empty,
+            nearbyPOIRepo: directory, realRepo: NearbyTestReelRepository(), myMapArchive: archive))
+        try await waitForDirectory(model, searches: 1, repository: directory)
+        let choices = model.nearbyPlaceOptions(near: CLLocation(latitude: origin.latitude, longitude: origin.longitude))
+
+        #expect(choices.map(\.id) == [saved.id, foreignPrivateVisit.id])
+        #expect(choices.allSatisfy { $0.isInMyMap })
+        #expect(choices.allSatisfy { $0.ownCheckIns.isEmpty && !$0.hasHistory && $0.historyPriority == 2 })
+        #expect(choices.allSatisfy { $0.publicVisitorCount == 0 && $0.friendUsers.isEmpty })
+        #expect(choices.allSatisfy { $0.historyBadge == nil && $0.historyDetail == nil })
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func canonicalDirectoryAndArchivedAliasKeepOneRowAndDistinctOwnVisits() async throws {
+        let user = BackendUser(id: UUID(), handle: "history_alias_test")
+        let apple = place(metersNorth: 100)
+        let canonicalID = UUID()
+        let serverPlace = BackendPlace(id: canonicalID, sourceId: apple.id,
+            name: apple.poi.name, category: "other",
+            coordinate: .init(latitude: apple.poi.coordinate.latitude, longitude: apple.poi.coordinate.longitude))
+        let oldDate = Date.now.addingTimeInterval(-30 * 86_400)
+        let memory = BackendMemory(id: UUID(), ownerId: user.id, owner: user, kind: "poi", visibility: "private",
+            location: serverPlace.coordinate, caption: "", place: serverPlace, media: [],
+            createdAt: oldDate, publishedAt: nil, expiresAt: oldDate.addingTimeInterval(72 * 3_600))
+        let api = BackendAPI(baseURL: URL(string: "https://example.test")!)
+        var state = BackendLocalState(ownerID: user.id, server: api.baseURL.absoluteString, user: user)
+        state.mine = [memory]
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let disk = BackendLocalStateDisk(directory: path)
+        defer { disk.invalidate() }
+        try await disk.save(state, revision: 1)
+        let store = BackendStore(user: user.user, api: api, storageDirectory: path,
+            automaticallySync: false, observesConnectivity: false)
+        defer { store.clearLocalMedia() }
+        #expect(await store.restoreCachedState())
+        var alias = apple
+        let newest = RatedPOI.CheckIn(userId: user.id, createdAt: oldDate.addingTimeInterval(86_400))
+        let archived = try #require(store.archive.privatePOIs.first)
+        alias.checkIns = archived.checkIns + [newest]
+        store.archive.savePOI(alias, publicVersion: nil, audience: .privateMyMap)
+        let directory = NearbyTestRepository([apple, apple])
+        let empty = NearbyTestRepository([])
+        let model = MapTalkViewModel(environment: AppEnvironment(
+            build: .init(configuration: .debug, featureFlags: []), location: NearbyTestLocation(origin),
+            notifications: NotificationServiceImpl(), activePOIRepo: empty, poiRepo: empty,
+            nearbyPOIRepo: directory, realRepo: NearbyTestReelRepository(), myMapArchive: store.archive, backend: store))
+        try await waitForDirectory(model, searches: 1, repository: directory)
+        let choices = model.nearbyPlaceOptions(near: CLLocation(latitude: origin.latitude, longitude: origin.longitude),
+            matching: [apple])
+
+        #expect(choices.map(\.id) == [canonicalID])
+        let result = try #require(choices.first)
+        #expect(result.isPublicDirectoryPlace && result.isInMyMap)
+        #expect(result.ownCheckIns.map(\.id) == [newest.id, memory.id])
+        #expect(result.publicVisitorCount == 0)
     }
 
     @Test

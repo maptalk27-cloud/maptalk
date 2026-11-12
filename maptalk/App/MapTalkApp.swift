@@ -10,7 +10,7 @@ struct MapTalkApp: App {
                 if usesLocalBackend, BackendDeploymentConfiguration.configuredURL != nil {
                     BackendRootView()
                 } else if usesLocalBackend {
-                    ContentUnavailableView("MapTalk isn't configured yet",
+                    ContentUnavailableView("\(AppBrand.name) isn't configured yet",
                         systemImage: "network.slash",
                         description: Text("This build needs its secure server address. Contact the person who invited you for an updated build."))
                 } else {

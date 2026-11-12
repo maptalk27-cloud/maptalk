@@ -20,7 +20,7 @@ struct AppRouter: View {
                 .tint(.black)
                 .toolbarColorScheme(usesSatelliteChrome ? .dark : nil, for: .tabBar)
                 .toolbarBackgroundVisibility(usesSatelliteChrome ? .visible : .automatic, for: .tabBar)
-                .tabItem { Label("MapTalk", systemImage: "map") }
+                .tabItem { Label(AppBrand.name, systemImage: "map") }
                 .tag(0)
 
             if environment.backend == nil {

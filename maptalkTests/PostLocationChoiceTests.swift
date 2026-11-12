@@ -84,6 +84,64 @@ struct PostLocationChoiceTests {
     }
 
     @Test
+    func ownPOIHistoryWithoutPostsRanksBeforePublicHistoryAndCloserDirectoryPlaces() throws {
+        let oldVisit = RatedPOI.CheckIn(userId: ownerID, createdAt: .now.addingTimeInterval(-30 * 86_400))
+        let visited = place(at: point(north: 1_000), name: "A familiar cafe", ownCheckIns: [oldVisit])
+        let publicHistory = place(at: point(north: 100), publicVisitors: 4)
+        let unused = place(at: point(north: 5))
+        let forward = MapTalkPostLocations.choices(near: origin, ownPosts: [],
+            places: [unused, publicHistory, visited, visited], currentUserID: ownerID)
+        let reverse = MapTalkPostLocations.choices(near: origin, ownPosts: [],
+            places: [visited, publicHistory, unused], currentUserID: ownerID)
+
+        #expect(forward.map(\.id) == reverse.map(\.id))
+        #expect(forward.map { $0.placeOption?.id } == [visited.id, publicHistory.id, unused.id])
+        try #require(forward.count == 3)
+        #expect(forward.map(\.historyPriority) == [0, 1, 2])
+        let ownHistory = try #require(forward.first)
+        #expect(ownHistory.isPOI && ownHistory.hasHistory)
+        #expect(ownHistory.postCount == 0)
+        #expect(ownHistory.ownCheckInCount == 1)
+        #expect(ownHistory.lastOwnActivityAt == oldVisit.activityDate)
+        #expect(ownHistory.selection.title == visited.place.poi.name)
+        #expect(ownHistory.category == .coffee)
+        #expect(ownHistory.placeOption?.publicVisitorCount == 0)
+        #expect(ownHistory.historyBadge == "Been here")
+        #expect(ownHistory.historyDetail?.hasPrefix("You · 1 check-in · Last ") == true)
+        #expect(ownHistory.locationSubtitle.contains(POICategory.coffee.displayName))
+        #expect(forward[1].hasHistory && forward[1].ownCheckInCount == 0)
+        #expect(forward[1].lastOwnActivityAt == nil)
+        #expect(forward[1].historyBadge == "Check-ins")
+        #expect(forward[1].historyDetail == "4 people checked in")
+        #expect(!forward[2].hasHistory)
+    }
+
+    @Test
+    func combinedPostAndPOIHistoryKeepsNewestOwnActivityAndStillRejectsOutOfRangePlaces() throws {
+        let coordinate = point(north: 300)
+        let olderPost = post(at: coordinate, date: 10)
+        let newerVisit = RatedPOI.CheckIn(userId: ownerID,
+            createdAt: Date(timeIntervalSince1970: 20), publishedAt: Date(timeIntervalSince1970: 30))
+        let venue = place(at: coordinate, ownCheckIns: [newerVisit])
+        let outOfRange = place(at: point(north: 5_000.1), ownCheckIns: [newerVisit])
+        let choices = MapTalkPostLocations.choices(near: origin, ownPosts: [olderPost],
+            places: [outOfRange, venue], currentUserID: ownerID)
+
+        #expect(choices.count == 1)
+        let result = try #require(choices.first)
+        #expect(result.postCount == 1 && result.ownCheckInCount == 1)
+        #expect(result.lastOwnActivityAt == newerVisit.activityDate)
+        #expect(result.historyBadge == "Posted here")
+        #expect(result.historyDetail?.hasPrefix("You · 1 post · 1 check-in · Last ") == true)
+        #expect(result.selection.coordinate.latitude == coordinate.latitude)
+        #expect(result.selection.coordinate.longitude == coordinate.longitude)
+        let newerPost = post(at: coordinate, date: 40)
+        let updated = try #require(MapTalkPostLocations.choices(near: origin, ownPosts: [olderPost, newerPost],
+            places: [venue], currentUserID: ownerID).first)
+        #expect(updated.lastOwnActivityAt == newerPost.activityDate)
+    }
+
+    @Test
     func nearbyDistinctVenuesNeverAbsorbHistoryThroughProximity() {
         let history = post(at: point(north: 100))
         let first = place(at: point(north: 95), name: "Cafe")
@@ -207,12 +265,13 @@ struct PostLocationChoiceTests {
     }
 
     private func place(at coordinate: CLLocationCoordinate2D, name: String = "A place",
-                       publicVisitors: Int = 0) -> MapTalkNearbyPlaceOption {
+                       publicVisitors: Int = 0, ownCheckIns: [RatedPOI.CheckIn] = []) -> MapTalkNearbyPlaceOption {
         let rated = RatedPOI(poi: .init(id: UUID(), name: name, coordinate: coordinate, category: .coffee),
             highlight: nil, secondary: nil, media: [], checkIns: [], comments: [],
             endorsements: .init(hype: 0, solid: 0, meh: 0, questionable: 0), tags: [],
             isFavoritedByCurrentUser: false, favoritesCount: 0)
         return .init(place: rated, distanceMeters: 0, isPublicDirectoryPlace: true,
-                     isInMyMap: false, friendUsers: [], publicVisitorCount: publicVisitors)
+                     isInMyMap: !ownCheckIns.isEmpty, friendUsers: [], publicVisitorCount: publicVisitors,
+                     ownCheckIns: ownCheckIns)
     }
 }

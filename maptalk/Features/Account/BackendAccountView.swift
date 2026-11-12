@@ -76,7 +76,7 @@ struct BackendRootView: View {
                 BetaInvitationView(account: account, access: access)
             } else if account.isRestoring {
                 VStack(spacing: 18) {
-                    Text("MapTalk").font(.system(size: 32, weight: .semibold))
+                    Text(AppBrand.name).font(.system(size: 32, weight: .semibold))
                     ProgressView().tint(.black)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -85,7 +85,7 @@ struct BackendRootView: View {
                 VStack(spacing: 20) {
                     Text("Let's reconnect")
                         .font(.system(size: 28, weight: .semibold))
-                    Text(account.issue ?? "MapTalk isn't available right now.")
+                    Text(account.issue ?? "\(AppBrand.name) isn't available right now.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -131,9 +131,9 @@ private struct SocialAccountView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Spacer()
-            Text("MapTalk")
+            Text(AppBrand.name)
                 .font(.system(size: 40, weight: .semibold))
-            Text("Your places, together.")
+            Text(AppBrand.tagline)
                 .font(.system(size: 17))
                 .foregroundStyle(.secondary)
                 .padding(.top, 12)
@@ -261,9 +261,9 @@ private struct BackendAccountForm: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("MapTalk")
+                    Text(AppBrand.name)
                         .font(.system(size: 36, weight: .semibold))
-                    Text(isRegistering ? "Make room for your places." : "Your places, together.")
+                    Text(AppBrand.tagline)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

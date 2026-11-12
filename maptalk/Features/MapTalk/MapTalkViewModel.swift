@@ -15,8 +15,21 @@ struct MapTalkNearbyPlaceOption: Identifiable {
     /// Distinct people in public check-ins. This intentionally excludes the
     /// person's private MyMap history.
     let publicVisitorCount: Int
+    /// Only the current person's distinct visits, including private ones.
+    /// Saved membership alone is not evidence that somebody visited a place.
+    var ownCheckIns: [RatedPOI.CheckIn] = []
 
     var id: UUID { place.id }
+    var hasHistory: Bool { !ownCheckIns.isEmpty || publicVisitorCount > 0 }
+    var historyPriority: Int { !ownCheckIns.isEmpty ? 0 : (publicVisitorCount > 0 ? 1 : 2) }
+
+    static func ranked(_ options: [Self]) -> [Self] {
+        options.sorted { lhs, rhs in
+            if lhs.historyPriority != rhs.historyPriority { return lhs.historyPriority < rhs.historyPriority }
+            if lhs.distanceMeters != rhs.distanceMeters { return lhs.distanceMeters < rhs.distanceMeters }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+    }
 }
 
 struct MapTalkNearbyPlaceSearchResult {
@@ -102,7 +115,7 @@ final class MapTalkViewModel: ObservableObject {
     @Published private(set) var withdrawnPublicMemoryIDs: Set<UUID> = []
     private var freshnessDate = Date.now
     private var repositoryPOIs: [RatedPOI] = []
-    private var nearbySocialPOIs: [RatedPOI] = []
+    @Published private var nearbySocialPOIs: [RatedPOI] = []
     private var repositoryActivePOIs: [RatedPOI] = []
     @Published private var nearbyDirectoryPOIs: [RatedPOI] = []
     private var repositoryMapReels: [RealPost] = []
@@ -894,7 +907,7 @@ final class MapTalkViewModel: ObservableObject {
             .switchToLatest()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] pois in
-                guard let self, isMapActive else { return }
+                guard let self, isMapActive, nearbySocialPOIs != pois else { return }
                 nearbySocialPOIs = pois
             }
             .store(in: &mapActivityCancellables)
@@ -952,6 +965,15 @@ final class MapTalkViewModel: ObservableObject {
 
     private func bind() {
         bindMapActivity()
+
+        // Cached/private history can arrive after the directory. Refresh the
+        // visible pickers even when no public feed item changed.
+        Publishers.CombineLatest(environment.myMapArchive.$privatePOIs,
+                                 environment.myMapArchive.$privateReels)
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
 
         environment.myMapArchive.$publicPOIOverlays
             .receive(on: DispatchQueue.main)
@@ -1198,8 +1220,10 @@ final class MapTalkViewModel: ObservableObject {
     ) -> [MapTalkNearbyPlaceOption] {
         // A named search adds candidates to the same provenance-aware path;
         // it never bypasses distance checks or promotes private history.
-        let directoryPlaces = (additionalDirectoryPlaces + nearbyDirectoryPOIs).map { place -> RatedPOI in
-            guard let canonical = environment.backend?.canonicalPlaceForSelection(place.poi, fromDirectory: true) else { return place }
+        func canonicalized(_ place: RatedPOI, fromDirectory: Bool = false) -> RatedPOI {
+            guard let canonical = environment.backend?.canonicalPlaceForSelection(place.poi, fromDirectory: fromDirectory) else {
+                return place
+            }
             return RatedPOI(
                 poi: canonical,
                 highlight: place.highlight, secondary: place.secondary, media: place.media,
@@ -1208,8 +1232,15 @@ final class MapTalkViewModel: ObservableObject {
                 favoritesCount: place.favoritesCount
             )
         }
+        let directoryPlaces = (additionalDirectoryPlaces + nearbyDirectoryPOIs).map {
+            canonicalized($0, fromDirectory: true)
+        }
+        // Resolve aliases before merging, so an archived Apple ID and its
+        // server ID retain one row and the same personal/public provenance.
+        let archivedPlaces = environment.myMapArchive.privatePOIs.map { canonicalized($0) }
         let directoryIDs = Set(directoryPlaces.map(\.id))
-        let archivedIDs = Set(environment.myMapArchive.privatePOIs.map(\.id))
+        let archivedIDs = Set(archivedPlaces.map(\.id))
+        let currentUserID = environment.myMapArchive.currentUserID
         let friends = environment.backend == nil ? PreviewData.sampleFriends : []
         let friendDirectory = friends.reduce(into: [UUID: User]()) {
             $0[$1.id] = $1
@@ -1218,7 +1249,8 @@ final class MapTalkViewModel: ObservableObject {
         // Keep public social history separate from MyMap so a private check-in
         // can never be presented as friend activity.
         var publicSocialCandidates: [UUID: RatedPOI] = [:]
-        for place in nearbySocialPOIs + repositoryActivePOIs {
+        for source in nearbySocialPOIs + repositoryActivePOIs {
+            let place = canonicalized(source)
             if let existing = publicSocialCandidates[place.id] {
                 publicSocialCandidates[place.id] = mergedPOI(
                     publicVersion: existing,
@@ -1228,7 +1260,8 @@ final class MapTalkViewModel: ObservableObject {
                 publicSocialCandidates[place.id] = place
             }
         }
-        for overlay in publishedPOIOverlays {
+        for source in publishedPOIOverlays {
+            let overlay = canonicalized(source)
             if let existing = publicSocialCandidates[overlay.id] {
                 publicSocialCandidates[overlay.id] = mergedPOI(
                     publicVersion: overlay,
@@ -1266,7 +1299,7 @@ final class MapTalkViewModel: ObservableObject {
 
         var candidates = publicCandidates
 
-        for archived in environment.myMapArchive.privatePOIs {
+        for archived in archivedPlaces {
             if let publicVersion = candidates[archived.id] {
                 candidates[archived.id] = mergedPOI(
                     publicVersion: publicVersion,
@@ -1277,15 +1310,7 @@ final class MapTalkViewModel: ObservableObject {
             }
         }
 
-        let sorted = candidates.values
-            .map { place -> RatedPOI in
-                guard let canonical = environment.backend?.canonicalPlaceForSelection(place.poi) else { return place }
-                return RatedPOI(poi: canonical,
-                    highlight: place.highlight, secondary: place.secondary, media: place.media,
-                    checkIns: place.checkIns, comments: place.comments, endorsements: place.endorsements,
-                    tags: place.tags, isFavoritedByCurrentUser: place.isFavoritedByCurrentUser,
-                    favoritesCount: place.favoritesCount)
-            }
+        let options = candidates.values
             .compactMap { rated -> MapTalkNearbyPlaceOption? in
                 let candidate = CLLocation(
                     latitude: rated.poi.coordinate.latitude,
@@ -1299,6 +1324,14 @@ final class MapTalkViewModel: ObservableObject {
                 // data. Never infer it from the merged private MyMap copy.
                 let publicCheckIns = publicSocialCandidates[rated.id]?.checkIns ?? []
                 let publicVisitorCount = Set(publicCheckIns.map(\.userId)).count
+                var seenOwnCheckInIDs = Set<UUID>()
+                let ownCheckIns = rated.checkIns
+                    .filter { $0.userId == currentUserID }
+                    .sorted {
+                        if $0.activityDate != $1.activityDate { return $0.activityDate > $1.activityDate }
+                        return $0.id.uuidString < $1.id.uuidString
+                    }
+                    .filter { seenOwnCheckInIDs.insert($0.id).inserted }
                 var seenFriendIDs = Set<UUID>()
                 let friends = publicCheckIns
                     .sorted { $0.activityDate > $1.activityDate }
@@ -1316,27 +1349,16 @@ final class MapTalkViewModel: ObservableObject {
                     isPublicDirectoryPlace: directoryIDs.contains(rated.id),
                     isInMyMap: archivedIDs.contains(rated.id),
                     friendUsers: friends,
-                    publicVisitorCount: publicVisitorCount
+                    publicVisitorCount: publicVisitorCount,
+                    ownCheckIns: ownCheckIns
                 )
-            }
-            .sorted { lhs, rhs in
-                if abs(lhs.distanceMeters - rhs.distanceMeters) > 0.5 {
-                    return lhs.distanceMeters < rhs.distanceMeters
-                }
-                if lhs.isInMyMap != rhs.isInMyMap {
-                    return lhs.isInMyMap
-                }
-                if lhs.friendUsers.isEmpty != rhs.friendUsers.isEmpty {
-                    return lhs.friendUsers.isEmpty == false
-                }
-                return lhs.place.poi.name.localizedCaseInsensitiveCompare(rhs.place.poi.name) == .orderedAscending
             }
 
         // The directory already bounds its work. A six-row shortlist used to
         // hide valid neighboring venues (especially the seventh or eighth)
         // and discard places 120–150 m away even though publication allows
         // them. Let the list scroll instead of silently removing choices.
-        return sorted
+        return MapTalkNearbyPlaceOption.ranked(options)
     }
 
     /// The world map carries other people's history; MyMap carries the

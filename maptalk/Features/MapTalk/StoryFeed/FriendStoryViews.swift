@@ -71,10 +71,13 @@ struct FriendStoriesRow: View {
                                         seenLineWidth: 1.5,
                                         unreadShadowRadius: 7
                                     )
+                                    .opacity(selected ? 1 : 0.82)
+                                    // Keep faces opaque above the map; only the
+                                    // status ring changes emphasis on selection.
                                     FriendStoryAvatar(user: user, diameter: 60)
+                                        .shadow(color: .black.opacity(0.14), radius: 3, y: 2)
                                 }
                                 .frame(width: 70, height: 70)
-                                .opacity(selected ? 1 : 0.82)
                                 .modifier(MapTalkPOITransitionSource(
                                     id: .author(group.authorID), namespace: transitionNamespace,
                                     keepsSourceVisible: true))
@@ -416,7 +419,6 @@ struct FriendStoryContentView: View {
         return TabView(selection: pageSelection) {
             ForEach(pagerPages) { candidate in
                 preparedPage(candidate, mediaOnly: mediaOnly, chromeRun: chromeRun)
-                    .poiChromePageAnchor(id: candidate.id)
                     .tag(candidate.id)
             }
         }
@@ -456,7 +458,8 @@ struct FriendStoryContentView: View {
             } else {
                 FriendStoryPOIPreview(place: place, media: media,
                     isPlaybackActive: playbackEnabled && candidate.id == page.id,
-                    showsPlaceChrome: chromeRun?.contains(candidate.id) != true)
+                    showsPlaceChrome: chromeRun?.contains(candidate.id) != true,
+                    chromePageID: candidate.id)
             }
         } else {
             // The adjacent original card remains in the same native sequence.
@@ -627,6 +630,7 @@ struct FriendStoryPOIPreview: View {
     let media: RatedPOI.Media
     let isPlaybackActive: Bool
     var showsPlaceChrome = true
+    var chromePageID: String? = nil
     @State private var isLightboxPresented = false
     @State private var childPresentationID = UUID()
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
@@ -649,7 +653,8 @@ struct FriendStoryPOIPreview: View {
                 GeometryReader { geometry in
                     ExperienceDetailView.MediaCardView(item: item,
                         accentColor: place.poi.category.accentColor, mode: .card,
-                        isPlaybackActive: isPlaybackActive && !isLightboxPresented)
+                        isPlaybackActive: isPlaybackActive && !isLightboxPresented,
+                        blendsWithBackground: true)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
                 }
@@ -662,6 +667,9 @@ struct FriendStoryPOIPreview: View {
             // Standalone and neighboring places still own their own chrome.
             if showsPlaceChrome { FriendStoryPOIChrome(place: place) }
         }
+        // Measure the full-bleed canvas, not its safe-area-constrained wrapper.
+        // The fixed place controls must reach the same bottom edge as the media.
+        .poiChromePageAnchor(id: chromePageID)
         .ignoresSafeArea(.container, edges: .bottom)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("friend-story.poi.preview")
@@ -689,12 +697,6 @@ struct FriendStoryPOIChrome: View {
     var body: some View {
         Color.clear
             .allowsHitTesting(false)
-            .overlay(alignment: .top) {
-                LinearGradient(colors: [.black.opacity(0.72), .clear],
-                    startPoint: .top, endPoint: .bottom)
-                    .frame(height: 140)
-                    .allowsHitTesting(false)
-            }
             .overlay(alignment: .topLeading) {
                 ExperienceDetailView.POIPlaceHeading(
                     info: .init(name: place.poi.name, category: place.poi.category,
@@ -702,13 +704,8 @@ struct FriendStoryPOIChrome: View {
                     accentColor: place.poi.category.accentColor)
                     .padding(.horizontal, 20)
                     .padding(.top, 28)
+                    .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
                     .accessibilityIdentifier("friend-story.poi.place-name")
-                    .allowsHitTesting(false)
-            }
-            .overlay(alignment: .bottom) {
-                LinearGradient(colors: [.clear, .black.opacity(0.5)],
-                    startPoint: .top, endPoint: .bottom)
-                    .frame(height: 100)
                     .allowsHitTesting(false)
             }
             .overlay(alignment: .bottomTrailing) {
@@ -721,7 +718,8 @@ struct FriendStoryPOIChrome: View {
                     directionsDestination: MapDirectionsDestination(name: place.poi.name,
                                                                      coordinate: place.poi.coordinate))
                     .padding(.horizontal, 20)
-                    .padding(.bottom, 32)
+                    .padding(.bottom, 24)
+                    .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("friend-story.poi.stats")
             }
@@ -810,7 +808,7 @@ private struct FriendStoryAvatar: View {
             }
         }
         .frame(width: diameter, height: diameter)
-        .background(Color.white.opacity(0.72), in: Circle())
+        .background(Color.white, in: Circle())
         .clipShape(Circle())
         .accessibilityHidden(true)
     }

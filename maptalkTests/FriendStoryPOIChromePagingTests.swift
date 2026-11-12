@@ -87,6 +87,64 @@ struct FriendStoryPOIChromePagingTests {
         expectStationaryChrome(baseline, cancelled, height: fixture.height)
     }
 
+    @Test(arguments: [0, 1])
+    func fullBleedPhotoAndInactiveVideoPosterKeepTheirOriginalBrightness(mediaIndex: Int) async throws {
+        let data = try POIChromeFixtureData(mediaWhite: 0.6)
+        defer { data.dispose() }
+        let fixture = try POIChromeHostingFixture(data: data, surface: .homeCompact)
+        defer { fixture.dispose() }
+        try await fixture.settle()
+        if mediaIndex > 0 {
+            let pager = try #require(fixture.horizontalPager())
+            let target = pager.contentOffset.x + pager.bounds.width * CGFloat(mediaIndex)
+            pager.setContentOffset(CGPoint(x: target, y: pager.contentOffset.y), animated: false)
+            try await fixture.settle()
+            try #require(abs(pager.contentOffset.x - target) < 2)
+        }
+        let pixels = try fixture.pixels()
+        // The native test pager reserves a top inset above its media. Sample
+        // inside the image, away from the heading/footer and local shadows.
+        // The absent, inactive video uses this same solid PNG poster.
+        let samples = [CGRect(x: 350, y: 88, width: 16, height: 6),
+                       CGRect(x: 110, y: fixture.height / 2, width: 16, height: 6),
+                       CGRect(x: 110, y: fixture.height - 12, width: 16, height: 6)]
+        for sample in samples {
+            let mean = try #require(pixels.meanRGB(in: sample))
+            if abs(mean - 153) >= 3 {
+                let folder = FileManager.default.temporaryDirectory.appendingPathComponent("poi-media-brightness-diagnostics")
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try pixels.savePNG(to: folder.appendingPathComponent("media-\(mediaIndex).png"))
+                print("POI media sample: rect=\(sample), mean=\(mean), image=\(folder.path)")
+            }
+            #expect(abs(mean - 153) < 3,
+                    "Full-bleed photo/video media must not acquire a gray gradient or poster tint at \(sample)")
+        }
+    }
+
+    @Test(arguments: [POIChromeTestSurface.homeCompact, .bubbleCompact])
+    func bottomSafeAreaDoesNotLiftFixedPOIFooterAboveItsMedia(surface: POIChromeTestSurface) async throws {
+        let data = try POIChromeFixtureData()
+        defer { data.dispose() }
+        let baseline = try POIChromeHostingFixture(data: data, surface: surface)
+        defer { baseline.dispose() }
+        try await baseline.settle()
+        let baselinePixels = try baseline.pixels()
+        let inset = try POIChromeHostingFixture(data: data, surface: surface, bottomSafeArea: 34)
+        defer { inset.dispose() }
+        try await inset.settle()
+        try #require(abs(inset.host.view.safeAreaInsets.bottom - 34) < 1,
+                     "The regression fixture must actually expose a nonzero container safe area")
+        let insetPixels = try inset.pixels()
+        // The right-hand statistics exclude the central pagination dots.
+        let region = CGRect(x: 280, y: baseline.height - 110, width: 98, height: 98)
+        let originalBottom = try #require(baselinePixels.bottomWhitePixel(in: region))
+        let insetBottom = try #require(insetPixels.bottomWhitePixel(in: region))
+        #expect(abs(originalBottom - insetBottom) <= 1,
+                "An identical full-bleed canvas must anchor its footer at the same bottom edge")
+        #expect(insetBottom > inset.height - 65,
+                "The footer must remain near the media edge, not above another safe-area inset")
+    }
+
     @Test
     func actualBubbleChromeSlidesAwayOnlyAfterTheLastPageOfItsPlace() async throws {
         let data = try POIChromeFixtureData()
@@ -204,14 +262,14 @@ private final class POIChromeFixtureData {
     let group: FriendStoryGroup
     let scope: MapJourneyScope
 
-    init() throws {
+    init(mediaWhite: CGFloat = 0.12) throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("poi-chrome-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let photoURL = folder.appendingPathComponent("gray.png")
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let gray = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64), format: format).image { context in
-            UIColor(white: 0.12, alpha: 1).setFill()
+            UIColor(white: mediaWhite, alpha: 1).setFill()
             context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
         }
         try #require(gray.pngData()).write(to: photoURL)
@@ -257,7 +315,7 @@ private final class POIChromeHostingFixture {
     let motion = ProfileCardSheetMotion()
     let state: POIChromeHostingState
 
-    init(data: POIChromeFixtureData, surface: POIChromeTestSurface) throws {
+    init(data: POIChromeFixtureData, surface: POIChromeTestSurface, bottomSafeArea: CGFloat = 0) throws {
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         height = surface == .bubbleExpanded ? 620 : 330
         state = POIChromeHostingState(pageID: data.group.pages[0].id, memberID: data.place.id)
@@ -265,10 +323,15 @@ private final class POIChromeHostingFixture {
             .environment(\.profileCardSheetMotion, motion)
             .environment(\.scenePhase, .active)
             .environment(\.colorScheme, .dark)
-            .frame(width: 390, height: CGFloat(height))
-            .ignoresSafeArea()
-        host = UIHostingController(rootView: AnyView(content))
-        host.safeAreaRegions = []
+        if bottomSafeArea > 0 {
+            host = UIHostingController(rootView: AnyView(content.frame(width: 390)))
+            host.safeAreaRegions = .container
+            host.additionalSafeAreaInsets.bottom = bottomSafeArea
+        } else {
+            host = UIHostingController(rootView: AnyView(content
+                .frame(width: 390, height: CGFloat(height)).ignoresSafeArea()))
+            host.safeAreaRegions = []
+        }
         window = UIWindow(windowScene: scene)
         window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.normal.rawValue - 1)
         let root = UIViewController()
@@ -277,10 +340,13 @@ private final class POIChromeHostingFixture {
         root.addChild(host)
         root.view.addSubview(host.view)
         host.didMove(toParent: root)
-        host.view.frame = CGRect(x: 0, y: 0, width: 390, height: CGFloat(height))
+        // Keep the inset fixture clear of the window's top/bottom safe areas;
+        // its explicit 34pt inset is the only container inset under test.
+        host.view.frame = CGRect(x: 0, y: bottomSafeArea > 0 ? 100 : 0,
+                                 width: 390, height: CGFloat(height))
         window.isHidden = false
-        motion.reportGeometry(maximumHeight: 330 / ProfileCardPagingLayout.poiFraction,
-                              bottom: 0, allowsUpdates: { true })
+        motion.reportGeometry(maximumHeight: (330 - bottomSafeArea) / ProfileCardPagingLayout.poiFraction,
+                              bottom: bottomSafeArea, allowsUpdates: { true })
     }
 
     func settle(milliseconds: Int = 250) async throws {
@@ -363,6 +429,26 @@ private struct ChromePixels {
     let height: Int
     let rgba: [UInt8]
     let cgImage: CGImage
+
+    func meanRGB(in rect: CGRect) -> Double? {
+        let left = max(0, Int(rect.minX)), right = min(width, Int(rect.maxX))
+        let top = max(0, Int(rect.minY)), bottom = min(height, Int(rect.maxY))
+        guard left < right, top < bottom else { return nil }
+        var total = 0
+        for y in top..<bottom {
+            for x in left..<right {
+                let offset = (y * width + x) * 4
+                total += Int(rgba[offset]) + Int(rgba[offset + 1]) + Int(rgba[offset + 2])
+            }
+        }
+        return Double(total) / Double((right - left) * (bottom - top) * 3)
+    }
+
+    func bottomWhitePixel(in rect: CGRect) -> Int? {
+        let left = max(0, Int(rect.minX)), right = min(width, Int(rect.maxX))
+        guard left < right, let last = whiteMask(in: rect).lastIndex(of: true) else { return nil }
+        return max(0, Int(rect.minY)) + last / (right - left)
+    }
 
     @MainActor
     func savePNG(to url: URL, crop: CGRect? = nil) throws {

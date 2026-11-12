@@ -75,7 +75,7 @@ final class SocialSignInCoordinator: NSObject, WXApiDelegate {
             throw SocialSignInError.message("Finish the current sign-in first.")
         }
         guard let presenter = presentingController() else {
-            throw SocialSignInError.message("Open MapTalk before signing in.")
+            throw SocialSignInError.message("Open \(AppBrand.name) before signing in.")
         }
         try Task.checkCancellation()
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(

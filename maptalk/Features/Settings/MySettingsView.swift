@@ -61,7 +61,7 @@ struct MySettingsView: View {
                 if let url = BackendDeploymentConfiguration.publicURL(for: "MapTalkPrivacyURL") {
                     Link("Privacy policy", destination: url)
                 }
-                SettingRow(icon: "info.circle", title: "About MapTalk", detail: buildLabel)
+                SettingRow(icon: "info.circle", title: "About \(AppBrand.name)", detail: buildLabel)
             }
 
             if let backend = environment.backend {

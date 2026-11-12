@@ -132,7 +132,7 @@ struct PublishLocationChoiceLabel: View {
                     Text(detail)
                         .font(.system(size: 12))
                         .foregroundStyle(Color.black.opacity(0.53))
-                        .lineLimit(1)
+                        .lineLimit(2)
                 }
                 Text(subtitle)
                     .font(.system(size: 12))
@@ -176,6 +176,71 @@ struct PublishLocationChoiceLabel: View {
             .frame(width: 36, height: 36)
             .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
             .accessibilityHidden(true)
+    }
+}
+
+/// Personal history and public activity are labelled separately in both pickers.
+enum PublishLocationText {
+    static func distance(_ meters: Double) -> String {
+        let meters = max(0, meters)
+        return meters < 1_000 ? "\(Int(meters.rounded())) m" : String(format: "%.1f km", meters / 1_000)
+    }
+
+    static func ownActivity(posts: Int = 0, checkIns: Int, latest: Date?) -> String? {
+        var parts: [String] = []
+        if posts > 0 { parts.append("\(posts) \(posts == 1 ? "post" : "posts")") }
+        if checkIns > 0 { parts.append("\(checkIns) \(checkIns == 1 ? "check-in" : "check-ins")") }
+        guard !parts.isEmpty else { return nil }
+        if let latest {
+            let format: Date.FormatStyle = Calendar.current.isDate(latest, equalTo: .now, toGranularity: .year)
+                ? .dateTime.month(.abbreviated).day() : .dateTime.month(.abbreviated).day().year()
+            parts.append("Last \(latest.formatted(format))")
+        }
+        return "You · " + parts.joined(separator: " · ")
+    }
+}
+
+extension MapTalkNearbyPlaceOption {
+    var historyBadge: String? {
+        if !ownCheckIns.isEmpty { return "Been here" }
+        if !friendUsers.isEmpty { return "Friends" }
+        return publicVisitorCount > 0 ? "Check-ins" : nil
+    }
+
+    var historyDetail: String? {
+        if let own = PublishLocationText.ownActivity(checkIns: ownCheckIns.count,
+                                                    latest: ownCheckIns.first?.activityDate) { return own }
+        var parts: [String] = []
+        if !friendUsers.isEmpty {
+            parts.append("\(friendUsers.count) \(friendUsers.count == 1 ? "friend" : "friends")")
+        }
+        if publicVisitorCount > 0 {
+            parts.append("\(publicVisitorCount) \(publicVisitorCount == 1 ? "person" : "people") checked in")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    var locationSubtitle: String {
+        let category = place.poi.directoryKind == .airport ? "Airport" : place.poi.category.displayName
+        return "\(PublishLocationText.distance(distanceMeters)) · \(category)"
+    }
+}
+
+extension MapTalkPostLocationChoice {
+    var historyBadge: String? {
+        if postCount > 0 { return "Posted here" }
+        return placeOption?.historyBadge ?? (isPOI ? "POI" : nil)
+    }
+
+    var historyDetail: String? {
+        PublishLocationText.ownActivity(posts: postCount, checkIns: ownCheckInCount,
+                                       latest: lastOwnActivityAt) ?? placeOption?.historyDetail
+    }
+
+    var locationSubtitle: String {
+        if let placeOption { return placeOption.locationSubtitle }
+        return [PublishLocationText.distance(distanceMeters), category?.displayName]
+            .compactMap { $0 }.joined(separator: " · ")
     }
 }
 

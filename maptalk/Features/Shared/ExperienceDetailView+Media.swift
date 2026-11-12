@@ -595,7 +595,9 @@ struct AutoPlayVideoView: View {
                     image
                         .resizable()
                         .aspectRatio(contentMode: usesAspectFit ? .fit : .fill)
-                        .overlay { Color.black.opacity(0.15) }
+                        .overlay {
+                            if !blendsWithBackground { Color.black.opacity(0.15) }
+                        }
                 case .empty:
                     ProgressView()
                 case .failure:

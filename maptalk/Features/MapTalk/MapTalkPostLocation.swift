@@ -17,9 +17,19 @@ struct MapTalkPostLocationChoice: Identifiable {
     /// These are exclusively the current person's posts, including private ones.
     /// This count must be described as personal history, never public activity.
     let previousPosts: [RealPost]
+    var placeOption: MapTalkNearbyPlaceOption? = nil
 
     var postCount: Int { previousPosts.count }
     var isPOI: Bool { category != nil }
+    var ownCheckInCount: Int { placeOption?.ownCheckIns.count ?? 0 }
+    var hasHistory: Bool { !previousPosts.isEmpty || placeOption?.hasHistory == true }
+    var lastOwnActivityAt: Date? {
+        (previousPosts.map(\.activityDate) + (placeOption?.ownCheckIns.map(\.activityDate) ?? [])).max()
+    }
+    var historyPriority: Int {
+        if !previousPosts.isEmpty || ownCheckInCount > 0 { return 0 }
+        return placeOption?.historyPriority ?? 2
+    }
     var thumbnailURL: URL? {
         for post in previousPosts {
             for attachment in post.attachments {
@@ -122,7 +132,7 @@ enum MapTalkPostLocations {
                          selection: .init(coordinate: coordinate, title: history.first?.locationName ?? poi.name,
                                           locationName: history.first?.locationName),
                          distanceMeters: distance(coordinate, from: origin),
-                         category: poi.category, previousPosts: history)
+                         category: poi.category, previousPosts: history, placeOption: option)
         }
         for (key, history) in histories {
             guard let latest = history.first else { continue }
@@ -133,7 +143,7 @@ enum MapTalkPostLocations {
                                  category: nil, previousPosts: history))
         }
         return results.sorted { lhs, rhs in
-            if lhs.previousPosts.isEmpty != rhs.previousPosts.isEmpty { return !lhs.previousPosts.isEmpty }
+            if lhs.historyPriority != rhs.historyPriority { return lhs.historyPriority < rhs.historyPriority }
             if lhs.distanceMeters != rhs.distanceMeters { return lhs.distanceMeters < rhs.distanceMeters }
             return lhs.id < rhs.id
         }

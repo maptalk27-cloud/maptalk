@@ -2541,25 +2541,36 @@ private extension MapTalkView {
 private struct MapTalkHandwrittenBadge: View {
     let usesLightInk: Bool
 
-    private var handwritingFont: Font {
+    private func handwritingFont(scale: CGFloat = 1) -> Font {
         if UIFont(name: "SavoyeLetPlain", size: 44) != nil {
-            return .custom("SavoyeLetPlain", size: 44)
+            return .custom("SavoyeLetPlain", size: 44 * scale)
         }
         if UIFont(name: "SnellRoundhand-Bold", size: 42) != nil {
-            return .custom("SnellRoundhand-Bold", size: 42)
+            return .custom("SnellRoundhand-Bold", size: 42 * scale)
         }
         if UIFont(name: "MarkerFelt-Wide", size: 38) != nil {
-            return .custom("MarkerFelt-Wide", size: 38)
+            return .custom("MarkerFelt-Wide", size: 38 * scale)
         }
-        return .system(size: 38, weight: .regular, design: .serif).italic()
+        return .system(size: 38 * scale, weight: .regular, design: .serif).italic()
+    }
+
+    private var signature: AttributedString {
+        var text = AttributedString(AppBrand.wordmark)
+        text.font = handwritingFont().weight(.bold)
+        if let tallLetters = text.range(of: "fl") {
+            // One shaped line and one baseline: soften the tall central pair
+            // without compressing the rest of the signature or its descenders.
+            text[tallLetters].font = handwritingFont(scale: 0.92).weight(.bold)
+        }
+        return text
     }
 
     private var inkGradient: LinearGradient {
         LinearGradient(
-            colors: usesLightInk ? [.white, .white.opacity(0.9), .white] : [
-                Color.black.opacity(0.95),
-                Color(red: 0.1, green: 0.1, blue: 0.1).opacity(0.82),
-                Color.black.opacity(0.92)
+            colors: usesLightInk ? [.white, .white.opacity(0.97), .white] : [
+                Color.black.opacity(0.98),
+                Color.black.opacity(0.94),
+                Color.black.opacity(0.98)
             ],
             startPoint: .leading,
             endPoint: .trailing
@@ -2567,11 +2578,11 @@ private struct MapTalkHandwrittenBadge: View {
     }
 
     var body: some View {
-        Text("maptalk")
-            .font(handwritingFont.weight(.bold))
-            .kerning(-0.8)
+        Text(signature)
+            .kerning(-0.15)
             .foregroundStyle(inkGradient)
             .shadow(color: .black.opacity(usesLightInk ? 0.7 : 0), radius: 3, y: 1)
+            .accessibilityLabel(AppBrand.name)
     }
 }
 

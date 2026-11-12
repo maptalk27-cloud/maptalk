@@ -93,7 +93,7 @@ struct BackendContentSafetyMenu: View {
                 }
             }
         } message: { Text("You won't see each other's posts.") }
-        .alert("MapTalk", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+        .alert(AppBrand.name, isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
             Button("OK", role: .cancel) { message = nil }
         } message: { Text(message ?? "") }
     }

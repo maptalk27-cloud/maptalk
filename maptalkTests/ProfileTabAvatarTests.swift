@@ -124,7 +124,7 @@ private struct AvatarTabFixture: View {
     var body: some View {
         TabView {
             Color.clear
-                .tabItem { Label("MapTalk", systemImage: "map") }
+                .tabItem { Label(AppBrand.name, systemImage: "map") }
             Color.clear
                 .tabItem {
                     Label {

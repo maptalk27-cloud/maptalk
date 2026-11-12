@@ -13,7 +13,7 @@
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleDisplayName</key>
-	<string>MapTalk</string>
+	<string>MapFlick</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -52,11 +52,11 @@
 	<key>LSApplicationQueriesSchemes</key>
 	<array><string>weixin</string><string>weixinULAPI</string><string>weixinURLParamsAPI</string></array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>MapTalk shows nearby vibes and ratings based on your location.</string>
+	<string>MapFlick shows nearby places and lets you check in at your current location.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>MapTalk uses the camera to capture the place in front of you.</string>
+	<string>MapFlick uses the camera to capture the place in front of you.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>MapTalk uses the microphone when you record a place video.</string>
+	<string>MapFlick uses the microphone when you record a video.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -60,7 +60,7 @@ final class MapLayerUITests: XCTestCase {
         evidence(app, "Satellite with labels and lightweight layer control")
         app.buttons["MyMap"].tap()
         evidence(app, "MyMap retains its original appearance with satellite selected")
-        app.buttons["MapTalk"].tap()
+        app.buttons["MapFlick"].tap()
         XCTAssertTrue(layers.waitForExistence(timeout: 5))
         XCTAssertEqual(layers.value as? String, "Satellite")
         select("Standard", app: app)

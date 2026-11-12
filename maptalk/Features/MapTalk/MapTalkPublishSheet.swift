@@ -184,10 +184,6 @@ struct MapTalkPublishComposer: View {
     @State private var placeAudience: MapPublishAudience = .privateMyMap
     @State private var isShowingNearbyPlaceChoices = false
     @State private var isShowingNewPlaceEditor = false
-    /// The nearby directory may refresh as location accuracy improves. Freeze
-    /// the visible order while the person is choosing so rows never jump
-    /// beneath their finger.
-    @State private var nearbyPlaceChoiceSnapshot: [MapTalkNearbyPlaceOption] = []
     @State private var nearbyPlaceSearchText = ""
     @State private var nearbyPlaceSearchResults: [MapTalkNearbyPlaceOption] = []
     @State private var nearbyResultsQuery = ""
@@ -215,8 +211,7 @@ struct MapTalkPublishComposer: View {
     @State private var postLocationQuery = ""
     @State private var selectedPostLocation: MapTalkPostLocationSelection?
     @State private var loadedPostLocations: [MapTalkPostLocationChoice] = []
-    @State private var loadedPostLocationQuery = ""
-    @State private var loadedPostLocationKey: String?
+    @State private var loadedPostLocationRequest: PostLocationRequest?
     @State private var postLocationIssue: POISearchIssue?
     @State private var isLoadingPostLocations = false
     @State private var postLocationRetry = 0
@@ -258,11 +253,14 @@ struct MapTalkPublishComposer: View {
     }
 
     private var presentedNearbyPlaces: [MapTalkNearbyPlaceOption] {
-        let options = nearbyPlaceChoiceSnapshot.isEmpty ? nearbyPlaces : nearbyPlaceChoiceSnapshot
-        guard !nearbyPlaceSearchQuery.isEmpty else { return options }
-        let local = options.filter { $0.place.poi.name.localizedStandardContains(nearbyPlaceSearchQuery) }
+        guard !nearbyPlaceSearchQuery.isEmpty else { return MapTalkNearbyPlaceOption.ranked(nearbyPlaces) }
+        let local = nearbyPlaces.filter { $0.place.poi.name.localizedStandardContains(nearbyPlaceSearchQuery) }
+        let latest = Dictionary(nearbyPlaces.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+        // Keep live history for known places; a directory response must not
+        // replace it with an older, history-free copy or append it at the end.
+        let searched = nearbyPlaceSearchResults.map { latest[$0.id] ?? $0 }
         var seen = Set<UUID>()
-        return (local + nearbyPlaceSearchResults).filter { seen.insert($0.id).inserted }
+        return MapTalkNearbyPlaceOption.ranked((local + searched).filter { seen.insert($0.id).inserted })
     }
 
     private var nearbyPlaceSearchQuery: String {
@@ -320,15 +318,31 @@ struct MapTalkPublishComposer: View {
         let query: String
         let locationKey: String
         let retry: Int
+        let history: [PostLocationHistoryRevision]
+    }
+
+    private struct PostLocationHistoryRevision: Equatable {
+        let id: String
+        let postIDs: [UUID]
+        let checkInIDs: [UUID]
+        let publicVisitors: Int
+        let latest: Date?
     }
 
     private var postLocationRequest: PostLocationRequest {
         .init(query: postLocationQuery.trimmingCharacters(in: .whitespacesAndNewlines),
-              locationKey: liveLocationKey, retry: postLocationRetry)
+              locationKey: liveLocationKey, retry: postLocationRetry,
+              history: postLocationChoices.filter(\.hasHistory).map {
+                  .init(id: $0.id, postIDs: $0.previousPosts.map(\.id),
+                        checkInIDs: $0.placeOption?.ownCheckIns.map(\.id) ?? [],
+                        publicVisitors: $0.placeOption?.publicVisitorCount ?? 0,
+                        latest: $0.lastOwnActivityAt)
+              }.sorted { $0.id < $1.id })
     }
 
     private var visiblePostLocations: [MapTalkPostLocationChoice] {
-        let query = postLocationRequest.query
+        let request = postLocationRequest
+        let query = request.query
         let local = postLocationChoices.filter {
             query.isEmpty || $0.selection.title.localizedStandardContains(query)
                 || $0.previousPosts.contains { $0.message?.localizedStandardContains(query) == true }
@@ -336,7 +350,7 @@ struct MapTalkPublishComposer: View {
         // The response already merges owned history and directory places.
         // Appending the earlier snapshot would duplicate a history point that
         // has since resolved to one exact POI coordinate.
-        if loadedPostLocationQuery == query, loadedPostLocationKey == liveLocationKey {
+        if loadedPostLocationRequest == request {
             return loadedPostLocations
         }
         return local
@@ -406,7 +420,7 @@ struct MapTalkPublishComposer: View {
             guard hasLiveLocation else {
                 isLoadingPostLocations = false
                 loadedPostLocations = []
-                loadedPostLocationKey = nil
+                loadedPostLocationRequest = nil
                 return
             }
             isLoadingPostLocations = true
@@ -416,20 +430,11 @@ struct MapTalkPublishComposer: View {
             let result = await onSearchPostLocations(request.query)
             guard !Task.isCancelled, postLocationRequest == request else { return }
             loadedPostLocations = result.options
-            loadedPostLocationQuery = request.query
-            loadedPostLocationKey = request.locationKey
+            loadedPostLocationRequest = request
             postLocationIssue = result.issue
             isLoadingPostLocations = false
         }
         .onChange(of: nearbyPlaces.map(\.id)) { _, _ in
-            if isShowingNearbyPlaceChoices {
-                // Preserve rows under a finger, but don't freeze away newly
-                // discovered places when location or directory results improve.
-                let latest = Dictionary(nearbyPlaces.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
-                let previousIDs = Set(nearbyPlaceChoiceSnapshot.map(\.id))
-                nearbyPlaceChoiceSnapshot = nearbyPlaceChoiceSnapshot.compactMap { latest[$0.id] }
-                    + nearbyPlaces.filter { !previousIDs.contains($0.id) }
-            }
             synchronizeNearbySelection()
         }
         .task(id: nearbyPlaceSearchRequest) {
@@ -1653,48 +1658,18 @@ struct MapTalkPublishComposer: View {
 
     private func nearbyPlaceChoice(_ option: MapTalkNearbyPlaceOption) -> some View {
         let isSelected = selectedNearbyPlaceOption?.id == option.id
-        let contextBadge: String? = option.place.checkIns.contains { $0.userId == currentUserID }
-            ? "Been here" : (!option.friendUsers.isEmpty ? "Friends"
-                : (option.publicVisitorCount > 0 ? "Check-ins" : nil))
         return Button {
             selectNearbyPlace(option)
         } label: {
             PublishLocationChoiceLabel(title: option.place.poi.name,
-                subtitle: nearbyPlaceSummary(option), symbol: option.place.poi.category.symbolName,
-                isSelected: isSelected, badge: contextBadge)
+                subtitle: option.locationSubtitle, symbol: option.place.poi.category.symbolName,
+                isSelected: isSelected, badge: option.historyBadge, detail: option.historyDetail)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(option.place.poi.name)
-        .accessibilityValue("\(nearbyPlaceContext(option)), \(Int(option.distanceMeters.rounded())) meters\(isSelected ? ", selected" : "")")
+        .accessibilityValue([option.historyDetail, option.locationSubtitle,
+                             isSelected ? "selected" : nil].compactMap { $0 }.joined(separator: ", "))
         .accessibilityIdentifier("maptalk.place.option.\(option.id.uuidString)")
-    }
-
-    private func nearbyPlaceSummary(_ option: MapTalkNearbyPlaceOption) -> String {
-        let compactContext = nearbyPlaceContext(option)
-            .components(separatedBy: " · ")
-            .prefix(2)
-            .joined(separator: " · ")
-        return "\(Int(option.distanceMeters.rounded())) m · \(compactContext)"
-    }
-
-    private func nearbyPlaceContext(_ option: MapTalkNearbyPlaceOption) -> String {
-        var context: [String] = []
-        let friendCount = option.friendUsers.count
-
-        if friendCount > 0 {
-            context.append("\(friendCount) \(friendCount == 1 ? "friend" : "friends")")
-        }
-        if option.publicVisitorCount > 0 {
-            context.append("\(option.publicVisitorCount) checked in")
-        }
-        if option.isInMyMap {
-            context.append("In MyMap")
-        }
-        if context.isEmpty {
-            context.append(option.place.poi.directoryKind == .airport ? "Airport" : option.place.poi.category.displayName)
-        }
-
-        return context.joined(separator: " · ")
     }
 
     private var newPlaceCategoryGrid: some View {
@@ -2451,7 +2426,6 @@ struct MapTalkPublishComposer: View {
         placeVideoPlayer?.pause()
         isTextFocused = false
         isPlaceSearchFocused = false
-        nearbyPlaceChoiceSnapshot = nearbyPlaces
         nearbyPlaceSearchText = ""
         nearbyPlaceSearchResults = []
         var transaction = Transaction()

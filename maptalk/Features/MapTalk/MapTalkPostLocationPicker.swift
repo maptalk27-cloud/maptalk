@@ -19,11 +19,11 @@ struct MapTalkPostLocationPicker: View {
     @State private var isChoosingOnMap = false
 
     private var previousLocations: [MapTalkPostLocationChoice] {
-        choices.filter { $0.postCount > 0 }
+        choices.filter(\.hasHistory)
     }
 
     private var nearbyLocations: [MapTalkPostLocationChoice] {
-        choices.filter { $0.postCount == 0 }
+        choices.filter { !$0.hasHistory }
     }
 
     private var isSearching: Bool {
@@ -62,7 +62,7 @@ struct MapTalkPostLocationPicker: View {
                     if issue != nil, !isLoading, hasLiveLocation { refreshIssue }
                     if hasLiveLocation {
                         if !previousLocations.isEmpty {
-                            choiceSection("Posted here", choices: previousLocations)
+                            choiceSection("Visited & posted", choices: previousLocations)
                         }
                         if !nearbyLocations.isEmpty || choices.isEmpty {
                             choiceSection(isSearching ? "Search results" : "Nearby places",
@@ -140,14 +140,16 @@ struct MapTalkPostLocationPicker: View {
             isSearchFocused = false
             onSelect(choice.selection)
         } label: {
-            PublishLocationChoiceLabel(title: choice.selection.title, subtitle: summary(choice),
+            PublishLocationChoiceLabel(title: previousPostSnippet(choice) ?? choice.selection.title,
+                subtitle: choice.locationSubtitle,
                 symbol: choice.category?.symbolName ?? "text.alignleft", isSelected: selected,
-                badge: choice.isPOI ? "POI" : nil, thumbnailURL: choice.thumbnailURL,
-                detail: previousPostSnippet(choice))
+                badge: choice.historyBadge, thumbnailURL: choice.thumbnailURL,
+                detail: choice.historyDetail)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(choice.selection.title)
-        .accessibilityValue("\(summary(choice))\(choice.isPOI ? ", POI" : "")\(selected ? ", selected" : "")")
+        .accessibilityValue([choice.historyDetail, choice.locationSubtitle,
+                             selected ? "selected" : nil].compactMap { $0 }.joined(separator: ", "))
         .accessibilityIdentifier("maptalk.post.location-option.\(choice.id)")
     }
 
@@ -197,12 +199,4 @@ struct MapTalkPostLocationPicker: View {
         return text.replacingOccurrences(of: "\n", with: " ")
     }
 
-    private func summary(_ choice: MapTalkPostLocationChoice) -> String {
-        let meters = max(0, choice.distanceMeters)
-        let distance = meters < 1_000 ? "\(Int(meters.rounded())) m" : String(format: "%.1f km", meters / 1_000)
-        if choice.postCount > 0 {
-            return "\(choice.postCount) \(choice.postCount == 1 ? "post" : "posts") · \(distance)"
-        }
-        return [distance, choice.category?.displayName].compactMap { $0 }.joined(separator: " · ")
-    }
 }

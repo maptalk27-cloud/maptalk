@@ -113,7 +113,8 @@ struct HomeBubbleContentView: View {
                 // Keep the same edge-to-edge memory when the Bubble grows;
                 // expanding it must not replace the media with place details.
                 FriendStoryPOIPreview(place: place, media: media, isPlaybackActive: playbackActive,
-                    showsPlaceChrome: chromeRun?.contains(page.id.uuidString) != true)
+                    showsPlaceChrome: chromeRun?.contains(page.id.uuidString) != true,
+                    chromePageID: page.id.uuidString)
             } else {
                 ExperienceDetailView(
                     mode: page.mode,
@@ -144,7 +145,6 @@ struct HomeBubbleContentView: View {
         .background(isPost(item) ? palette.background : .black)
         .background(ExperiencePagerVerticalBounceGuard())
         .accessibilityHidden(!isSelected)
-        .poiChromePageAnchor(id: page.id.uuidString)
     }
 
     private var navigationHeader: some View {

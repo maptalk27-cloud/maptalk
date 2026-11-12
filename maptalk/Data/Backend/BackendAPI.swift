@@ -558,7 +558,7 @@ final class BackendAPI {
         catch {
             if Task.isCancelled { throw CancellationError() }
             throw BackendClientError.message(baseURL.scheme == "https"
-                ? "Couldn't connect to MapTalk. Check your connection and try again."
+                ? "Couldn't connect to \(AppBrand.name). Check your connection and try again."
                 : "Cannot reach the local server. Start it on this Mac, then retry.")
         }
         guard let http = response as? HTTPURLResponse else { throw BackendClientError.message("Invalid server response.") }
