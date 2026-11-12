@@ -16,6 +16,7 @@ struct MapOverlays: MapContent {
     let onTapReal: ((RealPost) -> Void)?
     let onTapPOI: ((RatedPOI) -> Void)?
     var showsSelectedReelRangeOnly = false
+    var poiTransitionNamespace: Namespace.ID? = nil
 
     var body: some MapContent {
         ForEach(reals.filter { !showsSelectedReelRangeOnly || selectedStoryId == $0.id }) { real in
@@ -69,6 +70,8 @@ struct MapOverlays: MapContent {
                 .accessibilityIdentifier("maptalk.marker.reel.\(real.id.uuidString)")
                 .accessibilityLabel("\(user?.handle ?? "Member") Reel")
                 .accessibilityValue("\(usesContentMarker ? "Content" : "Avatar")\(isSelected ? ", selected" : "")")
+                .modifier(MapTalkPOITransitionSource(id: .reel(real.id),
+                                                     namespace: poiTransitionNamespace))
 
                 if let onTapReal {
                     marker
@@ -117,6 +120,8 @@ struct MapOverlays: MapContent {
                 .accessibilityIdentifier("maptalk.marker.poi.\(rated.id.uuidString)")
                 .accessibilityLabel(rated.poi.name)
                 .accessibilityValue("Category\(isSelected ? ", selected" : "")")
+                .modifier(MapTalkPOITransitionSource(id: .place(rated.id),
+                                                     namespace: poiTransitionNamespace))
 
                 if let onTapPOI {
                     marker

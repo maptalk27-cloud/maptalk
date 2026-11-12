@@ -94,7 +94,7 @@ function credentials(body) {
 }
 
 function memoryInput(body, time) {
-  object(body, ['id', 'kind', 'visibility', 'location', 'caption', 'mediaIds', 'place', 'placeId', 'capturedAt', 'cluster']);
+  object(body, ['id', 'kind', 'visibility', 'location', 'caption', 'mediaIds', 'place', 'placeId', 'capturedAt', 'cluster', 'locationName']);
   const result = {
     id: id(body.id), kind: body.kind, visibility: visibility(body.visibility),
     location: coordinate(body.location), caption: body.caption ?? '',
@@ -114,6 +114,18 @@ function memoryInput(body, time) {
     result.capturedAt = new Date(captured).toISOString();
   }
   requireValue(result.kind === 'poi' || result.kind === 'reel', 'Kind must be poi or reel.');
+  if (body.locationName !== undefined) {
+    requireValue(result.kind === 'reel', 'Only a Post can name its location.');
+    requireValue(typeof body.locationName === 'string', 'Location name must be text.');
+    const locationName = body.locationName.trim();
+    // JS length counts UTF-16 code units, matching the composer's limit.
+    requireValue(locationName.length > 0 && locationName.length <= 80,
+      'Choose a location name of at most 80 characters.');
+    requireValue(!/[\p{Cc}\p{Cf}]/u.test(locationName), 'Location name cannot contain control characters.');
+    // Omit entirely for old clients/queues: adding a default would invalidate
+    // their persisted publication request hashes after this upgrade.
+    result.locationName = locationName;
+  }
   requireValue(typeof result.caption === 'string' && result.caption.length <= 2200, 'Caption is too long.');
   result.caption = result.caption.trim();
   requireValue(Array.isArray(result.mediaIds) && result.mediaIds.length <= (result.kind === 'poi' ? 1 : 9),
@@ -219,10 +231,10 @@ function imageType(bytes) {
   return null;
 }
 
-function pageInput(params, extraKeys = []) {
+function pageInput(params, extraKeys = [], defaultLimit = 50) {
   requireValue([...params.keys()].every(key => ['limit', 'cursor', ...extraKeys].includes(key)), 'Unknown query parameter.');
   requireValue([...new Set(params.keys())].every(key => params.getAll(key).length === 1), 'Duplicate query parameter.');
-  const limit = params.has('limit') ? Number(params.get('limit')) : 50;
+  const limit = params.has('limit') ? Number(params.get('limit')) : defaultLimit;
   requireValue(Number.isInteger(limit) && limit >= 1 && limit <= 100, 'Limit must be 1–100.');
   let cursor = null;
   if (params.has('cursor')) {
@@ -402,6 +414,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       kind: row.kind, visibility: row.visibility,
       moderationStatus: row.moderation_status,
       location: { latitude: row.latitude, longitude: row.longitude }, caption: row.caption,
+      ...(row.location_name ? { locationName: row.location_name } : {}),
       place: place ? { id: place.id, name: place.name, category: place.category, sourceId: place.source_id,
         ...(place.directory_kind ? { directoryKind: place.directory_kind } : {}),
         coordinate: { latitude: place.latitude, longitude: place.longitude } } : null,
@@ -472,7 +485,8 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     const path = url.pathname;
     const method = request.method;
     if (method === 'GET' && path === '/health') {
-      return json(response, 200, { status: 'ok', mode: isBeta ? 'private-beta' : 'local-development', apiVersion: 1 });
+      return json(response, 200, { status: 'ok', mode: isBeta ? 'private-beta' : 'local-development', apiVersion: 1,
+        supportsPostLocationNames: true });
     }
     if (method === 'GET' && path === '/v1/auth/providers') {
       return json(response, 200, { providers: [
@@ -916,11 +930,11 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
         const received = now();
         const created = input.capturedAt ? Math.min(Date.parse(input.capturedAt), received) : received;
         db.prepare(`INSERT INTO memories(id, owner_id, kind, visibility, latitude, longitude,
-          caption, place_id, created_at, expires_at, request_hash, published_at, moderation_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          caption, place_id, created_at, expires_at, request_hash, published_at, moderation_status, location_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(input.id, user.id, input.kind, input.visibility, input.location.latitude, input.location.longitude,
             input.caption, placeID, created,
             created + ACTIVE_FEED_WINDOW, requestHash, input.visibility === 'public' ? created : null,
-            'approved');
+            'approved', input.locationName ?? null);
         const attach = db.prepare('INSERT INTO memory_media(memory_id, media_id, position) VALUES (?, ?, ?)');
         input.mediaIds.forEach((mediaID, position) => attach.run(input.id, mediaID, position));
         if (members) {
@@ -950,6 +964,13 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     if (method === 'GET' && path === '/v1/feed') {
       return json(response, 200, listMemories(`visibility = 'public' AND moderation_status = 'approved' AND ${PUBLICATION_TIME_SQL} > ? AND ${visibilitySQL()}`,
         [now() - ACTIVE_FEED_WINDOW, user.id, user.id], pageInput(url.searchParams), PUBLICATION_TIME_SQL));
+    }
+    if (method === 'GET' && path === '/v1/posts') {
+      // Posts are durable public content; the separate active Feed and map
+      // retain their existing 72-hour rules. Age never bypasses access checks.
+      return json(response, 200, listMemories(`kind = 'reel' AND visibility = 'public'
+        AND moderation_status = 'approved' AND ${visibilitySQL()}`,
+        [user.id, user.id], pageInput(url.searchParams, [], 20), PUBLICATION_TIME_SQL));
     }
     if (method === 'GET' && path === '/v1/map/memories') {
       const page = pageInput(url.searchParams, ['west', 'east', 'south', 'north']);

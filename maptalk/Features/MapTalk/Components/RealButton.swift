@@ -2,15 +2,15 @@ import SwiftUI
 
 struct PostPublishButton: View {
     let action: () -> Void
+    var usesLightInk = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: "plus")
                 .font(.system(size: 21, weight: .medium))
-                .foregroundStyle(.primary)
+                .foregroundStyle(usesLightInk ? Color.white : Color.black)
                 .frame(width: 44, height: 44)
-                .contentShape(Circle())
-                .glassEffect(.regular.interactive(), in: Circle())
+                .contentShape(Rectangle())
         }
         .buttonStyle(MomentBadgeButtonStyle())
         .accessibilityLabel("Create post")

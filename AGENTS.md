@@ -23,6 +23,8 @@
 
 - On 2026-10-30 (America/Los_Angeles), after the upload-recovery release, the user explicitly approved the publication-time consistency update on the existing backend following tests and encrypted backup/restore verification. This is a schema 14→14 code-only update: initial public posts use the persisted first publish-tap time; retry/upload completion/caption edits do not reset it; archive/feed ordering is consistent. Preserve existing history, records, pending uploads, keys, 1 GiB quota, resources and fees. Do not install a phone build or automatically republish queued posts under this approval.
 
+- On 2026-11-09 (America/Los_Angeles), the user explicitly approved “一起更新后端，再装手机” for durable, paginated public Posts and restoring the draggable, gently floating Post entry. This authorizes a schema 14→14 code-only update on the existing backend after tests and encrypted backup/restore verification, followed by an in-place compatible iPhone app update. Preserve existing data, pending uploads, keys, 1 GiB per-user quota, resource sizes and cost plan. No new cloud services, infrastructure expansion, automatic republication or physical-phone UI testing. Transfer costs may grow with usage. The user separately approved refreshing the existing `maptalk` CLI login.
+
 <!-- BEGIN AWS Agent Toolkit rules -->
 # AWS Guidance for the new AWS experience
 

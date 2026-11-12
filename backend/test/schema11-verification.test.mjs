@@ -20,6 +20,7 @@ async function fixture(t) {
     DROP TABLE memory_clusters;
     DROP TABLE comments;
     ALTER TABLE places DROP COLUMN directory_kind;
+    ALTER TABLE memories DROP COLUMN location_name;
     PRAGMA user_version = 10;
     INSERT INTO users(id, handle, password_hash, created_at) VALUES ('owner', 'alice', 'kept-secret-hash', 1);
     INSERT INTO places(id, name, category, latitude, longitude) VALUES ('place', 'Private Airport Café', 'coffee', 47.45, -122.31);

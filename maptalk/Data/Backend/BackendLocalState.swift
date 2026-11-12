@@ -53,6 +53,11 @@ nonisolated struct BackendLocalState: Codable, Sendable {
     var mine: [BackendMemory] = []
     var profile: [BackendMemory] = []
     var feed: [BackendMemory] = []
+    // Optional for caches written before the durable Post feed. This is a
+    // separate public-only scope, never inferred from private/archive records.
+    var posts: [BackendMemory]? = nil
+    var postsNextCursor: String? = nil
+    var postsHasLoadedPage: Bool? = nil
     var queued: [QueuedPublication] = []
     var deleted: Set<UUID> = []
     var privateOverrides: [BackendMemory] = []
@@ -60,6 +65,9 @@ nonisolated struct BackendLocalState: Codable, Sendable {
     // Missing in older caches. These are map-only negative lookups, not post
     // tombstones: a successful fresh public read can make an ID eligible again.
     var mapExcludedMemoryIDs: Set<UUID>? = nil
+    // Server-scoped capability: after one confirmed upgrade, named posts can
+    // still enter the durable outbox while offline. Older caches decode safely.
+    var supportsPostLocationNames: Bool? = nil
 }
 
 /// Account- and server-scoped durable metadata. No tokens are stored here.

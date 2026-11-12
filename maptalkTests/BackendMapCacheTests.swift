@@ -9,6 +9,214 @@ import Testing
 @Suite(.serialized)
 struct BackendMapCacheTests {
     @Test(.timeLimit(.minutes(1)))
+    func selectedAuthorizedHistoricalPostKeepsItsMarkerButNeverRestoresUnselectedOrWithdrawnPosts() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let old = fixture.memory(latitude: 37, publishedAt: .now.addingTimeInterval(-30 * 86_400))
+        let other = fixture.memory(latitude: 37, publishedAt: .now.addingTimeInterval(-40 * 86_400))
+        try await fixture.seed(mine: [old, other], feed: [])
+        let posts = fixture.page([old, other])
+        MapCacheProtocol.install { $0.respond(posts) }
+        try await fixture.store.refreshPosts()
+        let selected = try #require(fixture.store.postFeedReels.value.first { $0.id == old.id })
+        fixture.replyMap([])
+        _ = try await fixture.store.loadMap(fixture.region)
+        #expect(fixture.store.excludedMapMemoryIDs == [old.id, other.id])
+        fixture.failMap()
+        let repository = BackendPOIRepository(store: fixture.store)
+        let environment = AppEnvironment(build: .init(configuration: .debug, featureFlags: []),
+            location: MapCacheLocationService(), notifications: NotificationServiceImpl(),
+            activePOIRepo: repository, poiRepo: repository,
+            realRepo: BackendRealRepository(store: fixture.store),
+            myMapArchive: fixture.store.archive, backend: fixture.store)
+        let model = MapTalkViewModel(environment: environment)
+
+        #expect(model.mapRenderReels(retaining: old.id, selectedMapReel: selected).map(\.id) == [old.id])
+        #expect(model.mapRenderReels(retaining: nil, selectedMapReel: selected).isEmpty)
+        #expect(model.mapRenderReels(retaining: other.id, selectedMapReel: selected).isEmpty)
+        var privateSnapshot = selected
+        privateSnapshot.visibility = .privateOnly
+        #expect(model.mapRenderReels(retaining: old.id, selectedMapReel: privateSnapshot).isEmpty)
+        let wrongOwner = RealPost(id: selected.id, userId: UUID(), center: selected.center,
+            radiusMeters: selected.radiusMeters, message: selected.message, attachments: [],
+            likes: [], comments: [], visibility: .publicAll, createdAt: selected.createdAt,
+            expiresAt: selected.expiresAt, publishedAt: selected.publishedAt)
+        #expect(model.mapRenderReels(retaining: old.id, selectedMapReel: wrongOwner).isEmpty)
+
+        MapCacheProtocol.install { operation in
+            if operation.request.httpMethod == "DELETE" { operation.respond(Data("{}".utf8)) }
+            else { operation.respond(Data(), status: 503) }
+        }
+        try await fixture.store.deletePost(memoryID: old.id, refreshAfterward: false)
+        #expect(model.withdrawnPublicMemoryIDs.contains(old.id))
+        #expect(model.mapRenderReels(retaining: old.id, selectedMapReel: selected).isEmpty)
+        #expect(model.mapRenderReels(retaining: nil).isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func durablePostsAppendOldPagesWithoutChangingPOIStoriesAndRestoreOffline() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let poi = fixture.poiMemory()
+        let first = fixture.memory(latitude: 37)
+        let older = fixture.memory(latitude: 37, publishedAt: .now.addingTimeInterval(-30 * 86_400))
+        try await fixture.seed(mine: [poi], feed: [poi])
+        #expect(fixture.store.postFeedRecords.value.isEmpty, "An old cache must not turn archive records into Posts")
+        let head = fixture.page([first], nextCursor: "older-posts")
+        let tail = fixture.page([first, older])
+        MapCacheProtocol.install { operation in
+            #expect(operation.request.url?.path == "/v1/posts")
+            let query = URLComponents(url: operation.request.url!, resolvingAgainstBaseURL: false)?.queryItems
+            #expect(query?.first { $0.name == "limit" }?.value == "20")
+            operation.respond(query?.first { $0.name == "cursor" }?.value == nil ? head : tail)
+        }
+        try await fixture.store.refreshPosts()
+        #expect(fixture.store.postFeedRecords.value.map(\.id) == [first.id])
+        #expect(fixture.store.hasMorePosts)
+        try await fixture.store.loadMorePosts()
+        #expect(fixture.store.postFeedRecords.value.map(\.id) == [first.id, older.id])
+        #expect(fixture.store.postFeedReels.value.map(\.id) == [first.id, older.id])
+        #expect(!fixture.store.hasMorePosts)
+        #expect(fixture.store.feedRecords.value.map(\.id) == [poi.id])
+        MapCacheProtocol.install { _ in Issue.record("Restoring or reaching the end must not request another page") }
+        try await fixture.store.loadMorePosts()
+        let restored = fixture.makeStore()
+        defer { restored.clearLocalMedia() }
+        #expect(await restored.restoreCachedState())
+        #expect(restored.postFeedRecords.value.map(\.id) == [first.id, older.id])
+        #expect(!restored.hasMorePosts)
+        #expect(restored.archive.privatePOIs.first?.checkIns.map(\.id) == [poi.id])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func postScopeExcludesPrivatePendingAndPOIRecords() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let post = fixture.memory(latitude: 37)
+        let hidden = fixture.memory(latitude: 37, visibility: "private")
+        let pending = fixture.memory(latitude: 37, moderation: "pending")
+        let poi = fixture.poiMemory()
+        let page = fixture.page([post, hidden, pending, poi, post])
+        MapCacheProtocol.install { $0.respond(page) }
+        try await fixture.store.refreshPosts()
+        #expect(fixture.store.postFeedRecords.value.map(\.id) == [post.id])
+        #expect(fixture.store.postFeedReels.value.map(\.id) == [post.id])
+        #expect(fixture.store.feedRecords.value.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func postRetryKeepsCursorAndRejectsRepeatedOrOversizedPages() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let post = fixture.memory(latitude: 37)
+        let older = fixture.memory(latitude: 37, publishedAt: .now.addingTimeInterval(-86_400))
+        let head = fixture.page([post], nextCursor: "next")
+        MapCacheProtocol.install { $0.respond(head) }
+        try await fixture.store.refreshPosts()
+        do {
+            try await fixture.store.loadMorePosts()
+            Issue.record("A repeated cursor should fail, not loop")
+        } catch {}
+        #expect(fixture.store.postFeedIssue != nil)
+        #expect(!fixture.store.isLoadingPosts)
+        #expect(fixture.store.postFeedRecords.value.map(\.id) == [post.id])
+        let oversized = fixture.page(Array(repeating: older, count: 21))
+        MapCacheProtocol.install { $0.respond(oversized) }
+        do { try await fixture.store.loadMorePosts(); Issue.record("Expected the 20-record bound") } catch {}
+        let tail = fixture.page([older])
+        MapCacheProtocol.install { operation in
+            let cursor = URLComponents(url: operation.request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "cursor" }?.value
+            #expect(cursor == "next", "Failures must leave the retry at the same boundary")
+            operation.respond(tail)
+        }
+        try await fixture.store.loadMorePosts()
+        #expect(fixture.store.postFeedRecords.value.map(\.id) == [post.id, older.id])
+        #expect(fixture.store.postFeedIssue == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func postHeadRefreshPreservesAlreadyLoadedPagesAndTheirCursor() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let first = fixture.memory(latitude: 37)
+        let older = fixture.memory(latitude: 37, publishedAt: .now.addingTimeInterval(-86_400))
+        let newest = fixture.memory(latitude: 37, publishedAt: .now.addingTimeInterval(100))
+        let head = fixture.page([first], nextCursor: "page-two")
+        MapCacheProtocol.install { $0.respond(head) }
+        try await fixture.store.refreshPosts()
+        let tail = fixture.page([older], nextCursor: "page-three")
+        MapCacheProtocol.install { $0.respond(tail) }
+        try await fixture.store.loadMorePosts()
+        let updated = fixture.page([newest, first], nextCursor: "page-two")
+        MapCacheProtocol.install { $0.respond(updated) }
+        try await fixture.store.refreshPosts()
+        #expect(fixture.store.postFeedRecords.value.map(\.id) == [newest.id, first.id, older.id])
+        let empty = fixture.page([])
+        MapCacheProtocol.install { operation in
+            let cursor = URLComponents(url: operation.request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "cursor" }?.value
+            #expect(cursor == "page-three")
+            operation.respond(empty)
+        }
+        try await fixture.store.loadMorePosts()
+        #expect(fixture.store.postFeedRecords.value.count == 3)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func unavailablePostIsWithdrawnWithoutErasingPrivateArchive() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let post = fixture.memory(latitude: 37)
+        try await fixture.seed(mine: [post], feed: [])
+        let page = fixture.page([post])
+        MapCacheProtocol.install { $0.respond(page) }
+        try await fixture.store.refreshPosts()
+        var invalidated = Set<UUID>()
+        let observation = fixture.store.publicContentChanges.sink { invalidated.formUnion($0) }
+        defer { observation.cancel() }
+        MapCacheProtocol.install { operation in
+            #expect(operation.request.url?.path == "/v1/memories/\(post.id.uuidString)")
+            operation.respond(Data(), status: 404)
+        }
+        try await fixture.store.verifyPost(memoryID: post.id)
+        #expect(fixture.store.postFeedRecords.value.isEmpty)
+        #expect(fixture.store.postFeedReels.value.isEmpty)
+        #expect(invalidated == [post.id])
+        #expect(fixture.store.archive.privateReels.map(\.id) == [post.id])
+        #expect(fixture.store.ownedMemories[post.id] != nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func latePostVerificationCannotUndoLocalDeletion() async throws {
+        let fixture = try MapCacheFixture()
+        defer { fixture.finish() }
+        let post = fixture.memory(latitude: 37)
+        try await fixture.seed(mine: [post], feed: [])
+        let page = fixture.page([post])
+        MapCacheProtocol.install { $0.respond(page) }
+        try await fixture.store.refreshPosts()
+        let (requests, continuation) = AsyncStream<MapCacheProtocol>.makeStream()
+        defer { continuation.finish() }
+        MapCacheProtocol.install { operation in
+            if operation.request.httpMethod == "DELETE" { operation.respond(Data("{}".utf8)) }
+            else { continuation.yield(operation) }
+        }
+        let verification = Task { try await fixture.store.verifyPost(memoryID: post.id) }
+        defer { verification.cancel() }
+        var iterator = requests.makeAsyncIterator()
+        let held = try #require(await iterator.next())
+        try await fixture.store.deletePost(memoryID: post.id, refreshAfterward: false)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        held.respond(try encoder.encode(post))
+        do { try await verification.value } catch is CancellationError {}
+        #expect(fixture.store.postFeedRecords.value.isEmpty)
+        #expect(fixture.store.postFeedReels.value.isEmpty)
+        #expect(fixture.store.archive.privateReels.isEmpty)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
     func placeHistoryReadsOnePageThenExplicitlyAppendsWithoutChangingActiveFeedOrApplyingItsExpiry() async throws {
         let fixture = try MapCacheFixture()
         defer { fixture.finish() }

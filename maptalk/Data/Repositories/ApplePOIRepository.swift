@@ -53,7 +53,8 @@ final class ApplePOIRepository: POIRepository {
     }
 
     func searchResult(_ query: String, near coordinate: CLLocationCoordinate2D) -> AnyPublisher<POISearchResult, Never> {
-        guard let request = Self.namedSearchRequest(query, near: coordinate) else {
+        guard let request = Self.namedSearchRequest(query, near: coordinate,
+            radius: max(searchRadius, POISelectionPolicy.airportRadius)) else {
             return Just(POISearchResult(places: [])).eraseToAnyPublisher()
         }
         return Deferred { [self] in
@@ -74,7 +75,8 @@ final class ApplePOIRepository: POIRepository {
         .eraseToAnyPublisher()
     }
 
-    static func namedSearchRequest(_ query: String, near coordinate: CLLocationCoordinate2D) -> MKLocalSearch.Request? {
+    static func namedSearchRequest(_ query: String, near coordinate: CLLocationCoordinate2D,
+                                   radius: CLLocationDistance = POISelectionPolicy.airportRadius) -> MKLocalSearch.Request? {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, CLLocationCoordinate2DIsValid(coordinate) else { return nil }
         let request = MKLocalSearch.Request()
@@ -86,8 +88,8 @@ final class ApplePOIRepository: POIRepository {
         // same per-place distance policy as nearby suggestions, so a match
         // never moves the user's GPS or silently allows a remote check-in.
         request.region = MKCoordinateRegion(center: coordinate,
-            latitudinalMeters: POISelectionPolicy.airportRadius * 2,
-            longitudinalMeters: POISelectionPolicy.airportRadius * 2)
+            latitudinalMeters: radius * 2,
+            longitudinalMeters: radius * 2)
         return request
     }
 
@@ -144,7 +146,8 @@ final class ApplePOIRepository: POIRepository {
             guard seenIDs.insert(place.id).inserted else { return nil }
             let distance = CLLocation(latitude: place.poi.coordinate.latitude,
                 longitude: place.poi.coordinate.longitude).distance(from: origin)
-            let limit = place.poi.directoryKind == .airport ? POISelectionPolicy.airportRadius : nearbyRadius
+            let limit = place.poi.directoryKind == .airport
+                ? max(POISelectionPolicy.airportRadius, nearbyRadius) : nearbyRadius
             guard distance.isFinite, distance <= limit else { return nil }
             return (place, distance)
         }.sorted {

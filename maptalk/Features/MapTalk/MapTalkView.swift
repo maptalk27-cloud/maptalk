@@ -4,12 +4,21 @@ import MapKit
 import SwiftUI
 import UIKit
 
+enum ProfileMapBrowsingMode {
+    case posts
+    case allMemories
+}
+
 struct MapTalkView: View {
     @StateObject private var viewModel: MapTalkViewModel
     @Environment(\.appEnv) private var environment
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("maptalk.map-layer") private var mapLayer: MapTalkMapLayer = .standard
+    @AppStorage(MapTalkMapAppearance.storageKey) private var mapAppearance: MapTalkMapAppearance = .system
+    private var mapColorScheme: ColorScheme { mapAppearance.resolved(using: colorScheme) }
+    private var usesLightMapChrome: Bool { mapLayer == .satellite || mapColorScheme == .dark }
     @StateObject private var flightController = MapFlightController()
     @StateObject private var cameraPositionStore = MapCameraPositionStore()
     private var cameraPosition: MapCameraPosition {
@@ -21,9 +30,13 @@ struct MapTalkView: View {
     @State private var poiOverviewID: UUID?
     @State private var selectedFriendFootprintID: String?
     @State private var activeExperience: ActiveExperience?
-    @StateObject private var experiencePresentation = MapExperiencePresentation(
-        compactDetent: .fraction(ControlsLayout.previewFraction)
+    @State private var profilePlacePreview: ProfilePlacePreview?
+    @StateObject private var cardPresentation = MapTalkCardPresentation(
+        poiCompactFraction: ControlsLayout.previewFraction,
+        postCompactFraction: ControlsLayout.postPreviewFraction
     )
+    @StateObject private var profileCardMotion = ProfileCardSheetMotion()
+    private var experiencePresentation: MapExperiencePresentation { cardPresentation.current }
     @State private var currentRegion: MKCoordinateRegion?
     @State private var currentCamera: MapCamera?
     @State private var settledFriendFootprintRegion: MKCoordinateRegion?
@@ -53,19 +66,24 @@ struct MapTalkView: View {
     @State private var viewedActivityIDs = Set<String>()
     @State private var isBrowsingPostPreview = false
     @State private var postPreviewResumePageID: String?
+    @State private var postEntryPosition: CGPoint?
     @State private var previewStoryResumePageIDs: [UUID: String] = [:]
-    @State private var compactExperienceSheetFrame = CGRect.null
     @Namespace private var heroNamespace
+    @Namespace private var cardEntryTransitionNamespace
+    @State private var poiTransitionSourceID: MapTalkPOITransitionID?
     private let initialStoryId: UUID?
     private let isTabActive: Bool
+    private let profileBrowsingMode: ProfileMapBrowsingMode
 
     private var mapWorkEnabled: Bool { isTabActive && scenePhase == .active }
 
     init(viewModel: @autoclosure @escaping () -> MapTalkViewModel,
-         initialStoryId: UUID? = nil, isTabActive: Bool = true) {
+         initialStoryId: UUID? = nil, isTabActive: Bool = true,
+         profileBrowsingMode: ProfileMapBrowsingMode = .posts) {
         _viewModel = StateObject(wrappedValue: viewModel())
         self.initialStoryId = initialStoryId
         self.isTabActive = isTabActive
+        self.profileBrowsingMode = profileBrowsingMode
     }
 
     var body: some View {
@@ -81,18 +99,27 @@ struct MapTalkView: View {
 
             // The rail is a stable public feed snapshot. Map search results
             // live in `ratedPOIs` and never decide membership here.
-            let baseStoryItems = viewModel.activeFeedItems
+            let allProfileStoryItems = viewModel.activeFeedItems
+            let baseStoryItems = rootStoryItems
             let allFriendGroups = usesFriendStories ? friendStoryGroups : []
             let friendGroups = showsSocialFeedPreview
                 ? previewGroups(allFriendGroups, posts: false) : allFriendGroups
-            let postGroups = showsSocialFeedPreview ? previewGroups(allFriendGroups, posts: true) : []
+            let postGroups = showsSocialFeedPreview ? postFeedGroups : []
             let previewPage = postPreviewPage(in: postGroups)
-            let showsPostPreviewEntry = showsSocialFeedPreview && mapWorkEnabled
-                && !isBrowsingPostPreview
-                && !experiencePresentation.isExpanded
+            let previewPost: RealPost? = {
+                guard let page = previewPage, case let .reel(post) = page.content else { return nil }
+                return post
+            }()
+            let postSurfaceMounted = cardPresentation.mountedFlow == .posts
+            let postSurfaceReturning = cardPresentation.closingContent?.flow == .posts
+            let hasPostPreviewEntry = showsSocialFeedPreview && (postSurfaceMounted
+                || previewPage != nil || viewModel.postFeedIssue != nil || viewModel.isLoadingPosts)
+            let showsPostPreviewEntry = hasPostPreviewEntry && mapWorkEnabled
+                && (!postSurfaceMounted || postSurfaceReturning)
+                && (!experiencePresentation.isExpanded || postSurfaceReturning)
                 && !experiencePresentation.isResettingPresentation && focusedJourneyHeader == nil
                 && publishDestination == nil && !isActivityPresented
-                && !isActivityOverExperiencePresented && previewPage != nil
+                && !isActivityOverExperiencePresented
 
             let focusedStoryItems = focusedJourneyHeader.map(journeyStoryItems) ?? []
             let nestedStoryJourney: JourneyPost? = {
@@ -106,10 +133,12 @@ struct MapTalkView: View {
                 retaining: selectedStoryId,
                 selectedMapPOI: selectedStandalonePOI
             )
-            let mapReels = viewModel.mapRenderReels(
+            // Home Posts have their own feed entry, not a second set of map
+            // markers. Profile maps and an explicitly opened Bubble keep theirs.
+            let mapReels = viewModel.isUserScope ? viewModel.mapRenderReels(
                 retaining: selectedStoryId,
                 selectedMapReel: selectedStandaloneReel
-            )
+            ) : []
             let friendFootprintTopExclusion = MapTalkTopChromeLayout.height(
                 safeAreaTop: geometry.safeAreaInsets.top,
                 showsStories: usesFriendStories && focusedJourneyHeader == nil
@@ -164,46 +193,52 @@ struct MapTalkView: View {
             }
 
             let storyItemIds = storyItems.map(\.id)
-            let sequenceItems = storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
-                switch item.source {
-                case let .real(real):
-                    return ExperienceDetailView.SequencePager.Item(
-                        id: real.id,
-                        mode: .real(real, viewModel.user(for: real.userId))
-                    )
-                case let .poi(group):
-                    return ExperienceDetailView.SequencePager.Item(
-                        id: group.id,
-                        mode: .poi(focusedJourneyHeader == nil
-                            ? viewModel.publicPlaceDetails(id: group.id) ?? group.ratedPOI
-                            : group.ratedPOI)
-                    )
-                case let .journey(journey):
-                    return ExperienceDetailView.SequencePager.Item(
-                        id: journey.id,
-                        mode: .journey(journey)
-                    )
+            // Map/profile selection still uses this pager. Home story swipes
+            // must not merge every place's history for an unused legacy pager.
+            let makeSequenceItems = {
+                storyItems.map { item -> ExperienceDetailView.SequencePager.Item in
+                    switch item.source {
+                    case let .real(real):
+                        return ExperienceDetailView.SequencePager.Item(
+                            id: real.id,
+                            mode: .real(real, viewModel.user(for: real.userId))
+                        )
+                    case let .poi(group):
+                        return ExperienceDetailView.SequencePager.Item(
+                            id: group.id,
+                            mode: .poi(focusedJourneyHeader == nil
+                                ? viewModel.publicPlaceDetails(id: group.id) ?? group.ratedPOI
+                                : group.ratedPOI)
+                        )
+                    case let .journey(journey):
+                        return ExperienceDetailView.SequencePager.Item(
+                            id: journey.id,
+                            mode: .journey(journey)
+                        )
+                    }
                 }
             }
             let baseControlsPadding = ControlsLayout.basePadding(for: geometry)
             // Both floating controls use the same card edge and breathing
             // room. Neither should reserve the tab bar's height twice.
             let previewControlsPadding: CGFloat = {
-                let accessoryHeight = friendStoryNavigation.isActive && !isBrowsingPostPreview
+                let accessoryHeight = friendStoryNavigation.isActive
+                    && (!isBrowsingPostPreview || friendStoryNavigation.isBrowsingBubble)
                     ? FriendStoryLayout.floatingHeight : 0
-                let estimate = ControlsLayout.previewPadding(for: geometry,
-                    fraction: activePreviewFraction) + accessoryHeight
-                guard showsSocialFeedPreview else { return estimate }
-                if !compactExperienceSheetFrame.isNull {
-                    return MapTalkPostEntryGeometry.sheetClearance(
-                        mapFrame: geometry.frame(in: .global), sheetFrame: compactExperienceSheetFrame,
-                        baseBottomInset: baseControlsPadding,
-                        accessoryHeight: accessoryHeight)
+                guard showsSocialFeedPreview else {
+                    return ControlsLayout.previewPadding(for: geometry,
+                        fraction: activePreviewFraction) + accessoryHeight
                 }
-                // First presentation only: the sheet also occupies the tab
-                // bar area, which isn't part of the map's layout height.
-                return max(baseControlsPadding, estimate
-                    - geometry.safeAreaInsets.bottom * (1 - activePreviewFraction) + 12)
+                // Both root systems share one dock. No native-frame feedback,
+                // estimated→measured corrections, or chasing the resizing card.
+                let headerFraction = FriendStoryLayout.floatingHeight / max(1, geometry.size.height)
+                let fraction = friendStoryNavigation.isBrowsingBubble
+                    ? ControlsLayout.postPreviewFraction + headerFraction
+                    : max(ControlsLayout.postPreviewFraction,
+                          ControlsLayout.previewFraction + headerFraction)
+                return max(baseControlsPadding,
+                    ControlsLayout.previewPadding(for: geometry, fraction: fraction)
+                    - geometry.safeAreaInsets.bottom * (1 - fraction) + 12)
             }()
             let collapseDetent = {
                 experiencePresentation.collapseToCompact()
@@ -278,19 +313,30 @@ struct MapTalkView: View {
             }
 
             let presentSequenceIfNeeded: (Bool) -> Void = { shouldPresent in
-                guard sequenceItems.isEmpty == false else { return }
+                guard storyItems.isEmpty == false else { return }
                 let wasActive = experiencePresentation.isPresented
                 guard shouldPresent || wasActive else { return }
                 let nonce = (shouldPresent || activeExperience?.sequenceNonce == nil)
                     ? UUID()
                     : (activeExperience?.sequenceNonce ?? UUID())
                 activeExperience = .sequence(nonce: nonce)
+                configureProfileCardHeight()
                 if shouldPresent {
                     experiencePresentation.presentNewContent()
                 }
             }
 
             let selectStoryItem: (RealStoriesRow.StoryItem, Bool, Bool, RegionChangeCause?) -> Void = { item, shouldPresent, shouldFocus, overrideCause in
+                if isProfilePostBrowsing, focusedJourneyHeader == nil {
+                    if case let .poi(group) = item.source {
+                        flushPendingViewedStory(nil)
+                        openProfilePlace(group.ratedPOI, focus: shouldFocus)
+                        return
+                    }
+                    // An explicit Post selection replaces a temporary peek;
+                    // its later dismissal must not restore an older Post.
+                    profilePlacePreview = nil
+                }
                 viewModel.cancelPendingLocationFocus()
                 poiOverviewID = nil
                 flushPendingViewedStory(item.readKey)
@@ -349,6 +395,7 @@ struct MapTalkView: View {
             }
 
             let handleJourneyTap: (JourneyPost, Bool, JourneyPost?) -> Void = { journey, presentSheet, parent in
+                profilePlacePreview = nil
                 viewModel.cancelPendingLocationFocus()
                 poiOverviewID = nil
                 selectedFriendFootprintID = nil
@@ -416,6 +463,7 @@ struct MapTalkView: View {
                         activeExperience = .sequence(nonce: activeExperience?.sequenceNonce ?? UUID())
                     } else {
                         activeExperience = .sequence(nonce: UUID())
+                        configureProfileCardHeight()
                         experiencePresentation.presentNewContent()
                     }
                 }
@@ -430,6 +478,7 @@ struct MapTalkView: View {
             }
 
             let ensureSelectionIfNeeded: () -> Void = {
+                if viewModel.isUserScope, case .poi = activeExperience { return }
                 if storyItems.isEmpty {
                     selectedStoryId = nil
                     selectedRealId = nil
@@ -451,7 +500,8 @@ struct MapTalkView: View {
             let applyInitialStorySelectionIfNeeded: () -> Void = {
                 guard didApplyInitialStorySelection == false,
                       let initialStoryId,
-                      let item = storyItemForId(initialStoryId) else {
+                      let item = storyItemForId(initialStoryId)
+                        ?? (viewModel.isUserScope ? allProfileStoryItems.first { $0.id == initialStoryId } : nil) else {
                     return
                 }
                 didApplyInitialStorySelection = true
@@ -459,46 +509,291 @@ struct MapTalkView: View {
                 reelAlignTrigger &+= 1
             }
 
+            // A stable native surface contains replaceable content. Each flow
+            // still owns its detent/callback revision, not the other's state.
+            let experienceSheet: (MapTalkFeedPresentation, MapExperiencePresentation) -> AnyView = { flow, presentation in
+                let revision = presentation.contentRevision
+                let contentIdentity = MapTalkCardContentIdentity(flow: flow, revision: revision)
+                let isCurrent: () -> Bool = {
+                    cardPresentation.activeFlow == flow
+                        && presentation.contentRevision == revision
+                }
+                let isExpanded = presentation.isExpanded
+                let shouldAnimateSelection = isExpanded == false
+
+                let content: AnyView = {
+                    if friendStoryNavigation.isActive {
+                        return AnyView(FriendStoryFlow(
+                            navigation: friendStoryNavigation,
+                            detent: Binding(get: { presentation.detent }, set: { presentation.detent = $0 }),
+                            compactDetent: presentation.compactDetent,
+                            viewedKeys: storyReadStore.viewedKeys,
+                            userProvider: viewModel.user(for:),
+                            journeyProvider: viewModel.journey(for:),
+                            placeProvider: friendStoryPlace,
+                            captureCamera: friendStoryMapSnapshot,
+                            restoreCamera: restoreFriendStoryCamera,
+                            focusPage: { page in
+                                guard isCurrent() else { return }
+                                focusFriendStoryPage(page, geometry: geometry)
+                            },
+                            focusContent: { mode in
+                                guard isCurrent() else { return }
+                                focusFriendStoryContent(mode, geometry: geometry)
+                            },
+                            onRead: { storyReadStore.markViewed($0) },
+                            onClose: {
+                                guard isCurrent() else { return }
+                                // Keep the current card mounted until native
+                                // dismissal completes, then restore the map.
+                                cardPresentation.dismiss(preservingDetent: true)
+                            },
+                            allowsPlayback: mapWorkEnabled && isCurrent() && !isActivityOverExperiencePresented,
+                            feedPresentation: flow,
+                            showsBubbleProgress: !viewModel.isUserScope,
+                            hasMorePosts: viewModel.hasMorePosts,
+                            isLoadingPosts: viewModel.isLoadingPosts,
+                            postFeedIssue: viewModel.postFeedIssue,
+                            onRetryPosts: viewModel.loadMorePosts
+                        ))
+                    }
+                    switch activeExperience {
+                    case let .sequence(nonce):
+                        let sequenceItems = makeSequenceItems()
+                        if sequenceItems.isEmpty == false {
+                            let pager = ExperienceDetailView.SequencePager(items: sequenceItems)
+                            let selectionBinding: Binding<UUID>
+                            if focusedJourneyHeader != nil {
+                            selectionBinding = Binding<UUID>(
+                                get: {
+                                    if let current = selectedStoryId,
+                                       sequenceItems.contains(where: { $0.id == current }) {
+                                        return current
+                                    }
+                                    return sequenceItems.first!.id
+                                },
+                                set: { newValue in
+                                    guard isCurrent() else { return }
+                                    if suppressJourneySelectionUpdate {
+                                        suppressJourneySelectionUpdate = false
+                                        return
+                                    }
+                                    guard newValue != selectedStoryId else { return }
+                                    selectedStoryId = newValue
+                                    if let item = storyItemForId(newValue) {
+                                        selectStoryItem(item, false, true, nil)
+                                    }
+                                    reelAlignTrigger += 1
+                                }
+                            )
+                        } else {
+                                selectionBinding = Binding<UUID>(
+                                    get: {
+                                        if let current = selectedStoryId,
+                                           sequenceItems.contains(where: { $0.id == current }) {
+                                            return current
+                                        }
+                                        return sequenceItems.first!.id
+                                    },
+                                    set: { newValue in
+                                        guard isCurrent() else { return }
+                                        guard newValue != selectedStoryId else { return }
+                                        guard let item = storyItemForId(newValue) else { return }
+                                        if shouldAnimateSelection {
+                                            selectStoryItem(item, false, true, nil)
+                                        } else {
+                                            selectStoryItem(item, false, false, .other)
+                                            if let region = region(for: item) {
+                                                currentRegion = region
+                                                cameraPosition = .region(region)
+                                            }
+                                        }
+                                        reelAlignTrigger += 1
+                                    }
+                                )
+                            }
+
+                            return AnyView(
+                                MapExperienceCapsule(
+                                    pager: pager,
+                                    selection: selectionBinding,
+                                    isExpanded: isExpanded,
+                                    usesClassicPostPreview: viewModel.isUserScope,
+                                    poiBrowsingUserID: viewModel.scopedUser?.id,
+                                    poiOverviewID: poiOverviewID,
+                                    onCollapsedTap: presentation.expand,
+                                    journeyProvider: viewModel.journey(for:),
+                                    userProvider: viewModel.user(for:),
+                                    onJourneyAvatarStackTap: { journey in
+                                        handleJourneyTap(journey, true, focusedJourneyHeader)
+                                    },
+                                    onPOIContributorViewed: markStoryReadKeysViewed,
+                                    isPOIContributorUnseen: isPOIContributorUnseen
+                                )
+                                .id(nonce)
+                            )
+                        } else {
+                            return AnyView(EmptyView())
+                        }
+                    case let .poi(rated: rated, nonce: nonce):
+                        return AnyView(
+                            ExperienceDetailView(
+                                ratedPOI: rated,
+                                isExpanded: isExpanded,
+                                onCollapsedTap: presentation.expand,
+                                userProvider: viewModel.user(for:),
+                                onPOIContributorViewed: markStoryReadKeysViewed,
+                                isPOIContributorUnseen: isPOIContributorUnseen
+                            )
+                            .id("\(rated.id)-\(nonce)")
+                        )
+                    case let .real(real: real, nonce: nonce):
+                        let pager = ExperienceDetailView.SequencePager(
+                            items: [
+                                .init(
+                                    id: real.id,
+                                    mode: .real(real, viewModel.user(for: real.userId))
+                                )
+                            ]
+                        )
+                        return AnyView(
+                            ExperienceDetailView(
+                                sequencePager: pager,
+                                selection: .constant(real.id),
+                                isExpanded: isExpanded,
+                                usesClassicPostPreview: viewModel.isUserScope,
+                                onCollapsedTap: presentation.expand,
+                                onJourneyAvatarStackTap: { journey in
+                                    handleJourneyTap(journey, true, focusedJourneyHeader)
+                                },
+                                journeyProvider: viewModel.journey(for:),
+                                userProvider: viewModel.user(for:)
+                            )
+                            .id("\(real.id)-\(nonce)")
+                        )
+                    case let .friendPlace(rated: rated, sourceID: sourceID, nonce: nonce):
+                        return AnyView(
+                            ExperienceDetailView(
+                                ratedPOI: rated,
+                                isExpanded: isExpanded,
+                                onCollapsedTap: presentation.expand,
+                                userProvider: viewModel.user(for:),
+                                onPOIContributorViewed: markStoryReadKeysViewed,
+                                isPOIContributorUnseen: isPOIContributorUnseen
+                            )
+                            .accessibilityIdentifier("maptalk.friend-place-preview")
+                            .id("\(sourceID)-\(nonce)")
+                        )
+                    default:
+                        return AnyView(EmptyView())
+                    }
+                }()
+
+                return AnyView(content
+                    .id(contentIdentity)
+                    .environment(\.canControlCardMotion, isCurrent)
+                    .environment(\.friendStoryPlaybackEnabled, mapWorkEnabled)
+                    .environment(\.backendSafetyMenuTrailingInset, profilePlacePreview == nil ? 16 : 66)
+                    .modifier(MapTalkScopedSheetChrome(isProfile: viewModel.isUserScope,
+                                                     profileMotion: profileCardMotion,
+                                                     homeMotion: cardPresentation.motion,
+                                                     presentation: presentation,
+                                                     navigation: friendStoryNavigation,
+                                                     feedPresentation: flow))
+                    .modifier(ProfileMapCardBackground(isEnabled: viewModel.isUserScope,
+                                                       isPost: profileShowsPostCard))
+                    .overlay(alignment: .topTrailing) {
+                        if viewModel.isUserScope, profilePlacePreview != nil {
+                            Button {
+                                if !restoreProfilePostAfterPlace() {
+                                    cardPresentation.dismiss(preservingDetent: true)
+                                }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .frame(width: 30, height: 30)
+                                    .background(.regularMaterial, in: Circle())
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.top, 12)
+                            .padding(.trailing, 12)
+                            .accessibilityLabel(profilePlacePreview?.returnPostID == nil
+                                ? "Back to map" : "Back to post")
+                            .accessibilityIdentifier("profile.place.close")
+                        }
+                    }
+                    .fullScreenCover(isPresented: $isActivityOverExperiencePresented) {
+                        activityContent
+                            .presentationBackground(Color(.systemBackground))
+                    })
+            }
+
+            let finishExperienceSheet: (MapTalkFeedPresentation) -> Void = { flow in
+                guard cardPresentation.didDismiss(flow) == false else { return }
+                if viewModel.isUserScope {
+                    if restoreProfilePostAfterPlace() { return }
+                    activeExperience = nil
+                    poiOverviewID = nil
+                }
+                // Closing a feed leaves the map at the last browsed location.
+                // Only returning from a nested detail restores its parent camera.
+                if friendStoryNavigation.isActive { finishFriendStory(restoreMap: false) }
+                flushPendingViewedStory(nil)
+                selectedRealId = nil
+                selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
+                selectedFriendFootprintID = nil
+                viewModel.releaseRetainedActiveFeedItem()
+
+                if flow == .personStory { poiTransitionSourceID = nil }
+                presentQueuedPublisherIfNeeded()
+            }
+
             ZStack(alignment: .top) {
                 MapReader { mapProxy in
                     let selectFriendFootprint: (MapTalkFriendFootprint) -> Void = { tapped in
-                        finishFriendStory(restoreMap: false)
-                        viewModel.cancelPendingLocationFocus()
-                        let nextID = FriendFootprintTapSelectionPolicy.nextID(
-                            tappedID: tapped.id,
-                            selectedID: selectedFriendFootprintID,
-                            visibleFootprints: viewModel.friendFootprints
-                        )
-                        let footprint = viewModel.friendFootprints.first {
-                            $0.id == nextID
-                        } ?? tapped
+                        cardPresentation.perform(in: .personStory) {
+                            poiTransitionSourceID = .footprint(tapped.id)
+                            finishFriendStory(restoreMap: false)
+                            viewModel.cancelPendingLocationFocus()
+                            let nextID = FriendFootprintTapSelectionPolicy.nextID(
+                                tappedID: tapped.id,
+                                selectedID: selectedFriendFootprintID,
+                                visibleFootprints: viewModel.friendFootprints
+                            )
+                            let footprint = viewModel.friendFootprints.first {
+                                $0.id == nextID
+                            } ?? tapped
 
-                        flushPendingViewedStory(nil)
-                        viewModel.releaseRetainedActiveFeedItem()
-                        selectedRealId = nil
-                        selectedStoryId = nil
-                        let feedback = UISelectionFeedbackGenerator()
-                        feedback.prepare()
-                        feedback.selectionChanged()
-                        withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
-                            selectedFriendFootprintID = footprint.id
+                            flushPendingViewedStory(nil)
+                            viewModel.releaseRetainedActiveFeedItem()
+                            selectedRealId = nil
+                            selectedStoryId = nil
+                            let feedback = UISelectionFeedbackGenerator()
+                            feedback.prepare()
+                            feedback.selectionChanged()
+                            withAnimation(.snappy(duration: 0.18, extraBounce: 0)) {
+                                selectedFriendFootprintID = footprint.id
+                            }
+                            keepFriendFootprintVisible(
+                                footprint: footprint,
+                                projectedPoint: mapProxy.convert(
+                                    footprint.coordinate,
+                                    to: .local
+                                ),
+                                using: mapProxy,
+                                canvasSize: geometry.size,
+                                topChromeBottom: friendFootprintTopExclusion
+                            )
+                            activeExperience = .friendPlace(
+                                rated: footprint.ratedPOI,
+                                sourceID: footprint.id,
+                                nonce: UUID()
+                            )
+                            experiencePresentation.presentNewContent()
                         }
-                        keepFriendFootprintVisible(
-                            footprint: footprint,
-                            projectedPoint: mapProxy.convert(
-                                footprint.coordinate,
-                                to: .local
-                            ),
-                            using: mapProxy,
-                            canvasSize: geometry.size,
-                            topChromeBottom: friendFootprintTopExclusion
-                        )
-                        activeExperience = .friendPlace(
-                            rated: footprint.ratedPOI,
-                            sourceID: footprint.id,
-                            nonce: UUID()
-                        )
-                        experiencePresentation.presentNewContent()
                     }
 
                     Map(position: Binding(get: { cameraPosition }, set: { position in
@@ -520,7 +815,8 @@ struct MapTalkView: View {
                                 allowsCompactActivation: {
                                     friendFootprintInteractionGate.allowsCompactTap()
                                 },
-                                onTap: selectFriendFootprint
+                                onTap: selectFriendFootprint,
+                                poiTransitionNamespace: cardEntryTransitionNamespace
                             )
                         }
 
@@ -537,53 +833,71 @@ struct MapTalkView: View {
                             isRealUnseen: isRealUnseen,
                             isPOIUnseen: isPOIUnseen,
                             onTapReal: { real in
-                                finishFriendStory(restoreMap: false)
-                                viewModel.cancelPendingLocationFocus()
-                                if let item = storyItemForReal(real) {
-                                    selectStoryItem(item, true, false, nil)
-                                    reelAlignTrigger &+= 1
-                                    return
-                                }
+                                cardPresentation.perform(in: .personStory) {
+                                    if isProfilePostBrowsing, focusedJourneyHeader == nil {
+                                        profilePlacePreview = nil
+                                    }
+                                    poiTransitionSourceID = .reel(real.id)
+                                    finishFriendStory(restoreMap: false)
+                                    viewModel.cancelPendingLocationFocus()
+                                    if let item = storyItemForReal(real) {
+                                        selectStoryItem(item, true, false, nil)
+                                        reelAlignTrigger &+= 1
+                                        return
+                                    }
 
-                                flushPendingViewedStory(nil)
-                                viewModel.releaseRetainedActiveFeedItem()
-                                selectedFriendFootprintID = nil
-                                selectedRealId = real.id
-                                selectedStoryId = real.id
-                                activeExperience = .real(real: real, nonce: UUID())
-                                experiencePresentation.presentNewContent()
+                                    flushPendingViewedStory(nil)
+                                    viewModel.releaseRetainedActiveFeedItem()
+                                    selectedFriendFootprintID = nil
+                                    selectedRealId = real.id
+                                    selectedStoryId = real.id
+                                    activeExperience = .real(real: real, nonce: UUID())
+                                    configureProfileCardHeight()
+                                    experiencePresentation.presentNewContent()
+                                }
                             },
                             onTapPOI: { rated in
-                                finishFriendStory(restoreMap: false)
-                                viewModel.cancelPendingLocationFocus()
-                                if let item = storyItemForPOI(rated) {
-                                    selectStoryItem(item, true, false, nil)
-                                    // A map pin asks about the place, while the
-                                    // profile rail and pager browse its owner's visits.
-                                    if viewModel.isUserScope {
-                                        poiOverviewID = rated.id
+                                cardPresentation.perform(in: .personStory) {
+                                    if isProfilePostBrowsing, focusedJourneyHeader == nil {
+                                        flushPendingViewedStory(nil)
+                                        openProfilePlace(rated, focus: false)
+                                        return
                                     }
-                                    reelAlignTrigger &+= 1
-                                    return
-                                }
+                                    poiTransitionSourceID = .place(rated.id)
+                                    finishFriendStory(restoreMap: false)
+                                    viewModel.cancelPendingLocationFocus()
+                                    if let item = storyItemForPOI(rated) {
+                                        selectStoryItem(item, true, false, nil)
+                                        // A map pin asks about the place, while the
+                                        // profile rail and pager browse its owner's visits.
+                                        if viewModel.isUserScope {
+                                            poiOverviewID = rated.id
+                                        }
+                                        reelAlignTrigger &+= 1
+                                        return
+                                    }
 
-                                // The map keeps older public places visible even
-                                // after they leave the 24-hour story shelf. They
-                                // still open as places; they just do not join the
-                                // horizontal story sequence again.
-                                flushPendingViewedStory(nil)
-                                viewModel.releaseRetainedActiveFeedItem()
-                                pendingViewedStoryKey = nil
-                                selectedFriendFootprintID = nil
-                                selectedRealId = nil
-                                selectedStoryId = rated.id
-                                activeExperience = .poi(rated: rated, nonce: UUID())
-                                experiencePresentation.presentNewContent()
+                                    // The map keeps older public places visible even
+                                    // after they leave the 24-hour story shelf. They
+                                    // still open as places; they just do not join the
+                                    // horizontal story sequence again.
+                                    flushPendingViewedStory(nil)
+                                    viewModel.releaseRetainedActiveFeedItem()
+                                    pendingViewedStoryKey = nil
+                                    selectedFriendFootprintID = nil
+                                    selectedRealId = nil
+                                    selectedStoryId = rated.id
+                                    activeExperience = .poi(rated: rated, nonce: UUID())
+                                    configureProfileCardHeight()
+                                    experiencePresentation.presentNewContent()
+                                }
                             },
-                            showsSelectedReelRangeOnly: usesFriendStories && focusedJourneyHeader == nil
+                            showsSelectedReelRangeOnly: usesFriendStories && focusedJourneyHeader == nil,
+                            poiTransitionNamespace: cardEntryTransitionNamespace
                         )
                     }
                     .mapStyle(mapLayer.mapStyle)
+                    .environment(\.colorScheme, mapColorScheme)
                     .ignoresSafeArea()
                     .accessibilityIdentifier("maptalk.map-canvas")
                     .accessibilityValue(currentCamera.map {
@@ -696,18 +1010,22 @@ struct MapTalkView: View {
                             Group {
                                 if let scopedUser = viewModel.scopedUser {
                                     ProfileMapIdentityBadge(user: scopedUser)
-                                        .environment(\.colorScheme, mapLayer == .satellite ? .dark : colorScheme)
+                                        .environment(\.colorScheme, usesLightMapChrome ? .dark : .light)
                                 } else {
-                                    MapTalkHandwrittenBadge(usesLightInk: mapLayer == .satellite)
+                                    MapTalkHandwrittenBadge(usesLightInk: usesLightMapChrome)
                                 }
                             }
+                            .allowsHitTesting(false)
 
                             if viewModel.scopedUser == nil {
                                 HStack {
+                                    PostPublishButton(action: {
+                                        requestPublish(.reel)
+                                    }, usesLightInk: usesLightMapChrome)
                                     Spacer()
                                     MapTalkActivityButton(
                                         unreadCount: unreadActivityCount,
-                                        usesDarkMaterial: mapLayer == .satellite
+                                        usesDarkMaterial: usesLightMapChrome
                                     ) {
                                         requestActivity()
                                     }
@@ -745,12 +1063,12 @@ struct MapTalkView: View {
                                 selectedAuthorID: isBrowsingPostPreview ? nil
                                     : friendStoryNavigation.session?.currentGroup?.authorID,
                                 userProvider: viewModel.user(for:),
-                                isUnseen: { group in group.readKeys.contains { !storyReadStore.isViewed($0) } },
+                                isUnseen: { group in group.poiReadKeys.contains { !storyReadStore.isViewed($0) } },
                                 onSelect: { authorID in
                                     openFriendStory(authorID: authorID, groups: friendGroups, geometry: geometry)
                                 },
-                                alignTrigger: reelAlignTrigger,
-                                usesLightLabels: mapLayer == .satellite
+                                usesLightLabels: usesLightMapChrome,
+                                transitionNamespace: cardEntryTransitionNamespace
                             )
                         }
                     } else if storyItems.isEmpty == false {
@@ -759,7 +1077,11 @@ struct MapTalkView: View {
                             selectedId: selectedStoryId,
                             onSelectReal: { real in
                                 guard let item = storyItemForReal(real) else { return }
-                                selectStoryItem(item, true, true, nil)
+                                cardPresentation.perform(in: .personStory) {
+                                    poiTransitionSourceID = .story(item.id)
+                                    finishFriendStory(restoreMap: false)
+                                    selectStoryItem(item, true, true, nil)
+                                }
                             },
                             onSelectPOIGroup: { group in
 #if DEBUG
@@ -767,15 +1089,21 @@ struct MapTalkView: View {
                                 print("[MapTalkView] Row tap poi=\(group.poiName) id=\(group.ratedPOI.id) topSharer=\(userHandle) hasRecent=\(group.ratedPOI.hasRecentPhotoShare)")
 #endif
                                 if let item = storyItemForPOI(group.ratedPOI) {
-                                    selectStoryItem(item, true, true, nil)
+                                    cardPresentation.perform(in: .personStory) {
+                                        poiTransitionSourceID = .story(item.id)
+                                        finishFriendStory(restoreMap: false)
+                                        selectStoryItem(item, true, true, nil)
+                                    }
                                 }
                             },
                             onSelectJourney: { _ in },
                             userProvider: viewModel.user(for:),
                             alignTrigger: reelAlignTrigger,
                             displayMode: viewModel.isUserScope ? .content : .people,
+                            usesPostMediaCollage: viewModel.isUserScope,
                             isUnseen: isStoryUnseen,
-                            usesLightLabels: mapLayer == .satellite
+                            usesLightLabels: usesLightMapChrome,
+                            transitionNamespace: cardEntryTransitionNamespace
                         )
                     }
                 }
@@ -797,22 +1125,43 @@ struct MapTalkView: View {
                                     endPoint: .bottom
                                 )
                             }
+                            .allowsHitTesting(false)
                     }
                 }
+                .environment(\.colorScheme, mapColorScheme)
                 .ignoresSafeArea(edges: .top)
                 .opacity(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded && !isBrowsingPostPreview) ? 1 : 0)
                 .allowsHitTesting(publishDestination == nil && !(friendStoryNavigation.isActive && experiencePresentation.isExpanded && !isBrowsingPostPreview))
                 .animation(.easeOut(duration: 0.16), value: publishDestination)
                 .animation(.easeOut(duration: 0.16), value: experiencePresentation.isExpanded)
 
-                if showsPostPreviewEntry, let page = previewPage, case let .reel(post) = page.content {
-                    MapTalkPostCoverEntry(post: post,
+                // Keep the draggable entry's state while the sheet is open.
+                if hasPostPreviewEntry {
+                    MapTalkPostCoverEntry(post: previewPost,
                         isResuming: postPreviewResumePageID != nil,
-                        isActive: false,
+                        isActive: postSurfaceMounted,
+                        isReturning: postSurfaceReturning,
+                        needsCardClearance: cardPresentation.mountedFlow == .personStory
+                            && cardPresentation.closingContent == nil,
                         canvasSize: geometry.size,
-                        bottomInset: controlsBottomPadding) {
-                            resumePostPreview(pageID: page.id, geometry: geometry)
+                        idleBottomInset: baseControlsPadding,
+                        bottomInset: controlsBottomPadding,
+                        position: $postEntryPosition,
+                        excludedFrame: mapControlsFrame.isEmpty ? .null : mapControlsFrame.offsetBy(
+                            dx: -geometry.frame(in: .global).minX,
+                            dy: -geometry.frame(in: .global).minY),
+                        topInset: friendFootprintTopExclusion) {
+                            if let page = previewPage {
+                                resumePostPreview(pageID: page.id, geometry: geometry)
+                            } else {
+                                viewModel.refreshPosts()
+                            }
                     }
+                    // Keep its placement/float state and zoom anchor alive when
+                    // covered by an expanded POI, a publisher or another modal.
+                    .opacity(showsPostPreviewEntry || postSurfaceMounted ? 1 : 0)
+                    .allowsHitTesting(showsPostPreviewEntry)
+                    .accessibilityHidden(!showsPostPreviewEntry)
                     .zIndex(1)
                 }
 
@@ -824,7 +1173,18 @@ struct MapTalkView: View {
                             MapTalkControls(
                                 mapLayer: $mapLayer,
                                 onTapLocate: {
-                                    finishFriendStory(restoreMap: false)
+                                    profilePlacePreview = nil
+                                    // Keep the departing card's live content
+                                    // intact until native dismissal completes.
+                                    if !cardPresentation.isMounted {
+                                        finishFriendStory(restoreMap: false)
+                                        selectedRealId = nil
+                                        selectedStoryId = nil
+                                        activeExperience = nil
+                                        flushPendingViewedStory(nil)
+                                        viewModel.releaseRetainedActiveFeedItem()
+                                    }
+                                    flightController.cancelActiveTransition()
                                     if let region = currentRegion,
                                        let coordinate = viewModel.userCoordinate,
                                        region.center.distance(to: coordinate) < 500 {
@@ -832,23 +1192,16 @@ struct MapTalkView: View {
                                     } else {
                                         pendingRegionCause = .user
                                     }
-                                    selectedRealId = nil
-                                    selectedStoryId = nil
-                                    activeExperience = nil
-                                    experiencePresentation.dismiss()
-                                    flushPendingViewedStory(nil)
-                                    viewModel.releaseRetainedActiveFeedItem()
+                                    cardPresentation.dismiss()
                                     viewModel.centerOnUser()
                                 },
                                 onTapPlace: {
                                     requestPublish(.place)
                                 },
-                                onTapReel: {
-                                    requestPublish(.reel)
-                                },
                                 showsPublishActions: viewModel.isUserScope == false,
                                 usesPostPreviewLayout: showsSocialFeedPreview
                             )
+                            .environment(\.colorScheme, mapColorScheme)
                             .onGeometryChange(for: CGRect.self) { controlsGeometry in
                                 controlsGeometry.frame(in: .global)
                             } action: { frame in
@@ -863,193 +1216,20 @@ struct MapTalkView: View {
                     }
                 }
             }
-            .sheet(isPresented: $experiencePresentation.isPresented, onDismiss: {
-                guard experiencePresentation.didDismiss() == false else { return }
-                if friendStoryNavigation.isActive { finishFriendStory(restoreMap: true) }
-                flushPendingViewedStory(nil)
-                selectedRealId = nil
-                selectedStoryId = focusedJourneyHeader != nil ? storyItems.first?.id : nil
-                selectedFriendFootprintID = nil
-                viewModel.releaseRetainedActiveFeedItem()
-
-                presentQueuedPublisherIfNeeded()
-            }) {
-                let isExpanded = experiencePresentation.isExpanded
-                let shouldAnimateSelection = isExpanded == false
-
-                let content: AnyView = {
-                    if friendStoryNavigation.isActive {
-                        return AnyView(FriendStoryFlow(
-                            navigation: friendStoryNavigation,
-                            detent: $experiencePresentation.detent,
-                            compactDetent: experiencePresentation.compactDetent,
-                            viewedKeys: storyReadStore.viewedKeys,
-                            userProvider: viewModel.user(for:),
-                            journeyProvider: viewModel.journey(for:),
-                            placeProvider: friendStoryPlace,
-                            captureCamera: friendStoryMapSnapshot,
-                            restoreCamera: restoreFriendStoryCamera,
-                            focusPage: { page in focusFriendStoryPage(page, geometry: geometry) },
-                            focusContent: { mode in focusFriendStoryContent(mode, geometry: geometry) },
-                            onRead: { storyReadStore.markViewed($0) },
-                            onClose: {
-                                // Keep the current card mounted until native
-                                // dismissal completes, then restore the map.
-                                experiencePresentation.dismiss(preservingDetent: true)
-                            },
-                            allowsPlayback: mapWorkEnabled && !isActivityOverExperiencePresented,
-                            feedPresentation: isBrowsingPostPreview ? .posts : .personStory
-                        ))
-                    }
-                    switch activeExperience {
-                    case let .sequence(nonce):
-                        if sequenceItems.isEmpty == false {
-                            let pager = ExperienceDetailView.SequencePager(items: sequenceItems)
-                            let selectionBinding: Binding<UUID>
-                            if focusedJourneyHeader != nil {
-                            selectionBinding = Binding<UUID>(
-                                get: {
-                                    if let current = selectedStoryId,
-                                       sequenceItems.contains(where: { $0.id == current }) {
-                                        return current
-                                    }
-                                    return sequenceItems.first!.id
-                                },
-                                set: { newValue in
-                                    if suppressJourneySelectionUpdate {
-                                        suppressJourneySelectionUpdate = false
-                                        return
-                                    }
-                                    guard newValue != selectedStoryId else { return }
-                                    selectedStoryId = newValue
-                                    if let item = storyItemForId(newValue) {
-                                        selectStoryItem(item, false, true, nil)
-                                    }
-                                    reelAlignTrigger += 1
-                                }
-                            )
-                        } else {
-                                selectionBinding = Binding<UUID>(
-                                    get: {
-                                        if let current = selectedStoryId,
-                                           sequenceItems.contains(where: { $0.id == current }) {
-                                            return current
-                                        }
-                                        return sequenceItems.first!.id
-                                    },
-                                    set: { newValue in
-                                        guard newValue != selectedStoryId else { return }
-                                        guard let item = storyItemForId(newValue) else { return }
-                                        if shouldAnimateSelection {
-                                            selectStoryItem(item, false, true, nil)
-                                        } else {
-                                            selectStoryItem(item, false, false, .other)
-                                            if let region = region(for: item) {
-                                                currentRegion = region
-                                                cameraPosition = .region(region)
-                                            }
-                                        }
-                                        reelAlignTrigger += 1
-                                    }
-                                )
-                            }
-
-                            return AnyView(
-                                MapExperienceCapsule(
-                                    pager: pager,
-                                    selection: selectionBinding,
-                                    isExpanded: isExpanded,
-                                    poiBrowsingUserID: viewModel.scopedUser?.id,
-                                    poiOverviewID: poiOverviewID,
-                                    onCollapsedTap: experiencePresentation.expand,
-                                    journeyProvider: viewModel.journey(for:),
-                                    userProvider: viewModel.user(for:),
-                                    onJourneyAvatarStackTap: { journey in
-                                        handleJourneyTap(journey, true, focusedJourneyHeader)
-                                    },
-                                    onPOIContributorViewed: markStoryReadKeysViewed,
-                                    isPOIContributorUnseen: isPOIContributorUnseen
-                                )
-                                .id(nonce)
-                            )
-                        } else {
-                            return AnyView(EmptyView())
-                        }
-                    case let .poi(rated: rated, nonce: nonce):
-                        return AnyView(
-                            ExperienceDetailView(
-                                ratedPOI: rated,
-                                isExpanded: isExpanded,
-                                onCollapsedTap: experiencePresentation.expand,
-                                userProvider: viewModel.user(for:),
-                                onPOIContributorViewed: markStoryReadKeysViewed,
-                                isPOIContributorUnseen: isPOIContributorUnseen
-                            )
-                            .id("\(rated.id)-\(nonce)")
-                        )
-                    case let .real(real: real, nonce: nonce):
-                        let pager = ExperienceDetailView.SequencePager(
-                            items: [
-                                .init(
-                                    id: real.id,
-                                    mode: .real(real, viewModel.user(for: real.userId))
-                                )
-                            ]
-                        )
-                        return AnyView(
-                            ExperienceDetailView(
-                                sequencePager: pager,
-                                selection: .constant(real.id),
-                                isExpanded: isExpanded,
-                                onCollapsedTap: experiencePresentation.expand,
-                                onJourneyAvatarStackTap: { journey in
-                                    handleJourneyTap(journey, true, focusedJourneyHeader)
-                                },
-                                journeyProvider: viewModel.journey(for:),
-                                userProvider: viewModel.user(for:)
-                            )
-                            .id("\(real.id)-\(nonce)")
-                        )
-                    case let .friendPlace(rated: rated, sourceID: sourceID, nonce: nonce):
-                        return AnyView(
-                            ExperienceDetailView(
-                                ratedPOI: rated,
-                                isExpanded: isExpanded,
-                                onCollapsedTap: experiencePresentation.expand,
-                                userProvider: viewModel.user(for:),
-                                onPOIContributorViewed: markStoryReadKeysViewed,
-                                isPOIContributorUnseen: isPOIContributorUnseen
-                            )
-                            .accessibilityIdentifier("maptalk.friend-place-preview")
-                            .id("\(sourceID)-\(nonce)")
-                        )
-                    default:
-                        return AnyView(EmptyView())
-                    }
-                }()
-
-                content
-                    .id(experiencePresentation.contentRevision)
-                    .background {
-                        if showsSocialFeedPreview {
-                            MapTalkSheetFrameReader { frame in
-                                guard experiencePresentation.isPresented,
-                                      !experiencePresentation.isExpanded,
-                                      frame.minY < geometry.frame(in: .global).maxY,
-                                      frame.height < geometry.size.height * 0.6 else { return }
-                                compactExperienceSheetFrame = frame
-                            }
-                        }
-                    }
-                    .environment(\.friendStoryPlaybackEnabled, mapWorkEnabled)
-                    .modifier(FriendStorySheetChrome(presentation: experiencePresentation,
-                                                     navigation: friendStoryNavigation,
-                                                     feedPresentation: isBrowsingPostPreview ? .posts : .personStory))
-                    .fullScreenCover(isPresented: $isActivityOverExperiencePresented) {
-                        activityContent
-                            .presentationBackground(Color(.systemBackground))
-                    }
-            }
+            .environment(\.mapTalkCardSources, viewModel.isUserScope ? nil : cardPresentation.sources)
+            .modifier(MapTalkExperienceSheetHost(isProfile: viewModel.isUserScope,
+                presentation: cardPresentation,
+                compactFraction: activePreviewFraction,
+                expandedTopInset: friendStoryNavigation.isActive
+                    && ((cardPresentation.activeFlow == .personStory && friendStoryNavigation.routes.isEmpty)
+                        || friendStoryNavigation.isBrowsingBubble)
+                    ? FriendStoryLayout.floatingHeight : 0,
+                selectedSource: cardPresentation.activeFlow == .posts
+                    ? .posts : poiTransitionSourceID.map(MapTalkCardTransitionID.poi),
+                usesPostBackdrop: cardPresentation.activeFlow == .posts
+                    && friendStoryNavigation.routes.isEmpty,
+                sheetContent: experienceSheet(cardPresentation.activeFlow, cardPresentation.current),
+                onDismiss: { finishExperienceSheet(cardPresentation.activeFlow) }))
             .overlay(alignment: .top) {
                 if let publishAcknowledgement {
                     Label(publishAcknowledgement, systemImage: "checkmark.circle.fill")
@@ -1076,6 +1256,13 @@ struct MapTalkView: View {
                     } ?? [],
                     isLoadingNearbyPlaces: viewModel.isLoadingNearbyPlaces,
                     nearbyPlaceIssue: viewModel.nearbyPlaceIssue,
+                    postLocationChoices: viewModel.publishableLiveLocation.map {
+                        viewModel.postLocationChoices(near: $0)
+                    } ?? [],
+                    liveLocationKey: viewModel.publishableLiveLocation.map {
+                        String(format: "%.3f,%.3f", $0.coordinate.latitude, $0.coordinate.longitude)
+                    } ?? "unavailable",
+                    liveLocation: viewModel.publishableLiveLocation,
                     folders: environment.myMapArchive.journeyFolders,
                     myMapRecords: myMapBubbleRecords,
                     currentUserID: environment.myMapArchive.currentUserID,
@@ -1094,7 +1281,8 @@ struct MapTalkView: View {
                         )
                     },
                     onSearchNearbyPlaces: searchNearbyPlaces,
-                    onRetryNearbyPlaces: { viewModel.refreshNearbyPlaces() }
+                    onRetryNearbyPlaces: { viewModel.refreshNearbyPlaces() },
+                    onSearchPostLocations: viewModel.searchPostLocations
                 )
                 .presentationDetents([.fraction(0.84)])
                 .presentationDragIndicator(.hidden)
@@ -1170,7 +1358,7 @@ struct MapTalkView: View {
                     selectedStoryId = nil
                     if case .sequence = activeExperience {
                         activeExperience = nil
-                        experiencePresentation.dismiss()
+                        cardPresentation.dismiss()
                     }
                     flushPendingViewedStory(nil)
                     return
@@ -1186,6 +1374,12 @@ struct MapTalkView: View {
                     selectedStoryId = nil
                     selectedRealId = nil
                 }
+                applyInitialStorySelectionIfNeeded()
+            }
+            .onChangeCompat(of: allProfileStoryItems.map(\.id)) { _ in
+                // A saved POI link may arrive without any Posts. Its source
+                // still exists even though it is no longer in the Post pager.
+                guard viewModel.isUserScope else { return }
                 applyInitialStorySelectionIfNeeded()
             }
             .onChangeCompat(of: scenePhase) { phase in
@@ -1206,15 +1400,21 @@ struct MapTalkView: View {
                 }
             }
             .onChange(of: friendStoryRevision(allFriendGroups)) { _, _ in
-                guard mapWorkEnabled else { return }
+                guard mapWorkEnabled, !isBrowsingPostPreview else { return }
+                reconcileFriendStories(geometry: geometry)
+            }
+            .onChange(of: friendStoryRevision(postGroups)) { _, _ in
+                guard mapWorkEnabled, isBrowsingPostPreview else { return }
                 reconcileFriendStories(geometry: geometry)
             }
             .onChange(of: environment.currentUser.id) { _, accountID in
+                profilePlacePreview = nil
                 if friendStoryNavigation.isActive {
                     finishFriendStory(restoreMap: false)
-                    experiencePresentation.dismiss()
+                    cardPresentation.dismiss()
                 }
                 postPreviewResumePageID = nil
+                postEntryPosition = nil
                 previewStoryResumePageIDs = [:]
                 storyReadStore.configure(accountID: accountID,
                     server: environment.backend?.api.baseURL.absoluteString ?? "preview")
@@ -1273,7 +1473,7 @@ struct MapTalkView: View {
                         selectedStoryId = nil
                         selectedRealId = nil
                         activeExperience = nil
-                        experiencePresentation.dismiss()
+                        cardPresentation.dismiss()
                     }
                 case let .reel(real):
                     guard !viewModel.withdrawnPublicMemoryIDs.contains(real.id) else {
@@ -1286,6 +1486,7 @@ struct MapTalkView: View {
                     pendingRegionCause = .real
                     viewModel.focus(on: real)
                     activeExperience = .real(real: real, nonce: UUID())
+                    configureProfileCardHeight()
                     experiencePresentation.presentNewContent()
                 case let .poi(rated):
                     guard let rated = viewModel.removingWithdrawnVisits(from: rated) else {
@@ -1298,6 +1499,7 @@ struct MapTalkView: View {
                     pendingRegionCause = .poi
                     viewModel.focus(on: rated)
                     activeExperience = .poi(rated: rated, nonce: UUID())
+                    configureProfileCardHeight()
                     experiencePresentation.presentNewContent()
                 }
             }
@@ -1308,9 +1510,15 @@ struct MapTalkView: View {
                 let target = isActive ? previewControlsPadding : baseControlsPadding
                 setControlsPaddingForPresentation(target)
             }
+            .onChangeCompat(of: cardPresentation.closingContent != nil) { isClosing in
+                // Move the dock with the start of a native return, not a
+                // second time after its completion. A cancelled pull restores
+                // clearance for the card that remains on screen.
+                setControlsPaddingForPresentation(isClosing || !cardPresentation.isPresented
+                    ? baseControlsPadding : previewControlsPadding)
+            }
             .onChangeCompat(of: experiencePresentation.detent) { detent in
                 if friendStoryNavigation.isActive,
-                   !(showsSocialFeedPreview && isBrowsingPostPreview),
                    detent == experiencePresentation.compactDetent,
                    let page = friendStoryNavigation.session?.currentPage,
                    friendStoryNavigation.routes.isEmpty {
@@ -1323,8 +1531,6 @@ struct MapTalkView: View {
                 }
             }
             .onChangeCompat(of: geometry.size) { _ in
-                compactExperienceSheetFrame = .null
-                experiencePresentation.configureCompactDetent(.fraction(activePreviewFraction))
                 controlsBottomPadding = experiencePresentation.isPresented
                     ? previewControlsPadding : baseControlsPadding
                 if friendStoryNavigation.isActive, friendStoryNavigation.routes.isEmpty,
@@ -1332,16 +1538,16 @@ struct MapTalkView: View {
                     focusFriendStoryPage(page, geometry: geometry)
                 }
             }
-            .onChangeCompat(of: activePreviewFraction) { fraction in
-                compactExperienceSheetFrame = .null
-                experiencePresentation.configureCompactDetent(.fraction(fraction))
+            .onChangeCompat(of: activePreviewFraction) { _ in
+                configureProfileCardHeight()
             }
             .onChangeCompat(of: baseControlsPadding) { newValue in
                 guard experiencePresentation.isPresented == false else { return }
                 controlsBottomPadding = newValue
             }
             .onChangeCompat(of: previewControlsPadding) { newValue in
-                guard experiencePresentation.isPresented else { return }
+                guard experiencePresentation.isPresented,
+                      cardPresentation.closingContent == nil else { return }
                 setControlsPaddingForPresentation(newValue)
             }
             .onChangeCompat(of: viewModel.mode) { _ in
@@ -1352,16 +1558,63 @@ struct MapTalkView: View {
 }
 
 private extension MapTalkView {
+    var isProfilePostBrowsing: Bool {
+        viewModel.isUserScope && profileBrowsingMode == .posts
+    }
+
+    /// View Map explores all public memories; a Post row stays in Post history.
+    /// The rail, pager and compact-card height resolve from the same scope.
+    var rootStoryItems: [RealStoriesRow.StoryItem] {
+        guard isProfilePostBrowsing else { return viewModel.activeFeedItems }
+        return viewModel.activeFeedItems.filter {
+            if case .real = $0.source { return true }
+            return false
+        }
+    }
+
+    var profileShowsPostCard: Bool {
+        guard viewModel.isUserScope else { return false }
+        switch activeExperience {
+        case .real:
+            return true
+        case .sequence:
+            let items = focusedJourneyHeader.map {
+                MapJourneyScope(journey: $0, userProvider: viewModel.user(for:)).storyItems
+            } ?? rootStoryItems
+            guard let item = items.first(where: { $0.id == selectedStoryId }) ?? items.first else {
+                return false
+            }
+            if case .real = item.source { return true }
+            return false
+        default:
+            return false
+        }
+    }
+
+    func configureProfileCardHeight() {
+        guard viewModel.isUserScope else { return }
+        // The stable paging stage owns in-flight height interpolation. The
+        // navigation model only commits a compact height once a page lands.
+        if !profileCardMotion.isPaging {
+            profileCardMotion.setCompactFraction(activePreviewFraction,
+                animated: cardPresentation.poi.isPresented)
+        }
+        cardPresentation.poi.configureCompactDetent(.fraction(activePreviewFraction))
+    }
+
     var activePreviewFraction: CGFloat {
-        // Only the root Posts card gets more reading room. POIs and Bubble
-        // routes keep their original map/card balance, including on return.
-        showsSocialFeedPreview && isBrowsingPostPreview && friendStoryNavigation.routes.isEmpty
+        if viewModel.isUserScope {
+            return profileShowsPostCard ? ControlsLayout.postPreviewFraction : ControlsLayout.previewFraction
+        }
+        if let fraction = friendStoryNavigation.bubbleCompactFraction { return fraction }
+        // Outside a Bubble, the two home feeds retain their independent sizes.
+        return cardPresentation.activeFlow == .posts
             ? ControlsLayout.postPreviewFraction : ControlsLayout.previewFraction
     }
 
     func setControlsPaddingForPresentation(_ padding: CGFloat) {
         guard abs(controlsBottomPadding - padding) >= 1 else { return }
-        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
             controlsBottomPadding = padding
         }
     }
@@ -1423,13 +1676,12 @@ private extension MapTalkView {
         guard showsSocialFeedPreview, mapWorkEnabled,
               publishDestination == nil, queuedPublishDestination == nil,
               !isActivityPresented, !isActivityOverExperiencePresented else { return false }
-        let groups = previewGroups(friendStoryGroups, posts: true)
+        let groups = postFeedGroups
         guard let page = MapTalkPostEntryPage.resolve(in: groups, resumePageID: pageID) else {
             return false
         }
-        if !isBrowsingPostPreview, let origin = friendStoryNavigation.origin {
-            restoreFriendStoryCamera(origin)
-        }
+        // Fly from the visible map. The original return camera stays stored
+        // in navigation; restoring it here would teleport before the flight.
         openFriendStory(authorID: page.authorID, groups: groups,
             geometry: geometry, postPreviewPageID: page.id)
         return true
@@ -1460,6 +1712,15 @@ private extension MapTalkView {
             reals: viewModel.activityReels,
             ratedPOIs: viewModel.activityPOIs,
             backendRecords: viewModel.friendStoryRecords,
+            viewedKeys: storyReadStore.viewedKeys,
+            userProvider: viewModel.user(for:)
+        )
+    }
+
+    var postFeedGroups: [FriendStoryGroup] {
+        FriendStoryFeed.postGroups(
+            reals: viewModel.postFeedRecords == nil ? viewModel.activityReels : viewModel.postFeedReels,
+            backendRecords: viewModel.postFeedRecords,
             viewedKeys: storyReadStore.viewedKeys,
             userProvider: viewModel.user(for:)
         )
@@ -1512,21 +1773,103 @@ private extension MapTalkView {
         currentCamera = snapshot.camera
     }
 
+    /// Profile places are a temporary map detail, not another page in the
+    /// author's Post history. Repeated pin taps keep the first return point.
+    func openProfilePlace(_ rated: RatedPOI, focus: Bool) {
+        guard isProfilePostBrowsing, focusedJourneyHeader == nil,
+              let place = viewModel.publicPlaceDetails(id: rated.id, latestPublicPlace: rated) else { return }
+        if profilePlacePreview == nil {
+            let postID = experiencePresentation.isPresented && profileShowsPostCard
+                ? selectedRealId : nil
+            profilePlacePreview = ProfilePlacePreview(
+                returnPostID: postID,
+                returnWasExpanded: experiencePresentation.isExpanded,
+                returnCamera: friendStoryMapSnapshot()
+            )
+        }
+        viewModel.cancelPendingLocationFocus()
+        flightController.cancelActiveTransition()
+        poiTransitionSourceID = .place(place.id)
+        poiOverviewID = place.id
+        pendingViewedStoryKey = nil
+        selectedFriendFootprintID = nil
+        selectedRealId = nil
+        selectedStoryId = place.id
+        activeExperience = .poi(rated: place, nonce: UUID())
+        profileCardMotion.isPaging = false
+        configureProfileCardHeight()
+        if focus {
+            pendingRegionCause = .poi
+            viewModel.focus(on: place)
+        }
+        experiencePresentation.presentNewContent()
+    }
+
+    /// Both the close button and native swipe dismissal return to the same
+    /// still-public Post. Never resurrect an old selection from a closed card.
+    @discardableResult
+    func restoreProfilePostAfterPlace() -> Bool {
+        guard let preview = profilePlacePreview else { return false }
+        profilePlacePreview = nil
+        guard isProfilePostBrowsing, focusedJourneyHeader == nil,
+              let postID = preview.returnPostID,
+              !viewModel.withdrawnPublicMemoryIDs.contains(postID),
+              let post = viewModel.mapRenderReels(retaining: nil).first(where: { $0.id == postID }) else {
+            return false
+        }
+        viewModel.cancelPendingLocationFocus()
+        poiOverviewID = nil
+        poiTransitionSourceID = nil
+        selectedFriendFootprintID = nil
+        selectedStoryId = postID
+        selectedRealId = postID
+        if let item = viewModel.activeFeedItems.first(where: { $0.id == postID }),
+           case .real = item.source {
+            viewModel.retainActiveFeedItem(id: postID)
+            pendingViewedStoryKey = item.isFresh ? item.readKey : nil
+            activeExperience = .sequence(nonce: UUID())
+        } else {
+            viewModel.releaseRetainedActiveFeedItem()
+            pendingViewedStoryKey = nil
+            activeExperience = .real(real: post, nonce: UUID())
+        }
+        profileCardMotion.isPaging = false
+        configureProfileCardHeight()
+        restoreFriendStoryCamera(preview.returnCamera)
+        if preview.returnWasExpanded {
+            experiencePresentation.presentExpandedContent()
+        } else {
+            experiencePresentation.presentNewContent()
+        }
+        reelAlignTrigger &+= 1
+        return true
+    }
+
     func openFriendStory(authorID: UUID, groups: [FriendStoryGroup], geometry: GeometryProxy,
                          postPreviewPageID: String? = nil) {
-        let alreadyOpen = friendStoryNavigation.isActive
-        let wasBrowsingPosts = isBrowsingPostPreview
+        let flow: MapTalkFeedPresentation = showsSocialFeedPreview && postPreviewPageID != nil
+            ? .posts : .personStory
+        cardPresentation.perform(in: flow) {
+            guard mapWorkEnabled, publishDestination == nil, queuedPublishDestination == nil else { return }
+            if flow == .personStory { poiTransitionSourceID = .author(authorID) }
+            showFriendStory(authorID: authorID, groups: groups, geometry: geometry,
+                            postPreviewPageID: postPreviewPageID)
+        }
+    }
+
+    /// A root selection replaces content inside the existing card surface.
+    func showFriendStory(authorID: UUID, groups: [FriendStoryGroup], geometry: GeometryProxy,
+                         postPreviewPageID: String?) {
         rememberPreviewCursor()
         isBrowsingPostPreview = showsSocialFeedPreview && postPreviewPageID != nil
-        let isChangingFeed = wasBrowsingPosts != isBrowsingPostPreview
         viewModel.cancelPendingLocationFocus()
         pendingViewedStoryKey = nil
-        if let parent = friendStoryNavigation.routes.first {
-            restoreFriendStoryCamera(parent.returnCamera)
-            if !isChangingFeed {
-                experiencePresentation.detent = postPreviewPageID == nil && parent.returnDetent == .large
-                    ? .large : experiencePresentation.compactDetent
-            }
+        // Choosing a new root isn't Back, even within the same feed. Fly
+        // directly from the visible child; don't restore its parent first.
+        if !friendStoryNavigation.routes.isEmpty {
+            friendStoryNavigation.lastLocationKey = nil
+            friendStoryNavigation.lastViewportSize = nil
+            friendStoryNavigation.lastFocusedAuthorID = nil
         }
         friendStoryNavigation.begin(groups: groups, authorID: authorID,
             viewedKeys: storyReadStore.viewedKeys, origin: friendStoryMapSnapshot())
@@ -1540,15 +1883,11 @@ private extension MapTalkView {
         journeyEntry = nil
         journeyStack = []
         selectedFriendFootprintID = nil
-        if isChangingFeed { compactExperienceSheetFrame = .null }
-        // Compact-to-compact switches also need their own height; do not
-        // wait for a brand-new presentation to configure the native sheet.
-        experiencePresentation.configureCompactDetent(.fraction(activePreviewFraction))
-        if !alreadyOpen || !experiencePresentation.isPresented || isChangingFeed {
-            experiencePresentation.presentNewContent()
-        }
+        // An explicit root tap (avatar, Posts entry) follows the same policy
+        // as a map marker: start compact in place. Horizontal paging keeps
+        // its current detent and never goes through this root-opening path.
+        experiencePresentation.presentNewContent()
         focusFriendStoryPage(page, geometry: geometry)
-        reelAlignTrigger &+= 1
     }
 
     func finishFriendStory(restoreMap: Bool) {
@@ -1558,7 +1897,6 @@ private extension MapTalkView {
         flightController.cancelActiveTransition()
         if restoreMap, let origin = friendStoryNavigation.origin { restoreFriendStoryCamera(origin) }
         friendStoryNavigation.clear()
-        experiencePresentation.configureCompactDetent(.fraction(ControlsLayout.previewFraction))
         selectedStoryId = nil
         selectedRealId = nil
         selectedFriendFootprintID = nil
@@ -1570,13 +1908,18 @@ private extension MapTalkView {
     func reconcileFriendStories(geometry: GeometryProxy) {
         guard friendStoryNavigation.isActive else { return }
         let previousPage = friendStoryNavigation.session?.currentPage?.id
-        friendStoryNavigation.session?.invalidate(memoryIDs: viewModel.withdrawnPublicMemoryIDs)
-        let refreshedGroups = showsSocialFeedPreview
-            ? previewGroups(friendStoryGroups, posts: isBrowsingPostPreview) : friendStoryGroups
-        friendStoryNavigation.session?.reconcile(with: refreshedGroups)
+        friendStoryNavigation.session?.invalidate(memoryIDs: viewModel.withdrawnPublicMemoryIDs,
+            chronologicalPosts: isBrowsingPostPreview)
+        if isBrowsingPostPreview {
+            friendStoryNavigation.session?.reconcilePosts(with: postFeedGroups)
+        } else {
+            let refreshedGroups = showsSocialFeedPreview
+                ? previewGroups(friendStoryGroups, posts: false) : friendStoryGroups
+            friendStoryNavigation.session?.reconcile(with: refreshedGroups)
+        }
         guard let page = friendStoryNavigation.session?.currentPage else {
-            finishFriendStory(restoreMap: true)
-            experiencePresentation.dismiss()
+            finishFriendStory(restoreMap: false)
+            cardPresentation.dismiss()
             return
         }
         // A revoked member cannot survive through a previously opened child.
@@ -1620,12 +1963,12 @@ private extension MapTalkView {
 
     func focusFriendStoryPage(_ page: FriendStoryPage, geometry: GeometryProxy) {
         guard mapWorkEnabled else { return }
+        let previousStoryID = selectedStoryId
         if showsSocialFeedPreview && isBrowsingPostPreview && friendStoryNavigation.routes.isEmpty {
             postPreviewResumePageID = page.id
-            // Post browsing does not commandeer the map. Explicit Bubble
-            // navigation still uses the original focusContent route.
-            flightController.cancelActiveTransition()
-            return
+            viewModel.postFeedDidSelect(memoryID: page.memoryID)
+            // Posts keep their own cursor and pagination, but share the map
+            // camera: every selected Post should show where it happened.
         }
         switch page.content {
         case let .reel(reel):
@@ -1635,7 +1978,9 @@ private extension MapTalkView {
             selectedStoryId = place.id
             selectedRealId = nil
         }
-        reelAlignTrigger &+= 1
+        if selectedStoryId != previousStoryID || friendStoryNavigation.lastFocusedAuthorID != page.authorID {
+            reelAlignTrigger &+= 1
+        }
         guard let locationKey = page.locationKey else {
             // A location-less update must not finish the previous person's
             // delayed dive after the author has already changed.
@@ -1647,7 +1992,10 @@ private extension MapTalkView {
         }
         guard friendStoryNavigation.needsMapFocus(locationKey: locationKey,
             viewportSize: geometry.size, authorID: page.authorID) else { return }
-        let browsingCoordinates = friendStoryNavigation.session?.currentGroup?.pages.compactMap(\.coordinate)
+        // A chronological Post is one destination, not a route containing
+        // every place this author has ever published. POI story framing stays.
+        let browsingCoordinates = isBrowsingPostPreview ? nil
+            : friendStoryNavigation.session?.currentGroup?.pages.compactMap(\.coordinate)
         // Both detents share one selection and camera. Switching a post while
         // expanded must not leave the map at the previous post on return.
         friendStoryNavigation.lastLocationKey = locationKey
@@ -1678,9 +2026,11 @@ private extension MapTalkView {
             region = viewModel.region(for: place)
             cause = .poi
         case let .journey(journey):
+            let bubbleHeaderFraction = friendStoryNavigation.isBrowsingBubble
+                ? FriendStoryLayout.floatingHeight / max(1, geometry.size.height) : 0
             guard let target = MapJourneyCamera.target(for: journey, size: geometry.size,
                 safeAreaBottom: geometry.safeAreaInsets.bottom,
-                compactFraction: activePreviewFraction) else { return }
+                compactFraction: activePreviewFraction + bubbleHeaderFraction) else { return }
             flightController.cancelActiveTransition()
             withAnimation(.easeInOut(duration: 0.28)) { cameraPosition = .region(target.region) }
             currentRegion = target.region
@@ -1695,7 +2045,9 @@ private extension MapTalkView {
         let viewport = MapCameraViewport(size: canvasSize,
             topInset: MapTalkTopChromeLayout.height(safeAreaTop: geometry.safeAreaInsets.top, showsStories: true),
             bottomInset: geometry.size.height * activePreviewFraction
-                + geometry.safeAreaInsets.bottom + (isBrowsingPostPreview ? 0 : FriendStoryLayout.floatingHeight))
+                + geometry.safeAreaInsets.bottom
+                + (isBrowsingPostPreview && !friendStoryNavigation.isBrowsingBubble
+                    ? 0 : FriendStoryLayout.floatingHeight))
         flightController.handleRegionChange(currentRegion: currentRegion, targetRegion: region,
             cause: cause, viewport: viewport, browsingCoordinates: browsingCoordinates,
             cameraPosition: cameraPositionStore.commandBinding) { currentRegion = $0 }
@@ -1748,7 +2100,7 @@ private extension MapTalkView {
         selectedStoryId = nil
         selectedFriendFootprintID = nil
         activeExperience = nil
-        experiencePresentation.dismiss()
+        cardPresentation.dismiss()
         pendingViewedStoryKey = nil
     }
 
@@ -1840,14 +2192,11 @@ private extension MapTalkView {
                 friendCount: footprint.friendIDs.count
             )
         }
-        let primaryCoordinates = viewModel.mapRenderReels(
+        // Hidden home Post markers must not reserve space or suppress nearby POIs.
+        let primaryCoordinates = viewModel.mapRenderPOIs(
             retaining: selectedStoryId,
-            selectedMapReel: selectedStandaloneReel
-        ).map(\.center)
-            + viewModel.mapRenderPOIs(
-                retaining: selectedStoryId,
-                selectedMapPOI: selectedStandalonePOI
-            ).map(\.poi.coordinate)
+            selectedMapPOI: selectedStandalonePOI
+        ).map(\.poi.coordinate)
             + [viewModel.userCoordinate].compactMap { $0 }
         let reservedPoints = Array(
             primaryCoordinates.lazy.filter { coordinate in
@@ -1963,11 +2312,20 @@ private extension MapTalkView {
         destination: MapTalkPublishDestination,
         requestID: UUID
     ) async throws {
-        // Re-read the location at confirmation. The map may have been browsed
-        // elsewhere, but neither a Place nor a Reel inherits its coordinate.
-        guard let location = viewModel.publishLocation(for: destination) else {
+        // POI stays anchored to current GPS. Only an explicit Post choice can
+        // replace that coordinate; browsing the map never chooses it for you.
+        guard let liveLocation = viewModel.publishLocation(for: destination) else {
             environment.location.requestWhenInUse()
             throw BackendClientError.message("Finding your current location. Try again in a moment.")
+        }
+        let location: CLLocation
+        if case let .reel(post) = draft, let selected = post.location {
+            guard let chosenLocation = PostLocationPolicy.location(for: selected, near: liveLocation) else {
+                throw BackendClientError.message("This location is now more than 5 km away. Choose a nearby location.")
+            }
+            location = chosenLocation
+        } else {
+            location = liveLocation
         }
 
         let result: BackendPublishResult
@@ -2039,7 +2397,8 @@ private extension MapTalkView {
 
     func requestPublish(_ destination: MapTalkPublishDestination) {
         guard publishDestination == nil else { return }
-        finishFriendStory(restoreMap: false)
+        if !cardPresentation.isMounted { finishFriendStory(restoreMap: false) }
+        flightController.cancelActiveTransition()
 
         viewModel.refreshNearbyPlaces()
 
@@ -2051,11 +2410,11 @@ private extension MapTalkView {
 
         centerMapOnLivePublishLocation(for: destination)
 
-        if experiencePresentation.isPresented {
+        if cardPresentation.isMounted {
             // Native sheets cannot hand off cleanly to one another. Finish
             // reading the current capsule first, then open the chosen creator.
             queuedPublishDestination = destination
-            experiencePresentation.dismiss()
+            cardPresentation.dismiss()
         } else {
             withAnimation(.easeOut(duration: 0.18)) {
                 publishDestination = destination
@@ -2166,6 +2525,7 @@ private extension MapTalkView {
                 currentRegion = region
             }
             activeExperience = .sequence(nonce: UUID())
+            configureProfileCardHeight()
             experiencePresentation.presentNewContent()
             return
         }
@@ -2173,7 +2533,7 @@ private extension MapTalkView {
         focusedJourneyHeader = nil
         if journeyEntry == nil, currentJourney == nil {
             activeExperience = nil
-            experiencePresentation.dismiss()
+            cardPresentation.dismiss()
         }
     }
 }
@@ -2331,7 +2691,6 @@ private struct MapTalkControls: View {
     @Binding var mapLayer: MapTalkMapLayer
     let onTapLocate: () -> Void
     let onTapPlace: () -> Void
-    let onTapReel: () -> Void
     let showsPublishActions: Bool
     var usesPostPreviewLayout = false
 
@@ -2348,16 +2707,81 @@ private struct MapTalkControls: View {
             if showsPublishActions {
                 PlacePublishButton(action: onTapPlace, usesMomentMark: usesPostPreviewLayout)
                     .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
-                if usesPostPreviewLayout {
-                    PostPublishButton(action: onTapReel)
-                        .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
-                } else {
-                    ReelPublishButton(action: onTapReel)
-                        .frame(width: ControlsLayout.controlButtonSize, height: ControlsLayout.controlButtonSize)
-                }
             }
         }
     }
+}
+
+/// Profile keeps a mixed history pager. Its native sheet follows the selected
+/// card's backdrop; each page owns its own colors so neighbors never inherit it.
+private struct MapTalkScopedSheetChrome: ViewModifier {
+    let isProfile: Bool
+    let profileMotion: ProfileCardSheetMotion
+    let homeMotion: ProfileCardSheetMotion
+    let presentation: MapExperiencePresentation
+    let navigation: FriendStoryNavigation
+    let feedPresentation: MapTalkFeedPresentation
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isProfile {
+            content
+                .environment(\.profileCardSheetMotion, profileMotion)
+                .modifier(ProfileCardSheetChrome(presentation: presentation, motion: profileMotion))
+        } else {
+            content.modifier(FriendStorySheetChrome(presentation: presentation,
+                navigation: navigation, motion: homeMotion, feedPresentation: feedPresentation))
+        }
+    }
+}
+
+private struct MapTalkExperienceSheetHost: ViewModifier {
+    let isProfile: Bool
+    @ObservedObject var presentation: MapTalkCardPresentation
+    let compactFraction: CGFloat
+    let expandedTopInset: CGFloat
+    let selectedSource: MapTalkCardTransitionID?
+    let usesPostBackdrop: Bool
+    let sheetContent: AnyView
+    let onDismiss: () -> Void
+    @AppStorage(PostCardPalette.storageKey) private var palette: PostCardPalette = .white
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isProfile {
+            content.sheet(isPresented: Binding(get: { presentation.isPresented },
+                set: presentation.nativePresentationChanged), onDismiss: onDismiss) { sheetContent }
+        } else {
+            content.background(HomeCardNativePresenter(presentation: presentation,
+                compactFraction: compactFraction, expandedTopInset: expandedTopInset,
+                selectedSource: selectedSource,
+                backgroundColor: usesPostBackdrop ? UIColor(palette.background) : .clear,
+                content: sheetContent, onDismiss: onDismiss)
+                .allowsHitTesting(false))
+        }
+    }
+}
+
+private struct ProfileMapCardBackground: ViewModifier {
+    let isEnabled: Bool
+    let isPost: Bool
+    @AppStorage(PostCardPalette.storageKey) private var palette: PostCardPalette = .white
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.presentationBackground(isPost
+                ? AnyShapeStyle(palette.background) : AnyShapeStyle(.thinMaterial))
+        } else {
+            content
+        }
+    }
+}
+
+private struct ProfilePlacePreview {
+    let returnPostID: UUID?
+    let returnWasExpanded: Bool
+    let returnCamera: FriendStoryNavigation.MapSnapshot
 }
 
 private enum ActiveExperience: Identifiable {
@@ -2428,7 +2852,8 @@ private enum ControlsLayout {
     static let baseSafeAreaMultiplier: CGFloat = 0.2
     static let previewGap: CGFloat = 1
     static let previewFraction: CGFloat = 0.35
-    static let postPreviewFraction: CGFloat = 0.44
+    // Leave a separate fixed footer without squeezing the photo grid.
+    static let postPreviewFraction: CGFloat = 0.48
     static let controlButtonSize: CGFloat = 54
 
     static func basePadding(for geometry: GeometryProxy) -> CGFloat {

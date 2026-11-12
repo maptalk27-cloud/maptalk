@@ -1029,6 +1029,124 @@ test('existing 24-hour rows use 72-hour publication expiry without mutating stor
   } finally { reloaded.close(); }
 });
 
+test('durable posts keep older public reels without changing the active feed or POI history', async (t) => {
+  let time = Date.UTC(2026, 9, 17, 12);
+  const api = await fixture(t, { now: () => time });
+  const alice = await register(api, 'alice');
+  const bob = await register(api, 'bob');
+  const post = await publish(api, alice);
+  const place = await publish(api, alice, {
+    id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
+    place: { name: 'Old coffee stop', category: 'coffee' },
+  });
+  time += 8 * 24 * 60 * 60 * 1000;
+
+  bob.token = expectStatus(await api.call('/v1/auth/login', {
+    method: 'POST', json: { handle: 'bob', password: PASSWORD },
+  }), 200).token;
+
+  expectStatus(await api.call('/v1/posts'), 401);
+  assert.deepEqual((await listAll(api, bob, '/v1/posts')).map(item => item.id), [post.id]);
+  assert.deepEqual(await listAll(api, bob, '/v1/feed'), [], 'active feed still expires after 72 hours');
+  assert.deepEqual((await listAll(api, bob,
+    '/v1/map/memories?west=-123&east=-121&south=37&north=38')).map(item => item.id),
+  [place.id], 'only the historical POI stays on the map');
+  const stored = expectStatus(await api.call(`/v1/memories/${post.id}`, { token: bob.token }), 200);
+  assert.equal(stored.publishedAt, post.publishedAt);
+  assert.equal(stored.expiresAt, post.expiresAt, 'durable Posts does not rewrite the active-map expiry');
+  const db = new DatabaseSync(api.databasePath);
+  try { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15); }
+  finally { db.close(); }
+});
+
+test('durable posts exclude private pending rejected withdrawn deleted and blocked content', async (t) => {
+  const api = await fixture(t);
+  const alice = await register(api, 'alice');
+  const bob = await register(api, 'bob');
+  const departing = await register(api, 'departing');
+  const visible = await publish(api, alice);
+  await publish(api, alice, reel({ visibility: 'private' }));
+  const pending = await publish(api, alice);
+  const rejected = await publish(api, alice);
+  const deleted = await publish(api, alice);
+  const withdrawn = await publish(api, alice);
+  await publish(api, departing);
+  expectStatus(await api.call(`/v1/memories/${deleted.id}`, {
+    method: 'DELETE', token: alice.token,
+  }), 204);
+  expectStatus(await api.call(`/v1/memories/${withdrawn.id}`, {
+    method: 'PATCH', token: alice.token, json: { visibility: 'private' },
+  }), 200);
+  const db = new DatabaseSync(api.databasePath);
+  try {
+    db.prepare("UPDATE memories SET moderation_status = 'pending' WHERE id = ?").run(pending.id);
+    db.prepare("UPDATE memories SET moderation_status = 'rejected' WHERE id = ?").run(rejected.id);
+    db.prepare('UPDATE users SET deletion_started_at = ? WHERE id = ?').run(Date.now(), departing.user.id);
+  } finally { db.close(); }
+
+  for (const viewer of [alice, bob]) {
+    assert.deepEqual((await listAll(api, viewer, '/v1/posts')).map(item => item.id), [visible.id]);
+  }
+  expectStatus(await api.call('/v1/blocks', {
+    method: 'POST', token: bob.token, json: { userId: alice.user.id },
+  }), 204);
+  assert.deepEqual(await listAll(api, bob, '/v1/posts'), []);
+  expectStatus(await api.call(`/v1/blocks/${alice.user.id}`, { method: 'DELETE', token: bob.token }), 204);
+  expectStatus(await api.call('/v1/blocks', {
+    method: 'POST', token: alice.token, json: { userId: bob.user.id },
+  }), 204);
+  assert.deepEqual(await listAll(api, bob, '/v1/posts'), [], 'blocking is enforced in both directions');
+});
+
+test('durable posts use bounded stable pagination including equal publication times', async (t) => {
+  const api = await fixture(t, { now: () => Date.UTC(2026, 9, 17, 12) });
+  const alice = await register(api, 'alice');
+  const ids = [];
+  for (let index = 0; index < 23; index += 1) ids.push((await publish(api, alice)).id);
+  const expected = ids.sort().reverse();
+  const first = expectStatus(await api.call('/v1/posts', { token: alice.token }), 200);
+  assert.equal(first.items.length, 20, 'initial load is one bounded page, not the complete history');
+  assert.ok(first.nextCursor);
+  assert.deepEqual(first.items.map(item => item.id), expected.slice(0, 20));
+  const all = await listAll(api, alice, '/v1/posts', 2);
+  assert.deepEqual(all.map(item => item.id), expected);
+  assert.equal(new Set(all.map(item => item.id)).size, ids.length);
+  for (const query of ['limit=0', 'limit=101', 'limit=2&limit=3', 'cursor=invalid-cursor', 'owner=anything']) {
+    expectStatus(await api.call(`/v1/posts?${query}`, { token: alice.token }), 422);
+  }
+});
+
+test('durable posts retain first-publication order across late uploads edits and resharing', async (t) => {
+  let time = Date.UTC(2026, 9, 20, 12);
+  const api = await fixture(t, { now: () => time });
+  const alice = await register(api, 'alice');
+  const saved = await publish(api, alice, reel({ visibility: 'private', capturedAt: '2026-10-10T12:00:00Z' }));
+  const latest = await publish(api, alice, reel({ capturedAt: '2026-10-20T11:00:00Z' }));
+  const delayed = await publish(api, alice, reel({ capturedAt: '2026-10-12T12:00:00Z' }));
+  const middle = await publish(api, alice, reel({ capturedAt: '2026-10-19T12:00:00Z' }));
+  const shared = expectStatus(await api.call(`/v1/memories/${saved.id}`, {
+    method: 'PATCH', token: alice.token, json: { visibility: 'public' },
+  }), 200);
+  const expected = [saved.id, latest.id, middle.id, delayed.id];
+  assert.deepEqual((await listAll(api, alice, '/v1/posts', 1)).map(item => item.id), expected);
+  time += 8 * 24 * 60 * 60 * 1000;
+  alice.token = expectStatus(await api.call('/v1/auth/login', {
+    method: 'POST', json: { handle: 'alice', password: PASSWORD },
+  }), 200).token;
+  expectStatus(await api.call(`/v1/memories/${delayed.id}`, {
+    method: 'PATCH', token: alice.token, json: { caption: 'Edited without bumping publication order.' },
+  }), 200);
+  expectStatus(await api.call(`/v1/memories/${saved.id}`, {
+    method: 'PATCH', token: alice.token, json: { visibility: 'private' },
+  }), 200);
+  const reshared = expectStatus(await api.call(`/v1/memories/${saved.id}`, {
+    method: 'PATCH', token: alice.token, json: { visibility: 'public' },
+  }), 200);
+  assert.equal(reshared.publishedAt, shared.publishedAt);
+  assert.deepEqual((await listAll(api, alice, '/v1/posts', 1)).map(item => item.id), expected);
+  assert.deepEqual(await listAll(api, alice, '/v1/feed'), []);
+});
+
 test('cursor pagination is stable even when records have the same timestamp', async (t) => {
   const api = await fixture(t, { now: () => Date.UTC(2026, 9, 17) });
   const alice = await register(api, 'alice');
@@ -1493,13 +1611,13 @@ test('legacy place payloads keep their pre-airport idempotency hashes', async (t
   let db = new DatabaseSync(api.databasePath);
   assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
   // Reopen a genuine v10 shape, then retry the saved original request.
-  db.exec('DROP TABLE comments; ALTER TABLE places DROP COLUMN directory_kind; PRAGMA user_version = 10;');
+  db.exec('DROP TABLE comments; ALTER TABLE places DROP COLUMN directory_kind; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 10;');
   db.close();
   await api.restart();
   const retried = expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200);
   assert.deepEqual(retried, original);
   db = new DatabaseSync(api.databasePath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15);
   assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
   db.close();
 });

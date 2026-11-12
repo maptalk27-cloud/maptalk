@@ -34,6 +34,7 @@ async function fixture(t) {
       longitude REAL NOT NULL CHECK(longitude BETWEEN -180 AND 180)
     ) STRICT;
     ALTER TABLE places ADD COLUMN directory_kind TEXT CHECK(directory_kind IS NULL OR directory_kind = 'airport');
+    ALTER TABLE memories DROP COLUMN location_name;
     PRAGMA user_version = 12;
     COMMIT;
     PRAGMA foreign_keys = ON;
@@ -64,7 +65,12 @@ function edit(path, sql) {
   const db = new DatabaseSync(path);
   try { db.exec(sql); } finally { db.close(); }
 }
-function migrate(path) { openDatabase(path).close(); }
+function migrate(path) {
+  const db = openDatabase(path);
+  // This verifier covers only the historical 12 -> 14 release.
+  db.exec('ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
+  db.close();
+}
 function changePlaceDefinition(path, transform) {
   const db = new DatabaseSync(path);
   try {

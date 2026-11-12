@@ -78,8 +78,10 @@ struct RealStoriesRow: View {
     let userProvider: (UUID) -> User?
     let alignTrigger: Int
     let displayMode: DisplayMode
+    let usesPostMediaCollage: Bool
     let isUnseen: (StoryItem) -> Bool
     let usesLightLabels: Bool
+    let transitionNamespace: Namespace.ID?
 
     init(
         items: [StoryItem],
@@ -90,8 +92,10 @@ struct RealStoriesRow: View {
         userProvider: @escaping (UUID) -> User?,
         alignTrigger: Int,
         displayMode: DisplayMode = .people,
+        usesPostMediaCollage: Bool = false,
         isUnseen: @escaping (StoryItem) -> Bool = { _ in false },
-        usesLightLabels: Bool = false
+        usesLightLabels: Bool = false,
+        transitionNamespace: Namespace.ID? = nil
     ) {
         self.items = items
         self.selectedId = selectedId
@@ -101,8 +105,10 @@ struct RealStoriesRow: View {
         self.userProvider = userProvider
         self.alignTrigger = alignTrigger
         self.displayMode = displayMode
+        self.usesPostMediaCollage = usesPostMediaCollage
         self.isUnseen = isUnseen
         self.usesLightLabels = usesLightLabels
+        self.transitionNamespace = transitionNamespace
     }
 
     private let spacing: CGFloat = 16
@@ -118,11 +124,17 @@ struct RealStoriesRow: View {
                 }
                 .padding(.horizontal, 12)
             }
+            .scrollBounceBehavior(.always, axes: .horizontal)
+            .scrollClipDisabled()
             .onChangeCompat(of: alignTrigger) { _ in
                 centerOnSelected(using: proxy, animated: true)
             }
         }
         .frame(height: Self.layoutHeight)
+        // Keep the unoccupied end of a short rail available to the map.
+        .frame(maxWidth: CGFloat(items.count) * 72
+            + CGFloat(max(0, items.count - 1)) * spacing + 24)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -146,6 +158,8 @@ struct RealStoriesRow: View {
             VStack(spacing: 6) {
                 realBadge(for: real, user: user, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
+                .modifier(MapTalkPOITransitionSource(
+                    id: .story(real.id), namespace: transitionNamespace))
                 Text(realLabel(for: real, user: user))
                     .font(.caption2.weight(usesLightLabels ? .medium : .thin))
                     .foregroundStyle(usesLightLabels ? .white : .black)
@@ -167,6 +181,8 @@ struct RealStoriesRow: View {
             VStack(spacing: 6) {
                 poiBadge(for: group, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
+                .modifier(MapTalkPOITransitionSource(
+                    id: .story(group.id), namespace: transitionNamespace))
                 Text(group.poiName)
                     .font(.caption2.weight(usesLightLabels ? .medium : .thin))
                     .foregroundStyle(usesLightLabels ? .white : .black)
@@ -189,6 +205,8 @@ struct RealStoriesRow: View {
             VStack(spacing: 6) {
                 journeyBadge(for: journey, user: user, isSelected: isSelected, isUnseen: isUnseen)
                 .opacity(isSelected ? 1 : 0.82)
+                .modifier(MapTalkPOITransitionSource(
+                    id: .story(journey.id), namespace: transitionNamespace))
                 Text(journeyLabel(for: journey, user: user))
                     .font(.caption2.weight(usesLightLabels ? .medium : .thin))
                     .foregroundStyle(usesLightLabels ? .white : .black)
@@ -209,6 +227,7 @@ struct RealStoriesRow: View {
             real: real,
             user: user,
             displayMode: displayMode,
+            usesPostMediaCollage: usesPostMediaCollage,
             isSelected: isSelected,
             isUnseen: isUnseen
         )
@@ -256,7 +275,7 @@ struct RealStoriesRow: View {
     }
 
     private func centerOnSelected(using proxy: ScrollViewProxy, animated: Bool) {
-        guard let id = selectedId else { return }
+        guard items.count > 1, let id = selectedId else { return }
         let anchor = anchorPoint(for: id)
         let action = {
             proxy.scrollTo(id, anchor: anchor)
@@ -287,6 +306,7 @@ private struct RealStoryBadge: View {
     let real: RealPost?
     let user: User?
     let displayMode: RealStoriesRow.DisplayMode
+    let usesPostMediaCollage: Bool
     let isSelected: Bool
     let isUnseen: Bool
     private let contentDiameter: CGFloat = 60
@@ -357,7 +377,9 @@ private struct RealStoryBadge: View {
 
     private var realPreview: some View {
         Group {
-            if let real, let url = previewURL(for: real) {
+            if usesPostMediaCollage, let real {
+                PostMediaCover(attachments: real.attachments, side: contentDiameter)
+            } else if let real, let url = previewURL(for: real) {
                 remoteImage(url: url)
             } else if let real, let emoji = firstEmoji(in: real.attachments) {
                 fallback(symbol: emoji, color: Theme.neonPrimary)

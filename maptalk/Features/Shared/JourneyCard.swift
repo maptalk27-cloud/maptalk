@@ -204,6 +204,8 @@ struct JourneyAvatarStack: View {
     let maxVisibleCount: Int?
     let onReelTap: ((RealPost) -> Void)?
     let onPOITap: ((RatedPOI) -> Void)?
+    let usesNeutralAppearance: Bool
+    let usesWarmPostAppearance: Bool
 
     init(
         journey: JourneyPost,
@@ -213,6 +215,8 @@ struct JourneyAvatarStack: View {
         avatarSize: CGFloat,
         maxRows: Int? = nil,
         maxVisibleCount: Int? = nil,
+        usesNeutralAppearance: Bool = false,
+        usesWarmPostAppearance: Bool = false,
         onReelTap: ((RealPost) -> Void)? = nil,
         onPOITap: ((RatedPOI) -> Void)? = nil
     ) {
@@ -223,6 +227,8 @@ struct JourneyAvatarStack: View {
         self.avatarSize = avatarSize
         self.maxRows = maxRows
         self.maxVisibleCount = maxVisibleCount
+        self.usesNeutralAppearance = usesNeutralAppearance
+        self.usesWarmPostAppearance = usesWarmPostAppearance
         self.onReelTap = onReelTap
         self.onPOITap = onPOITap
     }
@@ -232,7 +238,7 @@ struct JourneyAvatarStack: View {
         if events.isEmpty {
             Text("No stops yet")
                 .font(.caption)
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(usesNeutralAppearance ? Color.secondary : .white.opacity(0.6))
         } else if let maxVisibleCount {
             let visibleEvents = Array(events.prefix(maxVisibleCount))
             let remainingCount = max(events.count - visibleEvents.count, 0)
@@ -244,7 +250,7 @@ struct JourneyAvatarStack: View {
                 if remainingCount > 0 {
                     Text("+\(remainingCount)")
                         .font(.caption2.bold())
-                        .foregroundStyle(.white)
+                        .foregroundStyle(remainingCountColor)
                         .padding(.leading, 10)
                 }
             }
@@ -264,13 +270,20 @@ struct JourneyAvatarStack: View {
                         if remainingCount > 0 && index == visibleRows.count - 1 {
                             Text("+\(remainingCount)")
                                 .font(.caption2.bold())
-                                .foregroundStyle(.white)
+                                .foregroundStyle(remainingCountColor)
                                 .padding(.leading, 14)
                         }
                     }
                 }
             }
         }
+    }
+
+    private var remainingCountColor: Color {
+        if usesWarmPostAppearance {
+            return Color(red: 226.0 / 255, green: 215.0 / 255, blue: 190.0 / 255)
+        }
+        return usesNeutralAppearance ? .primary : .white
     }
 
     private var sortedEvents: [JourneyStackEvent] {
@@ -362,6 +375,10 @@ struct JourneyAvatarStack: View {
 /// The compact media stack attached to a Reel when it belongs to a Journey.
 /// It intentionally contains only the Journey's memories, never a public Journey post card.
 struct JourneyAttachmentCapsule: View {
+    enum Appearance {
+        case standard, neutral, mediaOverlay, postDark
+    }
+
     let journey: JourneyPost
     let userProvider: (UUID) -> User?
     let reels: [RealPost]?
@@ -369,6 +386,7 @@ struct JourneyAttachmentCapsule: View {
     let isCompact: Bool
     let isCollapsed: Bool
     let maxVisibleCount: Int?
+    let appearance: Appearance
     let onTap: (() -> Void)?
     let onReelTap: ((RealPost) -> Void)?
     let onPOITap: ((RatedPOI) -> Void)?
@@ -381,6 +399,7 @@ struct JourneyAttachmentCapsule: View {
         isCompact: Bool = false,
         isCollapsed: Bool,
         maxVisibleCount: Int? = nil,
+        appearance: Appearance = .standard,
         onTap: (() -> Void)? = nil,
         onReelTap: ((RealPost) -> Void)? = nil,
         onPOITap: ((RatedPOI) -> Void)? = nil
@@ -392,6 +411,7 @@ struct JourneyAttachmentCapsule: View {
         self.isCompact = isCompact
         self.isCollapsed = isCollapsed
         self.maxVisibleCount = maxVisibleCount
+        self.appearance = appearance
         self.onTap = onTap
         self.onReelTap = onReelTap
         self.onPOITap = onPOITap
@@ -420,6 +440,8 @@ struct JourneyAttachmentCapsule: View {
             avatarSize: avatarSize,
             maxRows: effectiveMaxVisibleCount == nil ? maxRows : nil,
             maxVisibleCount: effectiveMaxVisibleCount,
+            usesNeutralAppearance: appearance == .neutral,
+            usesWarmPostAppearance: appearance == .postDark,
             onReelTap: onReelTap,
             onPOITap: onPOITap
         )
@@ -429,15 +451,32 @@ struct JourneyAttachmentCapsule: View {
         .frame(maxWidth: maxCapsuleWidth, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.08))
+                .fill(surfaceColor)
                 .padding(.leading, -backgroundBleed)
         }
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(borderColor, lineWidth: 1)
                 .padding(.leading, -backgroundBleed)
         }
         .contentShape(Rectangle())
+    }
+
+    private var surfaceColor: Color {
+        switch appearance {
+        case .standard: return .white.opacity(0.08)
+        case .neutral: return Color(uiColor: .secondarySystemBackground)
+        case .mediaOverlay: return .black.opacity(0.45)
+        case .postDark: return Color(red: 41.0 / 255, green: 45.0 / 255, blue: 41.0 / 255)
+        }
+    }
+
+    private var borderColor: Color {
+        switch appearance {
+        case .neutral: return Color.primary.opacity(0.07)
+        case .postDark: return Color(red: 211.0 / 255, green: 201.0 / 255, blue: 174.0 / 255).opacity(0.18)
+        case .standard, .mediaOverlay: return .white.opacity(0.12)
+        }
     }
 
     private var avatarSize: CGFloat { isCompact ? 26 : 34 }

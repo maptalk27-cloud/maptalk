@@ -48,6 +48,17 @@ private struct MockAppRoot: View {
     @State private var environment = AppEnvironment.bootstrap()
 
     var body: some View {
-        AppRouter().appEnvironment(environment)
+        Group {
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--post-layout-preview") {
+                PostLayoutPreview()
+            } else {
+                AppRouter()
+            }
+#else
+            AppRouter()
+#endif
+        }
+        .appEnvironment(environment)
     }
 }

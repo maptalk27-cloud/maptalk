@@ -151,6 +151,7 @@ struct ExperienceDetailView: View {
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
     let usesClassicPostPreview: Bool
+    let recordsActiveCompactViewportOnly: Bool
     let poiStorySelection: POIStorySelection?
     /// Personal browsing opens the owner's latest visit, while an explicit
     /// map-pin selection can still ask for the shared place overview.
@@ -172,17 +173,29 @@ struct ExperienceDetailView: View {
     @Environment(\.friendStoryExpectedMedia) var storyExpectedMedia
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
     @Environment(\.backendSafetyMenuTrailingInset) private var safetyMenuTrailingInset
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.postCardPalette) private var postCardPalette
+    @Environment(\.colorScheme) private var inheritedCardColorScheme
+    @Environment(\.profileCardSheetMotion) private var profileCardSheetMotion
+    @Environment(\.postCompactViewportSize) private var postCompactViewportSize
+    @AppStorage(PostCardPalette.storageKey) private var preferredPostCardPalette: PostCardPalette = .white
     @State private var storyViewerState: POIStoryViewerState?
     @State private var selectedProfileContext: UserMapViewModel.Context?
     @State var editedCaptions: [UUID: String] = [:]
     @State private var isEditingCaption = false
     @State private var childPresentationID = UUID()
+    @State private var compactPostCardSizes: [PostMediaLayoutReference.Key: CGSize] = [:]
+    @State private var measuredCompactPostCardSizes: [PostMediaLayoutReference.Key: CGSize] = [:]
+    @State private var postEngagementRequest: PostEngagementRequest?
 
     init(
         mode: Mode,
         isExpanded: Bool = true,
         usesClassicPostPreview: Bool = false,
+        recordsActiveCompactViewportOnly: Bool = false,
         poiStorySelection: POIStorySelection? = nil,
+        poiBrowsingUserID: UUID? = nil,
+        poiOverviewID: UUID? = nil,
         expandedPOIMedia: RatedPOI.Media? = nil,
         expandedPOIMediaContent: AnyView? = nil,
         onCollapsedTap: (() -> Void)? = nil,
@@ -201,9 +214,10 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.usesClassicPostPreview = usesClassicPostPreview
+        self.recordsActiveCompactViewportOnly = recordsActiveCompactViewportOnly
         self.poiStorySelection = poiStorySelection
-        self.poiBrowsingUserID = nil
-        self.poiOverviewID = nil
+        self.poiBrowsingUserID = poiBrowsingUserID
+        self.poiOverviewID = poiOverviewID
         self.expandedPOIMedia = expandedPOIMedia
         self.expandedPOIMediaContent = expandedPOIMediaContent
         self.onCollapsedTap = onCollapsedTap
@@ -229,6 +243,7 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.usesClassicPostPreview = false
+        self.recordsActiveCompactViewportOnly = false
         self.poiStorySelection = nil
         self.poiBrowsingUserID = nil
         self.poiOverviewID = nil
@@ -246,6 +261,7 @@ struct ExperienceDetailView: View {
         sequencePager: SequencePager,
         selection: Binding<UUID>,
         isExpanded: Bool,
+        usesClassicPostPreview: Bool = false,
         poiBrowsingUserID: UUID? = nil,
         poiOverviewID: UUID? = nil,
         onCollapsedTap: (() -> Void)? = nil,
@@ -259,7 +275,8 @@ struct ExperienceDetailView: View {
         self.standaloneMode = nil
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
-        self.usesClassicPostPreview = false
+        self.usesClassicPostPreview = usesClassicPostPreview
+        self.recordsActiveCompactViewportOnly = false
         self.poiStorySelection = nil
         self.poiBrowsingUserID = poiBrowsingUserID
         self.poiOverviewID = poiOverviewID
@@ -274,9 +291,17 @@ struct ExperienceDetailView: View {
     }
 
     var body: some View {
+        if usesClassicPostPreview, let context = sequenceContext {
+            classicSequenceContent(context)
+        } else {
+            experienceContent
+        }
+    }
+
+    private var experienceContent: some View {
         let currentData = contentData(for: currentMode)
 
-        Group {
+        return Group {
             if isExpanded {
                 expandedContent(using: currentData)
             } else {
@@ -284,18 +309,32 @@ struct ExperienceDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .environment(\.postEngagementRequest, postEngagementRequest)
+        .environment(\.openPostEngagement, { postID, section in
+            postEngagementRequest = PostEngagementRequest(postID: postID, section: section)
+            if !isExpanded { onCollapsedTap?() }
+        })
+        .environment(\.postMediaLayoutReference, PostMediaLayoutReference(
+            resolveCard: { postID, count in
+                PostMediaLayoutReference.resolvedCardSize(
+                    viewport: postCompactViewportSize,
+                    recorded: compactPostCardSizes[.init(postID: postID, attachmentCount: count)]
+                )
+            },
+            recordCardSize: rememberCompactPostCardSize
+        ))
         // Media is decoration behind the card, not a layout sibling. In
         // particular, a full-resolution portrait poster must not enlarge the
         // sheet and push its author/footer outside the compact detent.
         .background {
             if usesNeutralPreviewBackground {
-                Color(uiColor: .systemBackground).ignoresSafeArea()
+                PostCardBackdrop().ignoresSafeArea()
             } else {
                 background(for: currentData, isExpanded: isExpanded)
                     .accessibilityHidden(true)
             }
         }
-        .background((usesNeutralPreviewBackground ? Color(uiColor: .systemBackground) : .black).ignoresSafeArea())
+        .background((usesNeutralPreviewBackground ? postCardPalette.background : .black).ignoresSafeArea())
         .overlay(alignment: .topTrailing) {
             if isExpanded, let backend = environment.backend, !actionablePosts.isEmpty {
                 BackendContentSafetyMenu(store: backend, posts: actionablePosts,
@@ -310,6 +349,27 @@ struct ExperienceDetailView: View {
         }
         .onChangeCompat(of: hasPresentedChildContent) { presented in
             childPresentationChanged?(childPresentationID, presented)
+        }
+        .onChangeCompat(of: isExpanded) { expanded in
+            // A later ordinary card open starts at its content, not at the
+            // likes/comments shortcut used on the previous visit.
+            if !expanded { postEngagementRequest = nil }
+        }
+        .onChangeCompat(of: parentPlaybackEnabled) { enabled in
+            // A neighboring page can become current without another geometry
+            // change. Adopt its first active compact reference only once; a
+            // later native sheet drag must never overwrite it with a tall frame.
+            guard recordsActiveCompactViewportOnly, enabled, !isExpanded,
+                  PostMediaLayoutReference.validCardSize(postCompactViewportSize) == nil else { return }
+            compactPostCardSizes.merge(measuredCompactPostCardSizes) { existing, _ in existing }
+        }
+        .onChangeCompat(of: verticalSizeClass) { _ in
+            // Sheet-backed pages follow their host's resolved compact size,
+            // including rotation. A transient UIKit trait change must not
+            // erase that reference while the expanded card is being created.
+            guard PostMediaLayoutReference.validCardSize(postCompactViewportSize) == nil else { return }
+            compactPostCardSizes.removeAll()
+            measuredCompactPostCardSizes.removeAll()
         }
         .onDisappear {
             if !hasPresentedChildContent { childPresentationChanged?(childPresentationID, false) }
@@ -346,6 +406,73 @@ struct ExperienceDetailView: View {
         }
     }
 
+    /// Profile history is a mixed sequence, not a second card implementation.
+    /// Each page owns its original media state and compact measurements across
+    /// detent changes, and receives only the palette appropriate to that page.
+    private func classicSequenceContent(_ context: SequenceContext) -> some View {
+        Group {
+            if let motion = profileCardSheetMotion {
+                ProfileSequencePager(items: context.pager.items,
+                    selection: context.selection, isExpanded: isExpanded, motion: motion,
+                    background: { item in
+                        if case .real = item.mode { return preferredPostCardPalette.background }
+                        return .black
+                    }) { item in
+                        classicSequencePage(item, context: context)
+                    }
+            } else if context.pager.items.count == 1, let item = context.pager.items.first {
+                classicSequencePage(item, context: context)
+            } else {
+                TabView(selection: context.selection) {
+                    ForEach(context.pager.items) { item in
+                        classicSequencePage(item, context: context)
+                            .tag(item.id)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .clipped()
+        .background(isClassicPostPreview ? preferredPostCardPalette.background : .black)
+        // Keep the native pager boundary stable across every page and detent.
+        // Its hosted cards already handle their own content safe areas.
+        .ignoresSafeArea(.container, edges: .bottom)
+    }
+
+    private func classicSequencePage(
+        _ item: SequencePager.Item,
+        context: SequenceContext
+    ) -> some View {
+        let isPost: Bool = {
+            if case .real = item.mode { return true }
+            return false
+        }()
+        return ExperienceDetailView(
+            mode: item.mode,
+            isExpanded: isExpanded,
+            usesClassicPostPreview: true,
+            recordsActiveCompactViewportOnly: true,
+            poiBrowsingUserID: poiBrowsingUserID,
+            poiOverviewID: poiOverviewID,
+            onCollapsedTap: onCollapsedTap,
+            onJourneyAvatarStackTap: onJourneyAvatarStackTap,
+            journeyProvider: journeyProvider,
+            userProvider: userProvider,
+            onPOIContributorViewed: onPOIContributorViewed,
+            isPOIContributorUnseen: isPOIContributorUnseen
+        )
+        .environment(\.postCardPalette, isPost ? preferredPostCardPalette : .white)
+        .environment(\.colorScheme, isPost ? preferredPostCardPalette.colorScheme : inheritedCardColorScheme)
+        .environment(\.friendStoryPlaybackEnabled,
+                     isMediaPlaybackActive && context.selection.wrappedValue == item.id)
+        .background(isPost ? preferredPostCardPalette.background : .black)
+        .background(ExperiencePagerVerticalBounceGuard())
+        .accessibilityHidden(context.selection.wrappedValue != item.id)
+        .id(item.id)
+    }
+
     var isMediaPlaybackActive: Bool {
         parentPlaybackEnabled && storyViewerState == nil && selectedProfileContext == nil && !isEditingCaption
     }
@@ -353,6 +480,21 @@ struct ExperienceDetailView: View {
     var isClassicPostPreview: Bool {
         guard usesClassicPostPreview, case .real = currentMode else { return false }
         return true
+    }
+
+    private func rememberCompactPostCardSize(_ size: CGSize, postID: UUID, count: Int) {
+        guard isClassicPostPreview, !isExpanded, count >= 0,
+              PostMediaLayoutReference.validCardSize(postCompactViewportSize) == nil,
+              size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0 else { return }
+
+        let key = PostMediaLayoutReference.Key(postID: postID, attachmentCount: count)
+        guard compactPostCardSizes[key] == nil else { return }
+        if recordsActiveCompactViewportOnly, !isMediaPlaybackActive {
+            if measuredCompactPostCardSizes[key] != size { measuredCompactPostCardSizes[key] = size }
+            return
+        }
+        compactPostCardSizes[key] = size
     }
 
     private var hasPresentedChildContent: Bool {

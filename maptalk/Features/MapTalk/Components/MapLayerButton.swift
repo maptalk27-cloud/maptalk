@@ -1,6 +1,28 @@
 import MapKit
 import SwiftUI
 
+enum MapTalkMapAppearance: String, CaseIterable {
+    case system, day, night
+
+    static let storageKey = "maptalk.map-appearance"
+
+    var title: String {
+        switch self {
+        case .system: "Auto"
+        case .day: "Day"
+        case .night: "Night"
+        }
+    }
+
+    func resolved(using system: ColorScheme) -> ColorScheme {
+        switch self {
+        case .system: system
+        case .day: .light
+        case .night: .dark
+        }
+    }
+}
+
 enum MapTalkMapLayer: String, CaseIterable, Identifiable {
     case standard
     case satellite
@@ -25,6 +47,7 @@ enum MapTalkMapLayer: String, CaseIterable, Identifiable {
 
 struct MapLayerButton: View {
     @Binding var selection: MapTalkMapLayer
+    @AppStorage(MapTalkMapAppearance.storageKey) private var appearance: MapTalkMapAppearance = .system
     @State private var isChoosingLayer = false
 
     var body: some View {
@@ -41,11 +64,35 @@ struct MapLayerButton: View {
         .accessibilityValue(selection.title)
         .accessibilityIdentifier("maptalk.map-layers")
         .popover(isPresented: $isChoosingLayer, arrowEdge: .trailing) {
-            HStack(spacing: 12) {
-                ForEach(MapTalkMapLayer.allCases) { layer in
-                    layerOption(layer)
+            VStack(spacing: 14) {
+                HStack(spacing: 12) {
+                    ForEach(MapTalkMapLayer.allCases) { layer in
+                        layerOption(layer)
+                    }
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Map appearance")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Picker("Map appearance", selection: $appearance) {
+                        ForEach(MapTalkMapAppearance.allCases, id: \.self) { tone in
+                            Text(tone.title).tag(tone)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("maptalk.map-appearance")
+                }
+                Divider()
+                HStack {
+                    Text("Post cards")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    PostCardPaletteSwitch()
                 }
             }
+            .frame(width: 228)
             .padding(16)
             .presentationCompactAdaptation(.popover)
         }

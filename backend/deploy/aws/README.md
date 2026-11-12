@@ -1,5 +1,7 @@
 # AWS 亲友版部署与验收
 
+**最新发布：2026-11-09 已部署持久 Posts 流，schema 14 不变。** 新增鉴权分页接口 `GET /v1/posts`：只返回当前仍可见的公开已批准 Reel，按首次发布时间倒序，默认每页20条，不受72小时动态期限影响；原 POI feed／地图规则不变。本机361项、目标 Linux ARM64 93项测试通过；约442MB加密备份实际上传现有S3、取回认证恢复，全部27张表／78个schema对象及所有记录和媒体摘要在启动后仍完全一致。HTTPS200，未认证 Posts／feed／map 均401。现有主机、1GiB额度、密钥、权限和费用方案不变；第一次恢复下载因主机角色缺少读取权限安全回退，随后以15分钟精确对象下载链接完成验证，没有扩充IAM权限。iOS 43项测试通过；已于13:22（America/Los_Angeles）将连接真实API的签名Release版覆盖安装到原手机，保留数据，未卸载、启动或操作手机界面。临时私有验证副本待清理审核，备份及发布证据保留。详见 `deployed-resources.json` 的 `durablePostsRelease`。
+
 2026-10-20，**后端已在现有 EC2 上运行，`https://api.maptalkapp.com/health` 已通过公开 DNS、可信 HTTPS 和健康检查**。这不代表已完成 Apple 真机登录或可以邀请亲友：真实授权／删号、两台真机隐私验收、隐私与支持页面仍未完成。App UI 和现有发布模型不变。
 
 用户已明确批准非敏感代码经自己的私有 S3 部署，并将现有 Apple 登录私钥、Apple token 加密 key 和备份加密 key 分别存入 `us-east-2` 的三个 Secrets Manager secret；不更换密钥，不把 `secrets.tar` 上传到 S3。实际资源和验证记录见 [deployed-resources.json](deployed-resources.json)。主机及相关资源已开始计费，当前仍为 Free Plan；正常基础估算约 $20.05/月，按已确认的 $25/月预算规划，不依赖赠送额度，也不是硬封顶。不要重复创建另一台主机。升级 Paid Plan 或扩大资源范围仍须单独确认。

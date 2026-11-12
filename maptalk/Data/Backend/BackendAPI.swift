@@ -114,6 +114,7 @@ nonisolated struct BackendMemory: Codable, Sendable {
     var moderationStatus: String? = nil
     // Optional for pre-cluster server responses and durable offline caches.
     var cluster: BackendCluster? = nil
+    var locationName: String? = nil
 
     /// One clock for archive, feed and history; transport completion is not a publication.
     var activityDate: Date { publishedAt ?? createdAt }
@@ -161,6 +162,7 @@ nonisolated struct BackendMemoryInput: Codable, Sendable {
     // Legacy wire name: the first publish/save action, never the asset's EXIF date.
     var capturedAt: String? = nil
     var cluster: BackendClusterInput? = nil
+    var locationName: String? = nil
 }
 
 nonisolated enum BackendCommentTarget: Hashable, Sendable {
@@ -242,6 +244,12 @@ final class BackendAPI {
         try await json("/v1/auth/providers")
     }
 
+    func supportsPostLocationNames() async throws -> Bool {
+        nonisolated struct Health: Decodable, Sendable { let supportsPostLocationNames: Bool? }
+        let health: Health = try await json("/health")
+        return health.supportsPostLocationNames == true
+    }
+
     func socialChallenge(provider: String) async throws -> BackendSocialChallenge {
         guard ["google", "wechat"].contains(provider) else {
             throw BackendClientError.message("Unsupported sign-in provider.")
@@ -321,6 +329,25 @@ final class BackendAPI {
     }
 
     static let placeHistoryPageSize = 12
+
+    static let postFeedPageSize = 20
+
+    /// Posts have durable history; unlike the active story feed, each read is
+    /// bounded and advances only when the reader asks for the next page.
+    func posts(cursor: String? = nil) async throws -> BackendMemoryPage {
+        var components = URLComponents(string: "/v1/posts")!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(Self.postFeedPageSize))]
+        if let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
+        let page: BackendMemoryPage = try await json(components.string!)
+        guard page.items.count <= Self.postFeedPageSize else {
+            throw BackendClientError.message("Couldn't load these posts. Please try again.")
+        }
+        return page
+    }
+
+    func memory(id: UUID) async throws -> BackendMemory {
+        try await json("/v1/memories/\(id.uuidString)")
+    }
 
     /// A deliberate place visit fetches one bounded page, never all history.
     func placeMemories(placeID: UUID, cursor: String? = nil) async throws -> BackendMemoryPage {

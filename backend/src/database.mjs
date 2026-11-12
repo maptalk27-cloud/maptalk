@@ -13,7 +13,7 @@ export function openDatabase(databasePath) {
     chmodSync(path, 0o600);
     db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 14) throw new Error('Database is newer than this server; refusing to open it.');
+    if (version > 15) throw new Error('Database is newer than this server; refusing to open it.');
     if (version === 0) {
       transaction(db, () => {
         db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
@@ -310,6 +310,15 @@ export function openDatabase(databasePath) {
           if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('Place category migration violated a foreign key.');
         });
       } finally { db.exec('PRAGMA foreign_keys = ON;'); }
+    }
+    if (version < 15) {
+      transaction(db, () => {
+        db.exec(`
+          ALTER TABLE memories ADD COLUMN location_name TEXT
+            CHECK(location_name IS NULL OR (kind = 'reel' AND length(location_name) BETWEEN 1 AND 80));
+          PRAGMA user_version = 15;
+        `);
+      });
     }
     return db;
   } catch (error) {

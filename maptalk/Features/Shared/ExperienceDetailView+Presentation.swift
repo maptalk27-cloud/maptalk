@@ -80,33 +80,61 @@ extension ExperienceDetailView {
                         ForEach(context.pager.items) { item in
                             collapsedPreviewContent(
                                 for: item.mode,
-                                isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id
+                                isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id,
+                                viewportHeight: size.height
                             )
                                 .collapsedPreviewTap(onCollapsedTap)
                                 .tag(item.id)
-                                .frame(width: size.width, height: size.height)
+                                .frame(width: size.width, height: size.height, alignment: .top)
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: .never))
                     .frame(width: size.width, height: size.height)
                 } else {
-                    collapsedPreviewLayer(using: data)
+                    Group {
+                        if usesClassicPostPreview, poiBrowsingUserID != nil {
+                            collapsedPreviewContent(for: currentMode,
+                                isPlaybackActive: isMediaPlaybackActive, viewportHeight: size.height)
+                        } else {
+                            collapsedPreviewLayer(using: data, viewportHeight: size.height)
+                        }
+                    }
                         .collapsedPreviewTap(onCollapsedTap)
-                        .frame(width: size.width, height: size.height)
+                        .frame(width: size.width, height: size.height, alignment: .top)
                 }
             }
-            .padding(.horizontal, -ExperienceSheetLayout.horizontalInset)
+            .padding(.horizontal, usesNeutralPreviewBackground || isClassicPOIMediaPreview
+                ? 0 : -ExperienceSheetLayout.horizontalInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var isClassicPOIMediaPreview: Bool {
+        guard case .poi = currentMode else { return false }
+        return classicPageFillsBottom(for: currentMode)
+    }
+
+    func classicPageFillsBottom(for mode: Mode) -> Bool {
+        guard usesClassicPostPreview else { return false }
+        switch mode {
+        case let .real(post, _):
+            guard post.attachments.count == 1, let attachment = post.attachments.first,
+                  case .video = attachment.kind else { return false }
+            return true
+        case let .poi(place):
+            return !isExpanded && browsingPOISelection(for: place)?.media != nil
+        case .journey:
+            return false
+        }
+    }
+
     @ViewBuilder
-    private func collapsedPreviewContent(for mode: Mode, isPlaybackActive: Bool) -> some View {
+    private func collapsedPreviewContent(for mode: Mode, isPlaybackActive: Bool, viewportHeight: CGFloat) -> some View {
         if case let .poi(place) = mode,
            let media = browsingPOISelection(for: place)?.media {
             FriendStoryPOIPreview(place: place, media: media, isPlaybackActive: isPlaybackActive)
         } else {
-            collapsedPreviewLayer(using: contentData(for: mode))
+            collapsedPreviewLayer(using: contentData(for: mode), viewportHeight: viewportHeight)
         }
     }
 
@@ -153,7 +181,7 @@ extension ExperienceDetailView {
     }
 
     @ViewBuilder
-    private func collapsedPreviewLayer(using data: ContentData) -> some View {
+    private func collapsedPreviewLayer(using data: ContentData, viewportHeight: CGFloat) -> some View {
         if let hero = data.hero {
             let isSplitLayout = shouldHideMediaTile(for: data)
             ExperienceDetailView.HeroSection(
@@ -164,12 +192,13 @@ extension ExperienceDetailView {
                 hideMedia: isSplitLayout,
                 useTallLayout: true,
                 usesNeutralAppearance: usesNeutralPreviewBackground,
+                singleVideoViewportHeight: isClassicPostPreview && isSplitLayout ? viewportHeight : nil,
                 isPlaybackActive: isMediaPlaybackActive,
                 onUserSelected: openProfile,
                 onCapsuleTap: onJourneyAvatarStackTap
             )
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
+            .padding(.horizontal, usesNeutralPreviewBackground ? 0 : 12)
+            .padding(.top, usesNeutralPreviewBackground ? 0 : 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             collapsedPreviewBody(using: data)

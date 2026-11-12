@@ -309,6 +309,18 @@ test('public beta posts are immediately visible; rejection, blocking and revocat
   assert.equal((await api.call('/v1/feed', { token: bob.token })).data.items.length, 0);
 });
 
+test('durable posts enforce active beta access for viewers and authors', async t => {
+  const api = await fixture(t);
+  const alice = await api.account('posts-alice'), bob = await api.account('posts-bob');
+  const pending = await api.account('posts-pending', false);
+  const post = await api.post(alice);
+  assert.deepEqual((await api.call('/v1/posts', { token: bob.token })).data.items.map(item => item.id), [post.id]);
+  assert.equal((await api.call('/v1/posts', { token: pending.token })).status, 403);
+  api.admin(db => revokeBetaAccess(db, { userID: alice.user.id }));
+  assert.deepEqual((await api.call('/v1/posts', { token: bob.token })).data.items, []);
+  assert.equal((await api.call('/v1/posts', { token: alice.token })).status, 403);
+});
+
 test('place history excludes revoked beta owners and rejects viewers without active access', async t => {
   const api = await fixture(t);
   const alice = await api.account('place-alice'), bob = await api.account('place-bob');

@@ -29,6 +29,12 @@ struct FriendStoryPage: Identifiable {
     let expectedMedia: [FriendStoryMediaDescriptor]
     let content: Content
 
+    static func newestPostFirst(_ lhs: Self, _ rhs: Self) -> Bool {
+        if lhs.publishedAt != rhs.publishedAt { return lhs.publishedAt > rhs.publishedAt }
+        if lhs.memoryID != rhs.memoryID { return lhs.memoryID.uuidString > rhs.memoryID.uuidString }
+        return lhs.id > rhs.id
+    }
+
     /// Availability is not proof of viewing. The UI marks read only after the
     /// current image/video is actually presented, never when this turns true.
     var isMediaReady: Bool {
@@ -86,6 +92,13 @@ struct FriendStoryGroup: Identifiable {
     var id: UUID { authorID }
     var latestTimestamp: Date { pages.map(\.publishedAt).max() ?? .distantPast }
     var readKeys: [String] { pages.map(\.readKey) }
+    /// The people rail represents check-ins, not the separate Posts feed.
+    var poiReadKeys: [String] {
+        pages.compactMap { page in
+            if case .poi = page.content { return page.readKey }
+            return nil
+        }
+    }
     var hasUnviewed: Bool { pages.contains { !viewedKeys.contains($0.readKey) } }
 
     init(authorID: UUID, user: User?, pages: [FriendStoryPage], viewedKeys: Set<String> = []) {
@@ -135,23 +148,56 @@ enum FriendStoryFeed {
         now: Date = .now
     ) -> [FriendStoryGroup] {
         let pages: [FriendStoryPage]
-        var backendUsers: [UUID: User] = [:]
         if let backendRecords {
             pages = backendPages(records: backendRecords, reals: reals, ratedPOIs: ratedPOIs, now: now)
+        } else {
+            pages = projectedPages(reals: reals, ratedPOIs: ratedPOIs, now: now)
+        }
+        return makeGroups(pages: pages, backendRecords: backendRecords,
+            viewedKeys: viewedKeys, userProvider: userProvider, postHistory: false)
+    }
+
+    /// Posts are a durable publication history. This never extends the active
+    /// lifetime of the underlying Reel or puts historic posts on the live map.
+    static func postGroups(
+        reals: [RealPost], backendRecords: [BackendMemory]? = nil,
+        viewedKeys: Set<String> = [], userProvider: (UUID) -> User?, now: Date = .now
+    ) -> [FriendStoryGroup] {
+        let pages: [FriendStoryPage]
+        if let backendRecords {
+            pages = backendPages(records: backendRecords, reals: reals,
+                ratedPOIs: [], now: now, postHistory: true)
+        } else {
+            var seen = Set<UUID>()
+            pages = reals.filter { $0.visibility == .publicAll && seen.insert($0.id).inserted }
+                .map { reelPage($0, descriptors: $0.attachments.map(descriptor), expiresAt: .distantFuture) }
+        }
+        return makeGroups(pages: pages, backendRecords: backendRecords,
+            viewedKeys: viewedKeys, userProvider: userProvider, postHistory: true)
+    }
+
+    private static func makeGroups(
+        pages: [FriendStoryPage], backendRecords: [BackendMemory]?, viewedKeys: Set<String>,
+        userProvider: (UUID) -> User?, postHistory: Bool
+    ) -> [FriendStoryGroup] {
+        var backendUsers: [UUID: User] = [:]
+        if let backendRecords {
             for record in backendRecords where backendUsers[record.ownerId] == nil {
                 // The authenticated owner ID, not an optional profile payload,
                 // determines authorship.
                 backendUsers[record.ownerId] = User(id: record.ownerId,
                     handle: record.owner.handle, avatarURL: nil)
             }
-        } else {
-            pages = projectedPages(reals: reals, ratedPOIs: ratedPOIs, now: now)
         }
         return Dictionary(grouping: pages, by: \.authorID).map { authorID, pages in
             FriendStoryGroup(authorID: authorID, user: userProvider(authorID) ?? backendUsers[authorID],
-                pages: pages.sorted(by: pageOrder), viewedKeys: viewedKeys)
+                pages: pages.sorted(by: postHistory ? FriendStoryPage.newestPostFirst : pageOrder),
+                viewedKeys: viewedKeys)
         }.sorted {
-            if $0.hasUnviewed != $1.hasUnviewed { return $0.hasUnviewed }
+            if !postHistory, $0.hasUnviewed != $1.hasUnviewed { return $0.hasUnviewed }
+            if postHistory, let lhs = $0.pages.first, let rhs = $1.pages.first {
+                return FriendStoryPage.newestPostFirst(lhs, rhs)
+            }
             if $0.latestTimestamp != $1.latestTimestamp { return $0.latestTimestamp > $1.latestTimestamp }
             return $0.authorID.uuidString < $1.authorID.uuidString
         }
@@ -184,7 +230,8 @@ enum FriendStoryFeed {
     }
 
     private static func backendPages(
-        records: [BackendMemory], reals: [RealPost], ratedPOIs: [RatedPOI], now: Date
+        records: [BackendMemory], reals: [RealPost], ratedPOIs: [RatedPOI], now: Date,
+        postHistory: Bool = false
     ) -> [FriendStoryPage] {
         let realLookup = Dictionary(reals.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let placeLookup = Dictionary(ratedPOIs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -197,7 +244,8 @@ enum FriendStoryFeed {
             let publication = record.publishedAt ?? record.createdAt
             guard record.visibility == "public",
                   record.moderationStatus == nil || record.moderationStatus == "approved",
-                  StoryReadKeys.isFresh(publication, asOf: now),
+                  !postHistory || record.kind == "reel",
+                  postHistory || StoryReadKeys.isFresh(publication, asOf: now),
                   seenRecords.insert(record.id).inserted else { continue }
             let expiresAt = StoryReadKeys.expiresAt(forActivityAt: publication)
             var mediaIDs = Set<UUID>()
@@ -216,8 +264,10 @@ enum FriendStoryFeed {
                     message: record.caption.isEmpty ? nil : record.caption,
                     attachments: descriptors.compactMap { cached[$0.id] }, capsuleId: projected?.capsuleId,
                     likes: projected?.likes ?? [], comments: projected?.comments ?? [], visibility: .publicAll,
-                    createdAt: record.createdAt, expiresAt: expiresAt, publishedAt: record.publishedAt)
-                pages.append(reelPage(real, descriptors: descriptors, expiresAt: expiresAt))
+                    createdAt: record.createdAt, expiresAt: expiresAt, publishedAt: record.publishedAt,
+                    locationName: record.locationName)
+                pages.append(reelPage(real, descriptors: descriptors,
+                    expiresAt: postHistory ? .distantFuture : expiresAt))
             case "poi":
                 guard let place = record.place else { continue }
                 var rated = placeLookup[place.id] ?? emptyPlace(place)
@@ -317,9 +367,17 @@ enum FriendStoryFeed {
 /// nested-route state. A refresh updates payloads/removes revoked records, but
 /// never inserts new pages or reorders authors beneath a gesture.
 struct FriendStorySession {
-    private(set) var groups: [FriendStoryGroup]
+    private(set) var groups: [FriendStoryGroup] {
+        didSet { refreshPageSnapshots() }
+    }
+    // Swiping changes only the cursor. Keep both pager orders with the frozen
+    // session instead of flattening and sorting its entire history per frame.
+    // Rebuild even when IDs are unchanged: refreshed pages may contain edits.
+    private(set) var pagesInStoryOrder: [FriendStoryPage] = []
+    private(set) var pagesInPostOrder: [FriendStoryPage] = []
     private(set) var selectedAuthorID: UUID?
     private(set) var resumePageIDs: [UUID: String] = [:]
+    private var postSessionHead: FriendStoryPage?
 
     var isEnded: Bool { selectedAuthorID == nil }
     var currentGroup: FriendStoryGroup? { groups.first { $0.authorID == selectedAuthorID } }
@@ -336,6 +394,8 @@ struct FriendStorySession {
           resuming pageIDs: [UUID: String] = [:]) {
         var seenAuthors = Set<UUID>()
         self.groups = groups.filter { !$0.pages.isEmpty && seenAuthors.insert($0.authorID).inserted }
+        refreshPageSnapshots()
+        postSessionHead = pagesInPostOrder.first
         guard let group = self.groups.first(where: { $0.authorID == authorID }) else { return nil }
         // Explicit avatar selection may adopt a newer feed snapshot. Keep
         // cursors only for pages still present in that author's fresh group.
@@ -421,21 +481,73 @@ struct FriendStorySession {
         restoreCursor(afterRemovingFrom: oldCurrentGroup, current: oldCurrentPage)
     }
 
-    mutating func invalidate(memoryIDs: Set<UUID>) {
+    /// The refreshed list is cumulative, not just the latest network page.
+    /// Fill historical gaps and append older pages, while keeping posts newer
+    /// than this session's original head for a deliberate reopen.
+    mutating func reconcilePosts(with refreshedGroups: [FriendStoryGroup]) {
+        guard !isEnded else { return }
+        let previous = pagesInPostOrder
+        let previousCurrent = currentPage
+        let oldIDs = Set(previous.map(\.id))
+        let available = Dictionary(refreshedGroups.flatMap(\.pages).map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let retained = previous.compactMap { old -> FriendStoryPage? in
+            guard let page = available[old.id], page.authorID == old.authorID,
+                  page.memoryID == old.memoryID, case .reel = page.content else { return nil }
+            return page
+        }
+        let appended = available.values.filter { page in
+            guard !oldIDs.contains(page.id), case .reel = page.content else { return false }
+            return postSessionHead.map { FriendStoryPage.newestPostFirst($0, page) } ?? true
+        }
+        let pagesByAuthor = Dictionary(grouping: retained + appended, by: \.authorID)
+        var seen = Set<UUID>()
+        groups = refreshedGroups.compactMap { group in
+            guard seen.insert(group.authorID).inserted,
+                  let pages = pagesByAuthor[group.authorID], !pages.isEmpty else { return nil }
+            return group.replacingPages(pages.sorted { FriendStoryPage.newestPostFirst($0, $1) })
+        }
+        restorePostCursor(previous: previous, current: previousCurrent)
+    }
+
+    mutating func invalidate(memoryIDs: Set<UUID>, chronologicalPosts: Bool = false) {
         guard !memoryIDs.isEmpty, !isEnded else { return }
         let oldGroup = currentGroup
         let oldPage = currentPage
+        let previous = chronologicalPosts ? pagesInPostOrder : []
         groups = groups.compactMap { group in
             let pages = group.pages.filter { !memoryIDs.contains($0.memoryID) }
             return pages.isEmpty ? nil : group.replacingPages(pages)
         }
-        restoreCursor(afterRemovingFrom: oldGroup, current: oldPage)
+        if chronologicalPosts {
+            restorePostCursor(previous: previous, current: oldPage)
+        } else {
+            restoreCursor(afterRemovingFrom: oldGroup, current: oldPage)
+        }
     }
 
     mutating func end() {
         selectedAuthorID = nil
         groups = []
         resumePageIDs = [:]
+        postSessionHead = nil
+    }
+
+    private mutating func restorePostCursor(previous: [FriendStoryPage], current oldPage: FriendStoryPage?) {
+        let pages = pagesInPostOrder
+        let available = Dictionary(pages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let index = previous.firstIndex { $0.id == oldPage?.id } ?? 0
+        let next = previous.dropFirst(index + 1).compactMap { available[$0.id] }.first
+        let earlier = previous.prefix(index).reversed().compactMap { available[$0.id] }.first
+        guard let destination = oldPage.flatMap({ available[$0.id] }) ?? next ?? earlier ?? pages.first else {
+            end()
+            return
+        }
+        let validCursors = Dictionary(groups.map { ($0.authorID, Set($0.pages.map(\.id))) },
+            uniquingKeysWith: { first, _ in first })
+        resumePageIDs = resumePageIDs.filter { validCursors[$0.key]?.contains($0.value) == true }
+        selectedAuthorID = destination.authorID
+        resumePageIDs[destination.authorID] = destination.id
     }
 
     private mutating func restoreCursor(afterRemovingFrom oldGroup: FriendStoryGroup?, current oldPage: FriendStoryPage?) {
@@ -457,6 +569,11 @@ struct FriendStorySession {
                 resumePageIDs.removeValue(forKey: group.authorID)
             }
         }
+    }
+
+    private mutating func refreshPageSnapshots() {
+        pagesInStoryOrder = groups.flatMap(\.pages)
+        pagesInPostOrder = pagesInStoryOrder.sorted { FriendStoryPage.newestPostFirst($0, $1) }
     }
 
     private static func initialPage(in group: FriendStoryGroup, viewedKeys: Set<String>) -> FriendStoryPage? {

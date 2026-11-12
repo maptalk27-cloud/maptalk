@@ -19,6 +19,28 @@ struct FriendStoryNavigationTests {
     private let bob = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
     @Test
+    func zoomSourceResolvesTheLiveControlOnEveryLookup() {
+        let sources = MapTalkCardSourceRegistry()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let post = UIView(frame: CGRect(x: 20, y: 500, width: 56, height: 66))
+        let poi = UIView(frame: CGRect(x: 50, y: 150, width: 56, height: 56))
+        window.addSubview(post)
+        window.addSubview(poi)
+        sources.register(post, id: .posts)
+        sources.register(poi, id: .poi(.author(alice)))
+        sources.selectedID = .posts
+        #expect(sources.sourceView() === post)
+        post.center = CGPoint(x: 230, y: 340)
+        #expect(sources.sourceView()?.center == CGPoint(x: 230, y: 340))
+        sources.selectedID = .poi(.author(alice))
+        #expect(sources.sourceView() === poi)
+        sources.selectedID = .posts
+        #expect(sources.sourceView() === post)
+        post.removeFromSuperview()
+        #expect(sources.sourceView() == nil)
+    }
+
+    @Test
     func progressTapSelectsTheExactUpdateAcrossSparseAndDenseStories() {
         for count in [1, 3, 12, 19, 90] {
             for index in 0..<count {
@@ -314,6 +336,46 @@ struct FriendStoryNavigationTests {
             #expect(nav.needsMapFocus(locationKey: nextKey, viewportSize: viewport),
                     "A new location must focus even when all posts belong to the current user")
         }
+    }
+
+    @Test
+    func historicalPostSwipeUsesItsLocationAndPreservesTheReturnMap() throws {
+        var oldPost = reel(id: 211, author: bob, ago: 30 * 86_400)
+        oldPost.center = .init(latitude: 20.825, longitude: -156.92)
+        let posts = FriendStoryFeed.postGroups(
+            reals: [reel(id: 210, author: alice, ago: 60), oldPost],
+            userProvider: { _ in nil }, now: now)
+        let origin = snapshot(latitude: 47.6, longitude: -122.3)
+        let nav = FriendStoryNavigation()
+        nav.begin(groups: posts, authorID: alice, viewedKeys: [], origin: origin)
+        let pages = FriendStoryPageSelection.pagerPages(in: try #require(nav.session), chronologicalPosts: true)
+        let viewportSize = CGSize(width: 400, height: 800)
+        nav.lastLocationKey = pages[0].locationKey
+        nav.lastViewportSize = viewportSize
+        nav.lastFocusedAuthorID = alice
+
+        #expect(nav.selectPagerPage(id: pages[1].id, fromAuthorID: alice,
+            fromPageID: pages[0].id, chronologicalPosts: true))
+        let selected = try #require(nav.session?.currentPage)
+        let coordinate = try #require(selected.coordinate)
+        #expect(coordinate.distance(to: oldPost.center) < 1)
+        #expect(nav.needsMapFocus(locationKey: try #require(selected.locationKey),
+            viewportSize: viewportSize, authorID: selected.authorID))
+        #expect(nav.origin?.region?.center.latitude == origin.region?.center.latitude)
+
+        let controller = MapFlightController()
+        defer { controller.cancelActiveTransition() }
+        let target = flightRegion(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        let viewport = MapCameraViewport(size: viewportSize, topInset: 150, bottomInset: 352)
+        let probe = FlightProbe(position: .region(try #require(origin.region)))
+        controller.handleRegionChange(currentRegion: origin.region, targetRegion: target,
+            cause: .real, viewport: viewport, browsingCoordinates: nil,
+            cameraPosition: probe.binding) { probe.updates.append($0) }
+        let landing = try #require(controller.pendingLandingRegion)
+        let expected = viewport.framed(MKCoordinateRegion(center: coordinate, span: landing.span))
+        #expect(landing.center.distance(to: expected.center) < 1,
+                "The selected historical Post lands above its compact card")
+        #expect(!probe.writes.isEmpty)
     }
 
     @Test
@@ -692,6 +754,127 @@ struct FriendStoryNavigationTests {
         #expect(landed.span.longitudeDelta <= nextTarget.span.longitudeDelta * 1.15)
         #expect(landed.span.latitudeDelta < liftedRegion.span.latitudeDelta / 10)
         #expect(probe.updates.count == 1)
+    }
+
+    @Test
+    func firstHomeCardOpenKeepsIndependentPresentationOwners() {
+        for flow in [MapTalkFeedPresentation.personStory, .posts] {
+            let cards = MapTalkCardPresentation(poiCompactFraction: 0.35, postCompactFraction: 0.48)
+            var didOpen = false
+            cards.perform(in: flow) {
+                didOpen = true
+                cards.current.presentNewContent()
+            }
+
+            #expect(didOpen, "Opening from the map must not wait for an unrelated dismissal")
+            #expect(cards.isPresented)
+            #expect(cards.activeFlow == flow)
+            #expect(cards.current === (flow == .posts ? cards.posts : cards.poi))
+            #expect(cards.poi.compactDetent == .fraction(0.35))
+            #expect(cards.posts.compactDetent == .fraction(0.48))
+            #expect(cards.poi.isPresented == (flow == .personStory))
+            #expect(cards.posts.isPresented == (flow == .posts))
+        }
+    }
+
+    @Test
+    func expandedHomeCardReplacementKeepsTheNativeSurfaceMounted() {
+        let cards = MapTalkCardPresentation(poiCompactFraction: 0.35, postCompactFraction: 0.48)
+        cards.perform(in: .personStory) { cards.poi.presentExpandedContent() }
+        var didOpenPost = false
+        cards.perform(in: .posts) {
+            #expect(cards.isPresented, "Replacing content must not first dismiss the native surface")
+            didOpenPost = true
+            cards.posts.presentNewContent()
+            #expect(cards.isPresented)
+        }
+
+        #expect(didOpenPost, "A live replacement must not wait for onDismiss or another run loop")
+        #expect(cards.isPresented)
+        #expect(cards.activeFlow == .posts)
+        #expect(cards.posts.isPresented)
+        #expect(cards.posts.detent == .fraction(0.48))
+        #expect(!cards.poi.isPresented)
+        #expect(cards.poi.detent == .large, "The inactive owner does not donate its detent to Post")
+        #expect(cards.didDismiss(.personStory), "A stale outgoing callback cannot clear the new card")
+        #expect(cards.isPresented)
+        #expect(cards.posts.isPresented)
+    }
+
+    @Test
+    func rapidLiveHomeCardReplacementsDoNotScheduleDeferredReopens() async {
+        let cards = MapTalkCardPresentation(poiCompactFraction: 0.35, postCompactFraction: 0.48)
+        cards.perform(in: .personStory) { cards.poi.presentNewContent() }
+        var opened: [String] = []
+        cards.perform(in: .posts) {
+            opened.append("post")
+            cards.posts.presentNewContent()
+        }
+        #expect(opened == ["post"])
+        #expect(cards.isPresented)
+        #expect(cards.didDismiss(.personStory))
+        cards.perform(in: .personStory) {
+            opened.append("latest-poi")
+            cards.poi.presentNewContent()
+        }
+        #expect(opened == ["post", "latest-poi"])
+        #expect(cards.isPresented)
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+
+        #expect(opened == ["post", "latest-poi"], "There is no delayed request to reopen an earlier card")
+        #expect(cards.activeFlow == .personStory)
+        #expect(cards.isPresented)
+        #expect(cards.poi.isPresented)
+        #expect(cards.poi.detent == .fraction(0.35))
+        #expect(!cards.posts.isPresented)
+        #expect(cards.didDismiss(.personStory), "An old callback cannot close a newly reopened owner")
+        #expect(cards.didDismiss(.posts))
+        #expect(cards.poi.isPresented)
+    }
+
+    @Test
+    func homeCardCloseCanReopenImmediatelyWithoutWaitingForDismissCallback() {
+        for previousFlow in [MapTalkFeedPresentation.personStory, .posts] {
+            for nextFlow in [MapTalkFeedPresentation.personStory, .posts] {
+                let cards = MapTalkCardPresentation(poiCompactFraction: 0.35, postCompactFraction: 0.48)
+                cards.perform(in: previousFlow) { cards.current.presentExpandedContent() }
+                cards.nativePresentationChanged(false)
+                #expect(!cards.isPresented)
+                #expect(!cards.current.isPresented)
+                #expect(cards.isMounted, "The return source stays mounted until native zoom finishes")
+
+                var didReopen = false
+                cards.perform(in: nextFlow) {
+                    didReopen = true
+                    cards.current.presentNewContent()
+                }
+
+                #expect(didReopen, "A missing or delayed onDismiss must not swallow the next tap")
+                #expect(cards.isPresented)
+                #expect(cards.activeFlow == nextFlow)
+                #expect(cards.current.isPresented)
+                #expect(cards.current.detent == cards.current.compactDetent)
+                #expect(cards.poi.isPresented == (nextFlow == .personStory))
+                #expect(cards.posts.isPresented == (nextFlow == .posts))
+
+                let revision = cards.current.contentRevision
+                #expect(cards.didDismiss(previousFlow),
+                        "A stale callback must preserve the reopened card, including the same flow")
+                #expect(cards.isPresented)
+                #expect(cards.current.isPresented)
+                #expect(cards.current.contentRevision == revision)
+
+                cards.nativePresentationChanged(false)
+                #expect(!cards.didDismiss(nextFlow), "A genuine close still allows host cleanup")
+                #expect(!cards.isPresented)
+                #expect(!cards.isMounted)
+                cards.perform(in: nextFlow) { cards.current.presentNewContent() }
+                #expect(cards.isPresented, "Finishing a genuine close must not lock the next open")
+            }
+        }
     }
 
     @Test
@@ -1078,6 +1261,125 @@ struct FriendStoryNavigationTests {
         #expect(nav.session?.currentPage?.id == selected)
     }
 
+    @Test(arguments: [false, true])
+    func bubblePushPinsTheTappedIncomingPageAndRestoresItOnReturn(crossesAuthor: Bool) throws {
+        let nav = FriendStoryNavigation()
+        let groups = authorSequenceFixtures()
+        let departure = groups[0].pages[crossesAuthor ? 1 : 0]
+        let tapped = crossesAuthor ? groups[1].pages[0] : groups[0].pages[1]
+        let origin = snapshot(latitude: 47.6, longitude: -122.3)
+        nav.begin(groups: groups, authorID: departure.authorID, viewedKeys: [], origin: origin)
+        nav.session?.selectPage(id: departure.id)
+        let parentCamera = snapshot(latitude: 12.34, longitude: 56.78)
+        let route = bubbleRoute(id: 900, returnCamera: parentCamera, returnDetent: .large)
+
+        #expect(nav.push(route, from: tapped),
+                "A Bubble tap can arrive before its incoming page's swipe selection commits")
+        #expect(nav.session?.currentPage?.id == tapped.id)
+        #expect(nav.session?.selectedAuthorID == tapped.authorID)
+        #expect(nav.routes.first?.returnPageID == tapped.id)
+
+        // Simulate another root-cursor update while the Bubble covers the feed.
+        nav.session?.selectAuthor(id: departure.authorID)
+        nav.session?.selectPage(id: departure.id)
+        let popped = try #require(nav.popRoute())
+        #expect(popped.id == route.id)
+        #expect(popped.returnCamera.region?.center.latitude == 12.34)
+        #expect(popped.returnCamera.region?.center.longitude == 56.78)
+        #expect(popped.returnDetent == .large)
+        #expect(nav.routes.isEmpty)
+        #expect(nav.session?.currentPage?.id == tapped.id)
+        #expect(nav.session?.selectedAuthorID == tapped.authorID)
+        #expect(nav.origin?.region?.center.latitude == origin.region?.center.latitude)
+
+        #expect(nav.push(route, from: tapped),
+                "Selecting an already-current source is valid even when selectPage reports no change")
+        #expect(nav.routes.first?.returnPageID == tapped.id)
+        #expect(nav.popRoute()?.id == route.id)
+        #expect(nav.session?.currentPage?.id == tapped.id)
+    }
+
+    @Test
+    func nestedBubbleReturnPreservesParentSelectionAndDefaultRootOrigin() throws {
+        let nav = FriendStoryNavigation()
+        let groups = authorSequenceFixtures()
+        let origin = snapshot(latitude: 47.6, longitude: -122.3)
+        nav.begin(groups: groups, authorID: alice, viewedKeys: [], origin: origin)
+        let rootPage = try #require(nav.session?.currentPage)
+        let parent = bubbleRoute(id: 910, returnCamera: origin, returnDetent: .fraction(0.48))
+        #expect(nav.push(parent), "Omitting the source records the current root page")
+        #expect(nav.routes.first?.returnPageID == rootPage.id)
+        let selectedChild = reel(id: 911, author: alice, ago: 9).id
+        nav.routes[0].selectedID = selectedChild
+        let childCamera = snapshot(latitude: -20, longitude: 130)
+        let nested = bubbleRoute(id: 920, returnCamera: childCamera, returnDetent: .large)
+
+        #expect(nav.push(nested, from: groups[1].pages[0]))
+        #expect(nav.session?.currentPage?.id == rootPage.id,
+                "Nested navigation must not repin the root feed to another rendered page")
+        let poppedNested = try #require(nav.popRoute())
+        #expect(poppedNested.id == nested.id)
+        #expect(poppedNested.returnCamera.region?.center.latitude == -20)
+        #expect(poppedNested.returnDetent == .large)
+        #expect(nav.routes.count == 1)
+        #expect(nav.routes.first?.id == parent.id)
+        #expect(nav.routes.first?.selectedID == selectedChild)
+        #expect(nav.session?.currentPage?.id == rootPage.id)
+
+        #expect(nav.popRoute()?.id == parent.id)
+        #expect(nav.routes.isEmpty)
+        #expect(nav.session?.currentPage?.id == rootPage.id)
+        #expect(nav.popRoute() == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func bubbleReturnDoesNotResurrectRemovedParentPost(removesEntireFeed: Bool) throws {
+        let nav = FriendStoryNavigation()
+        let groups = authorSequenceFixtures()
+        let origin = snapshot(latitude: 47.6, longitude: -122.3)
+        nav.begin(groups: groups, authorID: alice, viewedKeys: [], origin: origin)
+        let parent = try #require(nav.session?.currentPage)
+        let route = bubbleRoute(id: 930, returnCamera: origin, returnDetent: .fraction(0.48))
+        #expect(nav.push(route, from: parent))
+        let removedIDs = removesEntireFeed
+            ? Set(groups.flatMap(\.pages).map(\.memoryID)) : Set([parent.memoryID])
+        nav.session?.invalidate(memoryIDs: removedIDs, chronologicalPosts: true)
+        let survivingPageID = nav.session?.currentPage?.id
+        let remainingIDs = nav.session?.groups.flatMap(\.pages).map(\.id)
+
+        #expect(nav.popRoute()?.id == route.id)
+        #expect(nav.routes.isEmpty)
+        #expect(nav.session?.currentPage?.id == survivingPageID)
+        #expect(nav.session?.groups.flatMap(\.pages).map(\.id) == remainingIDs)
+        #expect(nav.session?.groups.flatMap(\.pages).contains { $0.memoryID == parent.memoryID } == false)
+        #expect(nav.session?.isEnded == removesEntireFeed)
+    }
+
+    @Test
+    func bubblePushRejectsUnknownAndRemovedSourcePagesWithoutChangingNavigation() throws {
+        let nav = FriendStoryNavigation()
+        let groups = authorSequenceFixtures()
+        let origin = snapshot(latitude: 47.6, longitude: -122.3)
+        nav.begin(groups: groups, authorID: alice, viewedKeys: [], origin: origin)
+        let selected = try #require(nav.session?.currentPage)
+        let route = bubbleRoute(id: 940, returnCamera: origin, returnDetent: .large)
+        let unknownGroups = FriendStoryFeed.groups(reals: [reel(id: 999, author: bob, ago: 5)],
+            ratedPOIs: [], userProvider: { _ in nil }, now: now)
+        let unknown = try #require(unknownGroups.first?.pages.first)
+        #expect(!nav.push(route, from: unknown))
+        #expect(nav.routes.isEmpty)
+        #expect(nav.session?.currentPage?.id == selected.id)
+        #expect(nav.session?.selectedAuthorID == selected.authorID)
+
+        nav.session?.invalidate(memoryIDs: [selected.memoryID], chronologicalPosts: true)
+        let remaining = nav.session?.currentPage?.id
+        #expect(!nav.push(route, from: selected),
+                "A stale rendered Bubble cannot reopen a source removed from the live session")
+        #expect(nav.routes.isEmpty)
+        #expect(nav.session?.currentPage?.id == remaining)
+        #expect(nav.origin?.region?.center.latitude == origin.region?.center.latitude)
+    }
+
     @Test
     func clearRemovesEveryAccountSpecificNavigationValue() throws {
         let nav = FriendStoryNavigation()
@@ -1113,6 +1415,16 @@ struct FriendStoryNavigationTests {
         FriendStoryFeed.groups(reals: [reel(id: 201, author: alice, ago: 100),
             reel(id: 202, author: alice, ago: 50), reel(id: 203, author: bob, ago: 20)],
             ratedPOIs: [], userProvider: { _ in nil }, now: now)
+    }
+
+    private func bubbleRoute(id: Int, returnCamera: FriendStoryNavigation.MapSnapshot,
+                             returnDetent: PresentationDetent) -> FriendStoryNavigation.Route {
+        let children = [reel(id: id, author: alice, ago: 10), reel(id: id + 1, author: alice, ago: 9)]
+        let journey = JourneyPost(id: UUID(), userId: alice, title: "Bubble", content: "",
+            coordinate: children[0].center, createdAt: now, reels: children, pois: [], likes: [], comments: [])
+        let scope = MapJourneyScope(journey: journey, userProvider: { _ in nil })
+        return .init(content: .bubble(scope), selectedID: children[0].id,
+                     returnCamera: returnCamera, returnDetent: returnDetent)
     }
 
     private func authorSequenceFixtures() -> [FriendStoryGroup] {
@@ -1277,10 +1589,203 @@ struct MapTalkPostEntryGeometryTests {
         }
     }
 
+    @Test
+    func draggedCoverStaysBelowTheRailAndAboveTheCard() {
+        let topInset: CGFloat = 150
+        let upper = MapTalkPostEntryGeometry.constrainedCenter(
+            CGPoint(x: -100, y: -100), canvasSize: canvas,
+            topInset: topInset, bottomInset: compactBottomInset)
+        let lower = MapTalkPostEntryGeometry.constrainedCenter(
+            CGPoint(x: 1_000, y: 1_000), canvasSize: canvas,
+            topInset: topInset, bottomInset: compactBottomInset)
+
+        #expect(coverFrame(at: upper).minX == 22)
+        #expect(coverFrame(at: upper).minY == topInset + 22)
+        #expect(coverFrame(at: lower).maxX == canvas.width - 22)
+        #expect(coverFrame(at: lower).maxY == canvas.height - compactBottomInset)
+    }
+
+    @Test
+    func overlappingControlsMovesToTheNearestFreePointNotACorner() {
+        let controls = CGRect(x: 316, y: 480, width: 54, height: 196)
+        let result = MapTalkPostEntryGeometry.constrainedCenter(
+            CGPoint(x: 340, y: 600), canvasSize: canvas,
+            topInset: 150, bottomInset: baseBottomInset, excludedFrame: controls)
+
+        #expect(result.y == 600)
+        #expect(result.x > canvas.width / 2)
+        #expect(!coverFrame(at: result).intersects(controls.insetBy(dx: -12, dy: -12)))
+    }
+
+    @Test
+    func automaticClearanceDoesNotReplaceTheRememberedDragPosition() {
+        let remembered = CGPoint(x: 210, y: 650)
+        let open = MapTalkPostEntryGeometry.constrainedCenter(remembered,
+            canvasSize: canvas, topInset: 150, bottomInset: compactBottomInset)
+        let closed = MapTalkPostEntryGeometry.constrainedCenter(remembered,
+            canvasSize: canvas, topInset: 150, bottomInset: baseBottomInset)
+        let idle = MapTalkPostEntryGeometry.center(canvasSize: canvas, bottomInset: baseBottomInset)
+
+        #expect(open.x == remembered.x)
+        #expect(open.y < remembered.y)
+        #expect(closed == remembered)
+        #expect(MapTalkPostEntryGeometry.constrainedCenter(idle,
+            canvasSize: canvas, topInset: 0, bottomInset: baseBottomInset) == idle)
+    }
+
     private func coverFrame(at center: CGPoint) -> CGRect {
         let size = MapTalkPostEntryGeometry.size
         return CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2,
                       width: size.width, height: size.height)
+    }
+}
+
+@MainActor
+struct DurablePostFeedTests {
+    private let now = Date(timeIntervalSince1970: 1_790_000_000)
+    private let alice = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+    private let bob = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+
+    @Test
+    func postHistoryIncludesOldPublicPostsButNotPrivatePendingOrPOIRecords() throws {
+        let old = record(101, author: alice, ago: 10 * 86_400)
+        let records = [old,
+            record(102, author: bob, ago: 20, visibility: "private"),
+            record(103, author: alice, ago: 20, moderation: "pending"),
+            record(104, author: bob, ago: 20, kind: "poi")]
+        let posts = groups(records).flatMap(\.pages)
+        #expect(posts.map(\.memoryID) == [old.id])
+        let page = try #require(posts.first)
+        #expect(page.expiresAt == .distantFuture)
+        guard case let .reel(real) = page.content else { Issue.record("Expected original Reel"); return }
+        #expect(real.expiresAt < now, "Post history must not renew the live map lifetime")
+        #expect(!StoryReadKeys.isActive(real, asOf: now))
+    }
+
+    @Test
+    func defaultPOIAndStoryRecencyRemainUnchanged() {
+        let oldPost = record(110, author: alice, ago: 10 * 86_400)
+        let oldPlace = record(111, author: alice, ago: 10 * 86_400, kind: "poi")
+        let recentPlace = record(112, author: bob, ago: 60, kind: "poi")
+        let records = [oldPost, oldPlace, recentPlace]
+        let stories = FriendStoryFeed.groups(reals: [], ratedPOIs: [], backendRecords: records,
+            userProvider: { _ in nil }, now: now)
+        #expect(stories.flatMap(\.pages).map(\.memoryID) == [recentPlace.id])
+        #expect(groups(records).flatMap(\.pages).map(\.memoryID) == [oldPost.id])
+    }
+
+    @Test
+    func chronologyCrossesAuthorsAndBreaksDateTiesByDescendingID() throws {
+        let records = [record(121, author: alice, ago: 10), record(122, author: bob, ago: 20),
+            record(123, author: alice, ago: 20), record(124, author: alice, ago: 30)]
+        let initial = groups(records)
+        let first = try #require(initial.first?.pages.first)
+        let read = FriendStoryFeed.postGroups(reals: [], backendRecords: records,
+            viewedKeys: [first.readKey], userProvider: { _ in nil }, now: now)
+        let session = try #require(FriendStorySession(groups: read, authorID: alice))
+        #expect(ordered(session).map(\.memoryID) == [records[0].id, records[2].id, records[1].id, records[3].id])
+        #expect(MapTalkPostEntryPage.resolve(in: read, resumePageID: nil)?.memoryID == records[0].id)
+    }
+
+    @Test
+    func nativePostSwipeUsesGlobalNeighborsAndRejectsStaleAndSkippedPages() throws {
+        let records = [record(131, author: alice, ago: 10), record(132, author: bob, ago: 20),
+                       record(133, author: alice, ago: 30)]
+        let navigation = FriendStoryNavigation()
+        navigation.begin(groups: groups(records), authorID: alice, viewedKeys: [],
+            origin: .init(camera: nil, region: nil))
+        let pages = ordered(try #require(navigation.session))
+        #expect(!navigation.selectPagerPage(id: pages[2].id, fromAuthorID: alice,
+            fromPageID: pages[0].id, chronologicalPosts: true))
+        #expect(navigation.selectPagerPage(id: pages[1].id, fromAuthorID: alice,
+            fromPageID: pages[0].id, chronologicalPosts: true))
+        #expect(!navigation.selectPagerPage(id: pages[2].id, fromAuthorID: alice,
+            fromPageID: pages[0].id, chronologicalPosts: true))
+        #expect(navigation.selectPagerPage(id: pages[2].id, fromAuthorID: bob,
+            fromPageID: pages[1].id, chronologicalPosts: true))
+        #expect(navigation.session?.currentPage?.id == pages[2].id)
+        #expect(navigation.selectPagerPage(id: pages[1].id, fromAuthorID: alice,
+            fromPageID: pages[2].id, chronologicalPosts: true))
+    }
+
+    @Test
+    func olderPaginationAppendsWithoutMovingCurrentAndNewHeadWaitsForReopen() throws {
+        let initial = [record(141, author: alice, ago: 10), record(142, author: bob, ago: 20)]
+        var session = try #require(FriendStorySession(groups: groups(initial), authorID: bob))
+        let currentID = session.currentPage?.id
+        let older = record(143, author: alice, ago: 30)
+        let newest = record(144, author: bob, ago: 1)
+        let refreshed = groups(initial + [older, newest])
+        session.reconcilePosts(with: refreshed)
+        #expect(session.currentPage?.id == currentID)
+        #expect(ordered(session).map(\.memoryID) == initial.map(\.id) + [older.id])
+        session.reconcilePosts(with: refreshed)
+        #expect(ordered(session).count == 3, "Media refreshes must not duplicate appended pages")
+        let reopened = try #require(FriendStorySession(groups: refreshed, authorID: bob))
+        #expect(ordered(reopened).first?.memoryID == newest.id)
+    }
+
+    @Test
+    func paginationFillsGapsBetweenANewHeadAndCachedTailWithoutAdmittingNewerArrivals() throws {
+        let head = record(145, author: alice, ago: 10)
+        let cachedTail = record(146, author: bob, ago: 100)
+        let gap = record(147, author: alice, ago: 40)
+        let newerArrival = record(148, author: bob, ago: 1)
+        var session = try #require(FriendStorySession(groups: groups([head, cachedTail]), authorID: bob))
+        let currentID = session.currentPage?.id
+
+        session.reconcilePosts(with: groups([head, cachedTail, gap, newerArrival]))
+        #expect(ordered(session).map(\.memoryID) == [head.id, gap.id, cachedTail.id])
+        #expect(session.currentPage?.id == currentID)
+
+        // Removing the initial head must not lower the frozen history boundary.
+        session.invalidate(memoryIDs: [head.id], chronologicalPosts: true)
+        let earlierGap = record(149, author: alice, ago: 20)
+        session.reconcilePosts(with: groups([cachedTail, gap, earlierGap, newerArrival]))
+        #expect(ordered(session).map(\.memoryID) == [earlierGap.id, gap.id, cachedTail.id])
+        #expect(session.currentPage?.id == currentID)
+    }
+
+    @Test
+    func refreshedCaptionKeepsCurrentPageAndRemovalChoosesNextGlobalNeighbor() throws {
+        let records = [record(151, author: alice, ago: 10), record(152, author: bob, ago: 20),
+                       record(153, author: alice, ago: 30)]
+        var session = try #require(FriendStorySession(groups: groups(records), authorID: bob))
+        let currentID = session.currentPage?.id
+        let edited = record(152, author: bob, ago: 20, caption: "Updated caption")
+        session.reconcilePosts(with: groups([records[0], edited, records[2]]))
+        #expect(session.currentPage?.id == currentID)
+        if case let .reel(real)? = session.currentPage?.content { #expect(real.message == "Updated caption") }
+        else { Issue.record("Expected updated original card") }
+        session.reconcilePosts(with: groups([records[0], records[2]]))
+        #expect(session.currentPage?.memoryID == records[2].id)
+        #expect(session.selectedAuthorID == alice)
+        session.invalidate(memoryIDs: [records[2].id], chronologicalPosts: true)
+        #expect(session.currentPage?.memoryID == records[0].id)
+        session.invalidate(memoryIDs: [records[0].id], chronologicalPosts: true)
+        #expect(session.isEnded)
+    }
+
+    private func groups(_ records: [BackendMemory]) -> [FriendStoryGroup] {
+        FriendStoryFeed.postGroups(reals: [], backendRecords: records,
+            userProvider: { _ in nil }, now: now)
+    }
+
+    private func ordered(_ session: FriendStorySession) -> [FriendStoryPage] {
+        FriendStoryPageSelection.pagerPages(in: session, chronologicalPosts: true)
+    }
+
+    private func record(_ number: Int, author: UUID, ago: TimeInterval,
+                        visibility: String = "public", moderation: String = "approved",
+                        kind: String = "reel", caption: String = "Post") -> BackendMemory {
+        let id = UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", number))!
+        let date = now.addingTimeInterval(-ago)
+        let location = BackendCoordinate(latitude: 47.6, longitude: -122.3)
+        return BackendMemory(id: id, ownerId: author, owner: .init(id: author, handle: "Member"),
+            kind: kind, visibility: visibility, location: location, caption: caption,
+            place: kind == "poi" ? .init(id: id, sourceId: nil, name: "Place", category: "other",
+                coordinate: location) : nil, media: [], createdAt: date, publishedAt: date,
+            expiresAt: date.addingTimeInterval(StoryReadKeys.freshWindow), moderationStatus: moderation)
     }
 }
 
@@ -1313,10 +1818,10 @@ struct MapTalkPostEntryPageTests {
     }
 
     @Test
-    func firstTextOnlyPostIsNotSkippedForAPhotoCover() {
+    func newestTextOnlyPostIsNotSkippedForAPhotoCover() {
         let alice = user("alice")
-        let text = reel(author: alice, ago: 120)
-        let photo = reel(author: alice, ago: 60,
+        let text = reel(author: alice, ago: 60)
+        let photo = reel(author: alice, ago: 120,
             attachments: [.init(kind: .photo(URL(string: "https://example.com/cover.jpg")!))])
         let groups = FriendStoryFeed.groups(reals: [photo, text], ratedPOIs: [],
             userProvider: { _ in nil }, now: now)
@@ -1347,7 +1852,7 @@ struct MapTalkPostEntryPageTests {
         let removed = reel(author: alice, ago: 120), remaining = reel(author: alice, ago: 60)
         let initial = FriendStoryFeed.groups(reals: [removed, remaining], ratedPOIs: [],
             userProvider: { _ in nil }, now: now)
-        let saved = try #require(initial.first?.pages.first)
+        let saved = try #require(initial.flatMap(\.pages).first { $0.memoryID == removed.id })
         let refreshed = FriendStoryFeed.groups(reals: [remaining], ratedPOIs: [],
             userProvider: { _ in nil }, now: now)
 
@@ -1396,7 +1901,7 @@ struct MapTalkPostEntryPageTests {
             reals: [reel(author: alice, ago: 180), reel(author: alice, ago: 120),
                     reel(author: alice, ago: 60)],
             ratedPOIs: [], userProvider: { _ in nil }, now: now)
-        let pages = try #require(groups.first?.pages)
+        let pages = groups.flatMap(\.pages).sorted(by: FriendStoryPage.newestPostFirst)
         let readStates: [Set<String>] = [[], Set(pages.map(\.readKey))]
 
         for viewedKeys in readStates {

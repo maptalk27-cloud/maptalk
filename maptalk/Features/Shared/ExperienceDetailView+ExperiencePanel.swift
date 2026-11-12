@@ -29,11 +29,23 @@ struct ExperiencePanel: View {
     var featuredPOIMedia: RatedPOI.Media? = nil
     var featuredPOIMediaContent: AnyView? = nil
     @Environment(\.appEnv) private var environment
+    @Environment(\.postEngagementRequest) private var postEngagementRequest
     @State private var contentNeedsScrolling = false
 
     var body: some View {
+        if usesNeutralAppearance && isSingleVideoHero {
+            GeometryReader { geometry in
+                scrollContent(singleVideoViewportHeight: geometry.size.height)
+            }
+        } else {
+            scrollContent()
+        }
+    }
+
+    private func scrollContent(singleVideoViewportHeight: CGFloat? = nil) -> some View {
+        ScrollViewReader { scroll in
         ScrollView {
-            panelContent
+            panelContent(singleVideoViewportHeight: singleVideoViewportHeight)
                 .background(ExperienceContentScrollHandoff(isScrollable: contentNeedsScrolling))
         }
         // Keep one content/player tree while the sheet moves. Only the outer
@@ -46,11 +58,19 @@ struct ExperiencePanel: View {
             contentNeedsScrolling = needsScrolling
         }
         .scrollBounceBehavior(.basedOnSize, axes: .vertical)
-        .padding(.horizontal, isSingleVideoHero ? 0 : -ExperienceSheetLayout.horizontalInset)
+        .padding(.horizontal, isSingleVideoHero || usesNeutralAppearance ? 0 : -ExperienceSheetLayout.horizontalInset)
         .environment(\.experienceNeutralAppearance, usesNeutralAppearance)
+        .task(id: postEngagementRequest?.id) {
+            guard usesNeutralAppearance, let request = postEngagementRequest,
+                  data.hero?.real.id == request.postID else { return }
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            scroll.scrollTo(request.section, anchor: .top)
+        }
+        }
     }
 
-    private var panelContent: some View {
+    private func panelContent(singleVideoViewportHeight: CGFloat?) -> some View {
         VStack(spacing: 28) {
                 if let journey = data.journey {
                     JourneyCard(
@@ -82,13 +102,24 @@ struct ExperiencePanel: View {
                         journeyProvider: journeyProvider,
                         userProvider: userProvider,
                         usesNeutralAppearance: usesNeutralAppearance && !isSingleVideoHero,
+                        singleVideoViewportHeight: singleVideoViewportHeight,
                         isPlaybackActive: isPlaybackActive,
                         onUserSelected: onUserSelected,
                         onCapsuleTap: onJourneyAvatarStackTap
                     )
-                        .padding(.horizontal, isSingleVideoHero ? 0 : 4)
+                        .padding(.horizontal, isSingleVideoHero || usesNeutralAppearance ? 0 : 4)
 
-                    if data.engagement.hasContent {
+                    if usesNeutralAppearance {
+                        if let locationName = hero.real.locationName {
+                            Label(locationName, systemImage: "mappin.and.ellipse")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
+                                .accessibilityIdentifier("experience.real.location.\(hero.real.id.uuidString)")
+                        }
+                        postEngagementContent
+                    } else if data.engagement.hasContent {
                         EngagementSection(
                             model: data.engagement,
                             accentColor: data.accentColor,
@@ -105,12 +136,52 @@ struct ExperiencePanel: View {
                 if let commentTarget, let backend = environment.backend {
                     BackendCommentThread(store: backend, target: commentTarget, onUserSelected: onUserSelected)
                         .id(commentTarget)
+                        .id(PostEngagementSection.comments)
                         .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
         }
         .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
-        .padding(.top, isSingleVideoHero || featuredPOIMedia != nil ? 0 : 40)
+        .padding(.top, isSingleVideoHero || featuredPOIMedia != nil || usesNeutralAppearance ? 0 : 40)
         .padding(.bottom, 60)
+    }
+
+    private var postEngagementContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Group {
+                if data.engagement.friendLikes.isEmpty {
+                    Text("No likes yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    LikesAvatarGrid(
+                        entries: data.engagement.friendLikes,
+                        iconName: "heart",
+                        storyContributors: [],
+                        accentColor: data.accentColor,
+                        onUserSelected: onUserSelected,
+                        onContributorViewed: onPOIContributorViewed,
+                        isContributorUnseen: isPOIContributorUnseen
+                    )
+                }
+            }
+            .id(PostEngagementSection.likes)
+
+            if environment.backend == nil || commentTarget == nil {
+                Group {
+                    if data.engagement.friendComments.isEmpty {
+                        Text("No comments yet")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        CommentThreadList(entries: data.engagement.friendComments, onUserSelected: onUserSelected)
+                    }
+                }
+                .id(PostEngagementSection.comments)
+            }
+        }
+        .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
     }
 
     private var isSingleVideoHero: Bool {
@@ -820,6 +891,7 @@ struct HeroSection: View {
     let hideMedia: Bool
     let useTallLayout: Bool
     let usesNeutralAppearance: Bool
+    let singleVideoViewportHeight: CGFloat?
     let isPlaybackActive: Bool
     let onUserSelected: ((User) -> Void)?
     let onCapsuleTap: ((JourneyPost) -> Void)?
@@ -832,6 +904,7 @@ struct HeroSection: View {
         hideMedia: Bool = false,
         useTallLayout: Bool = false,
         usesNeutralAppearance: Bool = false,
+        singleVideoViewportHeight: CGFloat? = nil,
         isPlaybackActive: Bool = true,
         onUserSelected: ((User) -> Void)? = nil,
         onCapsuleTap: ((JourneyPost) -> Void)? = nil
@@ -843,6 +916,7 @@ struct HeroSection: View {
         self.hideMedia = hideMedia
         self.useTallLayout = useTallLayout
         self.usesNeutralAppearance = usesNeutralAppearance
+        self.singleVideoViewportHeight = singleVideoViewportHeight
         self.isPlaybackActive = isPlaybackActive
         self.onUserSelected = onUserSelected
         self.onCapsuleTap = onCapsuleTap
@@ -862,6 +936,7 @@ struct HeroSection: View {
             hideMedia: hideMedia,
             useTallLayout: useTallLayout,
             usesNeutralAppearance: usesNeutralAppearance,
+            singleVideoViewportHeight: singleVideoViewportHeight,
             isPlaybackActive: isPlaybackActive,
             onUserSelected: onUserSelected,
             onCapsuleTap: onCapsuleTap

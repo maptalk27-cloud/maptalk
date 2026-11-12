@@ -1,10 +1,58 @@
 import Combine
 import MapKit
 import SwiftUI
+import UIKit
 
-enum MapTalkFeedPresentation: Equatable {
+enum MapTalkFeedPresentation: Hashable {
     case personStory
     case posts
+}
+
+enum MapTalkCardTransitionID: Hashable {
+    case posts
+    case poi(MapTalkPOITransitionID)
+    case map
+}
+
+struct MapTalkCardContentIdentity: Hashable {
+    let flow: MapTalkFeedPresentation
+    let revision: Int
+}
+
+/// Identifies the actual control that opened a POI, not its card's content.
+enum MapTalkPOITransitionID: Hashable {
+    case author(UUID)
+    case story(UUID)
+    case place(UUID)
+    case reel(UUID)
+    case footprint(String)
+}
+
+struct MapTalkPOITransitionSource: ViewModifier {
+    let id: MapTalkPOITransitionID
+    let namespace: Namespace.ID?
+    var keepsSourceVisible = false
+    @Environment(\.mapTalkCardSources) private var sources
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let sources {
+            content.background(MapTalkCardSourceAnchor(id: .poi(id), registry: sources))
+        } else if let namespace {
+            if keepsSourceVisible {
+                // Native zoom hides its source while presented. Keep a visual
+                // copy beneath it so the people rail never loses an avatar.
+                ZStack {
+                    content.allowsHitTesting(false).accessibilityHidden(true)
+                    content.matchedTransitionSource(id: MapTalkCardTransitionID.poi(id), in: namespace)
+                }
+            } else {
+                content.matchedTransitionSource(id: MapTalkCardTransitionID.poi(id), in: namespace)
+            }
+        } else {
+            content
+        }
+    }
 }
 
 enum FriendStoryLayout {
@@ -22,30 +70,27 @@ enum FriendStoryLayout {
     }
 }
 
-/// Leave real map pixels above the native sheet for its detached identity.
-/// The model still uses `.large`, so existing media and return routes retain
-/// their expanded behavior without replacing the native pan recognizer.
-private struct FriendStoryExpandedDetent: CustomPresentationDetent {
-    static func height(in context: Context) -> CGFloat? {
-        max(1, context.maxDetentValue - FriendStoryLayout.floatingHeight)
-    }
-}
-
+/// Visual styling only. The home presenter owns native size and transition.
 struct FriendStorySheetChrome: ViewModifier {
     @ObservedObject var presentation: MapExperiencePresentation
     @ObservedObject var navigation: FriendStoryNavigation
+    @ObservedObject var motion: ProfileCardSheetMotion
     var feedPresentation: MapTalkFeedPresentation = .personStory
+    @AppStorage(PostCardPalette.storageKey) private var palette: PostCardPalette = .white
+    @Environment(\.colorScheme) private var inheritedColorScheme
 
     func body(content: Content) -> some View {
-        let expanded: PresentationDetent = navigation.isActive && feedPresentation == .personStory
-            ? .custom(FriendStoryExpandedDetent.self) : .large
-        // One native sheet modifier across both flows. Replacing the modifier
-        // branch while changing its detents can trigger a fallback size.
-        content.mapExperienceSheetChrome(
-            compactDetent: presentation.compactDetent,
-            expandedDetent: expanded,
-            selection: presentation.nativeDetentSelection(expandedDetent: expanded)
-        )
+        let isPost = feedPresentation == .posts && navigation.routes.isEmpty
+        content
+            .environment(\.profileCardSheetMotion, motion)
+            .environment(\.postCardPalette, isPost ? palette : .white)
+            .environment(\.colorScheme, isPost ? palette.colorScheme : inheritedColorScheme)
+            .background(isPost ? AnyShapeStyle(palette.background) : AnyShapeStyle(.thinMaterial))
+            .onChangeCompat(of: navigation.routes.last?.id) { _ in motion.isPaging = false }
+            .onChangeCompat(of: MapTalkCardContentIdentity(
+                flow: feedPresentation, revision: presentation.contentRevision)) { _ in
+                motion.isPaging = false
+            }
     }
 }
 
@@ -71,8 +116,8 @@ enum FriendStoryPageSelection {
     /// Keep native pager tags and positions stable while crossing authors.
     /// The session is already frozen; selecting an author must not replace
     /// its page window while UIKit is finishing the horizontal gesture.
-    static func pagerPages(in session: FriendStorySession) -> [FriendStoryPage] {
-        session.groups.flatMap(\.pages)
+    static func pagerPages(in session: FriendStorySession, chronologicalPosts: Bool = false) -> [FriendStoryPage] {
+        chronologicalPosts ? session.pagesInPostOrder : session.pagesInStoryOrder
     }
 }
 
@@ -96,6 +141,7 @@ final class FriendStoryNavigation: ObservableObject {
         var selectedID: UUID?
         let returnCamera: MapSnapshot
         let returnDetent: PresentationDetent
+        var returnPageID: String? = nil
     }
 
     @Published var session: FriendStorySession?
@@ -106,6 +152,19 @@ final class FriendStoryNavigation: ObservableObject {
     var lastFocusedAuthorID: UUID?
 
     var isActive: Bool { session != nil }
+    var isBrowsingBubble: Bool {
+        if case .bubble? = routes.last?.content { return true }
+        return false
+    }
+
+    var bubbleCompactFraction: CGFloat? {
+        guard let route = routes.last, case let .bubble(scope) = route.content else { return nil }
+        let items = scope.sequenceItems
+        guard let item = items.first(where: { $0.id == route.selectedID }) ?? items.first else {
+            return ProfileCardPagingLayout.poiFraction
+        }
+        return ProfileCardPagingLayout.fraction(for: item.mode)
+    }
 
     func needsMapFocus(locationKey: String, viewportSize: CGSize, authorID: UUID? = nil) -> Bool {
         lastLocationKey != locationKey || lastViewportSize != viewportSize
@@ -133,11 +192,25 @@ final class FriendStoryNavigation: ObservableObject {
     /// landing on the exact adjacent card rather than an unread/resume cursor.
     /// Explicit author selection keeps its existing resume/unread entry rules.
     @discardableResult
-    func selectPagerPage(id: String, fromAuthorID: UUID, fromPageID: String) -> Bool {
+    func selectPagerPage(id: String, fromAuthorID: UUID, fromPageID: String,
+                         chronologicalPosts: Bool = false) -> Bool {
         guard routes.isEmpty, var session,
               session.selectedAuthorID == fromAuthorID,
-              session.currentPage?.id == fromPageID,
-              let group = session.currentGroup,
+              session.currentPage?.id == fromPageID else { return false }
+        if chronologicalPosts {
+            let pages = FriendStoryPageSelection.pagerPages(in: session, chronologicalPosts: true)
+            guard let sourceIndex = pages.firstIndex(where: { $0.id == fromPageID }),
+                  let destinationIndex = pages.firstIndex(where: { $0.id == id }),
+                  abs(destinationIndex - sourceIndex) == 1 else { return false }
+            let destination = pages[destinationIndex]
+            if destination.authorID != session.selectedAuthorID {
+                guard session.selectAuthor(id: destination.authorID) else { return false }
+            }
+            session.selectPage(id: destination.id)
+            self.session = session
+            return true
+        }
+        guard let group = session.currentGroup,
               let pageIndex = session.currentPageIndex,
               let authorIndex = session.groups.firstIndex(where: { $0.authorID == fromAuthorID }) else {
             return false
@@ -163,6 +236,42 @@ final class FriendStoryNavigation: ObservableObject {
             // override it even when every destination page was already read.
             session.selectPage(id: destination.id)
         }
+        self.session = session
+        return true
+    }
+
+    /// A child belongs to the card that was tapped, which can be the incoming
+    /// page of a swipe whose idle callback hasn't committed yet.
+    @discardableResult
+    func push(_ route: Route, from page: FriendStoryPage? = nil) -> Bool {
+        var route = route
+        if routes.isEmpty {
+            if let page, !restoreRootPage(id: page.id) { return false }
+            route.returnPageID = session?.currentPage?.id
+        }
+        routes.append(route)
+        return true
+    }
+
+    @discardableResult
+    func popRoute() -> Route? {
+        guard let route = routes.last else { return nil }
+        // Restore before revealing the retained root pager. Resolve against
+        // live content, never a saved Post payload that may have been removed.
+        if routes.count == 1, let id = route.returnPageID {
+            restoreRootPage(id: id)
+        }
+        routes.removeLast()
+        return route
+    }
+
+    @discardableResult
+    private func restoreRootPage(id: String) -> Bool {
+        guard var session, !session.isEnded,
+              let page = session.pagesInStoryOrder.first(where: { $0.id == id }) else { return false }
+        guard session.currentPage?.id != id else { return true }
+        session.selectAuthor(id: page.authorID)
+        session.selectPage(id: id)
         self.session = session
         return true
     }
@@ -195,6 +304,11 @@ struct FriendStoryFlow: View {
     let onClose: () -> Void
     var allowsPlayback = true
     var feedPresentation: MapTalkFeedPresentation = .personStory
+    var showsBubbleProgress = false
+    var hasMorePosts = false
+    var isLoadingPosts = false
+    var postFeedIssue: String? = nil
+    var onRetryPosts: () -> Void = {}
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
     @State private var placeHistoryStatus: [UUID: PlaceHistoryStatus] = [:]
@@ -221,7 +335,8 @@ struct FriendStoryFlow: View {
                     group: group,
                     page: page,
                     pageIndex: session.currentPageIndex ?? 0,
-                    pagerPages: FriendStoryPageSelection.pagerPages(in: session),
+                    pagerPages: FriendStoryPageSelection.pagerPages(in: session,
+                        chronologicalPosts: feedPresentation == .posts),
                     pagerUserProvider: { id in
                         userProvider(id) ?? session.groups.first(where: { $0.authorID == id })?.user
                     },
@@ -245,7 +360,7 @@ struct FriendStoryFlow: View {
                         withAnimation(.easeInOut(duration: 0.24)) { detent = .large }
                     },
                     onClose: onClose,
-                    onJourney: openBubble,
+                    onJourney: { bubble, sourcePage in openBubble(bubble, from: sourcePage) },
                     onReadReady: onRead,
                     journeyProvider: journeyProvider,
                     userProvider: userProvider,
@@ -264,11 +379,63 @@ struct FriendStoryFlow: View {
                     .accessibilityHidden(navigation.routes.last?.id != route.id)
             }
         }
+        .overlay(alignment: .bottom) {
+            if feedPresentation == .posts, navigation.routes.isEmpty,
+               let session = navigation.session,
+               FriendStoryPageSelection.pagerPages(in: session, chronologicalPosts: true).last?.id
+                    == session.currentPage?.id {
+                if isLoadingPosts {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(8)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.bottom, 4)
+                        .accessibilityLabel("Loading older posts")
+                } else if hasMorePosts {
+                    Button(postFeedIssue == nil ? "Load older posts" : "Couldn't load more · Retry",
+                           action: onRetryPosts)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial, in: Capsule())
+                        .padding(.bottom, 4)
+                }
+            }
+        }
     }
 
     private func movePage(_ offset: Int) {
-        guard navigation.session?.movePage(by: offset) == true,
-              let page = navigation.session?.currentPage else { return }
+        if feedPresentation == .posts {
+            guard let session = navigation.session, let page = session.currentPage else { return }
+            let pages = FriendStoryPageSelection.pagerPages(in: session, chronologicalPosts: true)
+            guard let current = pages.firstIndex(where: { $0.id == page.id }) else { return }
+            let (target, overflow) = current.addingReportingOverflow(offset)
+            guard !overflow, pages.indices.contains(target) else { return }
+            selectPagerPage(pages[target].id, fromAuthorID: page.authorID, fromPageID: page.id)
+            return
+        }
+        guard navigation.routes.isEmpty, navigation.session?.currentPage != nil else { return }
+        let moved = navigation.session?.movePage(by: offset) == true
+        // Like Stories, a forward tap at the end continues to the next person.
+        // The final person's final update closes POI browsing, never opens Posts.
+        if !moved {
+            if offset < 0 {
+                // Back from a person's first update returns to the previous
+                // person's last one, not their forward/unread entry cursor.
+                guard navigation.session?.moveAuthor(by: -1, viewedKeys: viewedKeys) == true,
+                      let lastPage = navigation.session?.currentGroup?.pages.last else { return }
+                navigation.session?.selectPage(id: lastPage.id)
+            } else if offset > 0 {
+                guard navigation.session?.moveAuthor(by: 1, viewedKeys: viewedKeys) == true else {
+                    onClose()
+                    return
+                }
+            } else {
+                return
+            }
+        }
+        guard let page = navigation.session?.currentPage else { return }
         focusPage(page)
     }
 
@@ -282,7 +449,8 @@ struct FriendStoryFlow: View {
     }
 
     private func selectPagerPage(_ id: String, fromAuthorID: UUID, fromPageID: String) {
-        guard navigation.selectPagerPage(id: id, fromAuthorID: fromAuthorID, fromPageID: fromPageID),
+        guard navigation.selectPagerPage(id: id, fromAuthorID: fromAuthorID, fromPageID: fromPageID,
+            chronologicalPosts: feedPresentation == .posts),
               let page = navigation.session?.currentPage else { return }
         focusPage(page)
     }
@@ -293,7 +461,7 @@ struct FriendStoryFlow: View {
         if case let .poi(current, _, _)? = navigation.session?.currentPage?.content {
             isCurrentPlace = navigation.routes.isEmpty && current.id == id
         } else { isCurrentPlace = false }
-        navigation.routes.append(.init(
+        navigation.push(.init(
             content: .place(place),
             returnCamera: captureCamera(),
             returnDetent: detent
@@ -303,7 +471,7 @@ struct FriendStoryFlow: View {
         }
     }
 
-    private func openBubble(_ bubble: JourneyPost) {
+    private func openBubble(_ bubble: JourneyPost, from sourcePage: FriendStoryPage? = nil) {
         // Returning to an ancestor is a pop, not a cycle of identical pages.
         if let index = navigation.routes.firstIndex(where: { route in
             if case let .bubble(scope) = route.content { return scope.journey.id == bubble.id }
@@ -314,40 +482,42 @@ struct FriendStoryFlow: View {
             return
         }
         let scope = MapJourneyScope(journey: bubble, userProvider: userProvider)
-        navigation.routes.append(.init(
+        guard navigation.push(.init(
             content: .bubble(scope),
             selectedID: scope.firstStoryItem?.id,
             returnCamera: captureCamera(),
             returnDetent: detent
-        ))
+        ), from: sourcePage) else { return }
         focusContent(.journey(bubble))
     }
 
     @ViewBuilder
     private func routeContent(_ route: FriendStoryNavigation.Route) -> some View {
         VStack(spacing: 0) {
-            HStack {
-                Button(action: goBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(width: 44, height: 44)
+            if !showsBubbleProgress || !isBubbleRoute(route) {
+                HStack {
+                    Button(action: goBack) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("Back to story")
+                    .accessibilityIdentifier("maptalk.friend-story.back")
+                    Spacer()
+                    Text(routeTitle(route)).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark").font(.system(size: 15, weight: .semibold))
+                            .frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel("Close story")
+                    .accessibilityIdentifier("maptalk.friend-story.close")
                 }
-                .accessibilityLabel("Back to story")
-                .accessibilityIdentifier("maptalk.friend-story.back")
-                Spacer()
-                Text(routeTitle(route)).font(.subheadline.weight(.semibold)).lineLimit(1)
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold))
-                        .frame(width: 44, height: 44)
-                }
-                .accessibilityLabel("Close story")
-                .accessibilityIdentifier("maptalk.friend-story.close")
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .background(.regularMaterial)
             }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
-            .background(.regularMaterial)
 
             switch route.content {
             case let .place(place):
@@ -397,12 +567,38 @@ struct FriendStoryFlow: View {
                     mode: .real(reel, userProvider(reel.userId)),
                     isExpanded: isExpanded,
                     onCollapsedTap: { detent = .large },
-                    onJourneyAvatarStackTap: openBubble,
+                    onJourneyAvatarStackTap: { openBubble($0) },
                     journeyProvider: journeyProvider,
                     userProvider: userProvider
                 )
             case let .bubble(scope):
-                if let selectedID = route.selectedID {
+                if showsBubbleProgress {
+                    HomeBubbleContentView(
+                        scope: scope,
+                        selection: Binding(
+                            get: { navigation.routes.first(where: { $0.id == route.id })?.selectedID },
+                            set: { id in
+                                guard navigation.routes.last?.id == route.id,
+                                      let id,
+                                      let item = scope.sequenceItems.first(where: { $0.id == id }),
+                                      let index = navigation.routes.firstIndex(where: { $0.id == route.id }),
+                                      navigation.routes[index].selectedID != id else { return }
+                                navigation.routes[index].selectedID = id
+                                focusContent(item.mode)
+                            }
+                        ),
+                        isExpanded: isExpanded,
+                        isActive: allowsPlayback && navigation.routes.last?.id == route.id,
+                        onExpand: { detent = .large },
+                        onBack: goBack,
+                        onClose: onClose,
+                        onJourney: { openBubble($0) },
+                        journeyProvider: journeyProvider,
+                        userProvider: userProvider,
+                        onRead: onRead,
+                        viewedKeys: viewedKeys
+                    )
+                } else if let selectedID = route.selectedID {
                     MapExperienceCapsule(
                         pager: .init(items: scope.sequenceItems),
                         selection: Binding(
@@ -417,7 +613,7 @@ struct FriendStoryFlow: View {
                         onCollapsedTap: { detent = .large },
                         journeyProvider: journeyProvider,
                         userProvider: userProvider,
-                        onJourneyAvatarStackTap: openBubble,
+                        onJourneyAvatarStackTap: { openBubble($0) },
                         onPOIContributorViewed: { $0.forEach(onRead) },
                         isPOIContributorUnseen: { keys in keys.contains { !viewedKeys.contains($0) } }
                     )
@@ -494,8 +690,13 @@ struct FriendStoryFlow: View {
         }
     }
 
+    private func isBubbleRoute(_ route: FriendStoryNavigation.Route) -> Bool {
+        if case .bubble = route.content { return true }
+        return false
+    }
+
     private func goBack() {
-        guard let route = navigation.routes.popLast() else { return }
+        guard let route = navigation.popRoute() else { return }
         detent = route.returnDetent == .large ? .large : compactDetent
         restoreCamera(route.returnCamera)
         if navigation.routes.isEmpty, let page = navigation.session?.currentPage {
@@ -504,4 +705,142 @@ struct FriendStoryFlow: View {
             focusPage(page)
         }
     }
+}
+
+/// One native surface, two independent browsing/detent owners. Switching
+/// content keeps the surface mounted. During native opening/closing, only the
+/// latest entry request waits for that transition to finish.
+@MainActor
+final class MapTalkCardPresentation: ObservableObject {
+    let poi: MapExperiencePresentation
+    let posts: MapExperiencePresentation
+    let motion = ProfileCardSheetMotion()
+    let sources = MapTalkCardSourceRegistry()
+
+    @Published private(set) var activeFlow: MapTalkFeedPresentation = .personStory
+    @Published private(set) var isPresented = false
+    // The model closes before UIKit finishes zooming back to the source.
+    @Published private(set) var isMounted = false
+    // The departing card still owns its source until UIKit finishes or cancels.
+    // New entry taps wait until this physical transition completes.
+    @Published private(set) var closingContent: MapTalkCardContentIdentity?
+
+    var mountedFlow: MapTalkFeedPresentation? {
+        isMounted ? (closingContent?.flow ?? activeFlow) : nil
+    }
+
+    var current: MapExperiencePresentation { owner(for: activeFlow) }
+
+    private var isReplacingContent = false
+    private var isNativeTransitioning = false
+    private var pendingPresentation: (flow: MapTalkFeedPresentation, action: () -> Void)?
+    // UIKit sets isBeingDismissed before its appearance/delegate callbacks.
+    // Inspect that real state at tap time so this first-frame gap can't mutate
+    // the departing card's shared navigation.
+    var deferSelectionForNativeTransition: (() -> Bool)?
+    private var subscriptions = Set<AnyCancellable>()
+
+    init(poiCompactFraction: Double, postCompactFraction: Double) {
+        poi = MapExperiencePresentation(compactDetent: .fraction(poiCompactFraction),
+                                       keepsSheetMountedOnSelection: true)
+        posts = MapExperiencePresentation(compactDetent: .fraction(postCompactFraction),
+                                         keepsSheetMountedOnSelection: true)
+        observe(poi, flow: .personStory)
+        observe(posts, flow: .posts)
+    }
+
+    func perform(in flow: MapTalkFeedPresentation, action: @escaping () -> Void) {
+        // The outgoing card observes the same navigation model. Don't change
+        // its live content while it is shrinking/growing. Keep the latest tap
+        // and apply it at the real native completion, never on a timer.
+        let nativeIsTransitioning = deferSelectionForNativeTransition?() ?? false
+        guard !isNativeTransitioning && !nativeIsTransitioning else {
+            pendingPresentation = (flow, action)
+            return
+        }
+        if flow == activeFlow {
+            action()
+            return
+        }
+        let previousFlow = activeFlow
+        let previous = current
+        isReplacingContent = true
+        activeFlow = flow
+        action()
+        if current.isPresented {
+            previous.dismiss(preservingDetent: true)
+        } else if previous.isPresented {
+            // A guarded/invalid request must not close the card already open.
+            activeFlow = previousFlow
+        }
+        isReplacingContent = false
+    }
+
+    func nativePresentationChanged(_ presented: Bool) {
+        guard !presented, isPresented else { return }
+        current.dismiss(preservingDetent: true)
+    }
+
+    /// An explicit close is the latest intent, unlike native completion of an
+    /// older card. It cancels any earlier tap waiting behind an animation.
+    func dismiss(preservingDetent: Bool = true) {
+        discardPendingPresentation()
+        current.dismiss(preservingDetent: preservingDetent)
+    }
+
+    func nativeDismissalBegan(of content: MapTalkCardContentIdentity) {
+        isNativeTransitioning = true
+        if closingContent == nil { closingContent = content }
+    }
+
+    func nativePresentationBegan() {
+        isNativeTransitioning = true
+    }
+
+    func nativeTransitionEnded() {
+        isNativeTransitioning = false
+        if closingContent != nil { closingContent = nil }
+    }
+
+    @discardableResult
+    func resumePendingPresentation() -> Bool {
+        guard !isNativeTransitioning, let pending = pendingPresentation else { return false }
+        pendingPresentation = nil
+        perform(in: pending.flow, action: pending.action)
+        return true
+    }
+
+    func discardPendingPresentation() {
+        pendingPresentation = nil
+    }
+
+    /// True means the host must leave navigation/selection intact. Only a
+    /// genuine close of the current flow returns false for host cleanup.
+    @discardableResult
+    func didDismiss(_ flow: MapTalkFeedPresentation) -> Bool {
+        guard flow == activeFlow, !isPresented else { return true }
+        _ = current.didDismiss()
+        isMounted = false
+        return false
+    }
+
+    private func owner(for flow: MapTalkFeedPresentation) -> MapExperiencePresentation {
+        flow == .posts ? posts : poi
+    }
+
+    private func observe(_ owner: MapExperiencePresentation, flow: MapTalkFeedPresentation) {
+        owner.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }.store(in: &subscriptions)
+        owner.$isPresented.removeDuplicates().sink { [weak self] presented in
+            guard let self, self.activeFlow == flow else { return }
+            if presented {
+                self.isMounted = true
+                self.isPresented = true
+            } else if self.isPresented && !self.isReplacingContent {
+                self.isPresented = false
+            }
+        }.store(in: &subscriptions)
+    }
+
 }

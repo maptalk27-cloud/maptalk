@@ -6,6 +6,13 @@ import { join } from 'node:path';
 import { openDatabase } from '../src/database.mjs';
 import { backupDatabase } from '../src/backup.mjs';
 
+// Existing migration fixtures compare only the expected new nullable field.
+function withLocationName(table, rows) {
+  return table === 'memories'
+    ? rows.map(row => Object.assign(Object.create(null), row, { location_name: null })) : rows;
+}
+
+
 test('schema 14 preserves every place reference and old row while allowing hotel and airport categories', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'maptalk-category-migration-'));
   const path = join(directory, 'v13.sqlite');
@@ -25,7 +32,7 @@ test('schema 14 preserves every place reference and old row while allowing hotel
       ) STRICT;
       DROP TABLE places;
       ALTER TABLE places_old RENAME TO places;
-      PRAGMA user_version = 13;
+      ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 13;
       COMMIT;
       PRAGMA foreign_keys = ON;
       INSERT INTO users VALUES ('owner', 'alice', 'unchanged-hash', 1, NULL);
@@ -42,14 +49,14 @@ test('schema 14 preserves every place reference and old row while allowing hotel
     `);
     const tables = db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all().map(({ name }) => name);
-    const before = Object.fromEntries(tables.map(name => [name, db.prepare(`SELECT * FROM ${name}`).all()]));
+    const before = Object.fromEntries(tables.map(name => [name, withLocationName(name, db.prepare(`SELECT * FROM ${name}`).all())]));
     const backupPath = join(directory, 'restore.sqlite');
     await backupDatabase(path, backupPath);
     db.close();
     db = openDatabase(path);
     restored = openDatabase(backupPath);
     for (const migrated of [db, restored]) {
-      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 14);
+      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 15);
       for (const [table, rows] of Object.entries(before)) {
         assert.deepEqual(migrated.prepare(`SELECT * FROM ${table}`).all(), rows, table);
       }

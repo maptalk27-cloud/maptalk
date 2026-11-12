@@ -192,7 +192,8 @@ struct UserProfileView: View {
                 ProfileMapDestination(
                     environment: viewModel.environment,
                     context: viewModel.context,
-                    initialStoryId: nil
+                    initialStoryId: nil,
+                    browsingMode: .allMemories
                 )
             } label: {
                 ProfileActionLabel(title: "View Map", systemImage: "map", style: viewModel.isCurrentUser ? .primary : .quiet)
@@ -203,7 +204,10 @@ struct UserProfileView: View {
 
     private var historySection: some View {
         // Build one snapshot, not the entire history again for each row's divider.
-        let activities = viewModel.historyActivities
+        let activities = viewModel.historyActivities.filter { item in
+            if case .reel = item.kind { return true }
+            return false
+        }
         let lastActivityID = activities.last?.id
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -212,14 +216,14 @@ struct UserProfileView: View {
                     ProgressView()
                         .padding(.vertical, 12)
                 } else if viewModel.hasLoadFailure {
-                    Button("Couldn't load map history. Try again") {
+                    Button("Couldn't load posts. Try again") {
                         Task { await viewModel.refreshFromBackend() }
                     }
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
                 } else {
-                    Text("No map history yet.")
+                    Text("No posts yet. Explore the map.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -233,7 +237,8 @@ struct UserProfileView: View {
                                 ProfileMapDestination(
                                     environment: viewModel.environment,
                                     context: viewModel.context,
-                                    initialStoryId: item.id
+                                    initialStoryId: item.id,
+                                    browsingMode: .posts
                                 )
                             } label: {
                                 HistoryActivityRow(item: item)
@@ -245,7 +250,7 @@ struct UserProfileView: View {
                                 Rectangle()
                                     .fill(Color(.separator).opacity(0.35))
                                     .frame(height: 1)
-                                    .padding(.leading, 78)
+                                    .padding(.leading, ProfileHistoryLayout.textInset)
                             }
                         }
                     }
@@ -363,18 +368,24 @@ private struct ProfileActionLabel: View {
     }
 }
 
+private enum ProfileHistoryLayout {
+    static let coverSide: CGFloat = 92
+    static let spacing: CGFloat = 12
+    static let textInset = coverSide + spacing
+}
+
 private struct HistoryActivityRow: View {
     let item: UserProfileViewModel.HistoryActivity
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: ProfileHistoryLayout.spacing) {
             RecentPreview(preview: item.preview)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.title)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
-                    .lineLimit(1)
+                    .lineLimit(2)
 
                 Text(item.subtitle)
                     .font(.caption)
@@ -390,6 +401,7 @@ private struct HistoryActivityRow: View {
         }
         .padding(.vertical, 12)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -399,6 +411,8 @@ private struct RecentPreview: View {
     var body: some View {
         ZStack {
             switch preview {
+            case let .post(attachments):
+                PostMediaCover(attachments: attachments, side: ProfileHistoryLayout.coverSide)
             case let .image(url):
                 MapImage(url: url) { phase in
                     switch phase {
@@ -444,7 +458,7 @@ private struct RecentPreview: View {
                 }
             }
         }
-        .frame(width: 58, height: 58)
+        .frame(width: ProfileHistoryLayout.coverSide, height: ProfileHistoryLayout.coverSide)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -722,13 +736,16 @@ private struct ProfileMapDestination: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel: MapTalkViewModel
     private let initialStoryId: UUID?
+    private let browsingMode: ProfileMapBrowsingMode
 
     init(
         environment: AppEnvironment,
         context: UserMapViewModel.Context,
-        initialStoryId: UUID?
+        initialStoryId: UUID?,
+        browsingMode: ProfileMapBrowsingMode
     ) {
         self.initialStoryId = initialStoryId
+        self.browsingMode = browsingMode
         _viewModel = StateObject(
             wrappedValue: MapTalkViewModel(
                 environment: environment,
@@ -738,7 +755,8 @@ private struct ProfileMapDestination: View {
     }
 
     var body: some View {
-        MapTalkView(viewModel: viewModel, initialStoryId: initialStoryId)
+        MapTalkView(viewModel: viewModel, initialStoryId: initialStoryId,
+                    profileBrowsingMode: browsingMode)
             .overlay(alignment: .topLeading) {
                 Button {
                     dismiss()

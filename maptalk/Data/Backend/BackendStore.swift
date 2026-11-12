@@ -27,6 +27,17 @@ final class BackendStore: ObservableObject {
     /// Authoritative Feed metadata, independent of viewport queries and local
     /// media readiness. A story's pages must not appear/disappear as assets load.
     let feedRecords = CurrentValueSubject<[BackendMemory], Never>([])
+    let postFeedRecords = CurrentValueSubject<[BackendMemory], Never>([])
+    let postFeedReels = CurrentValueSubject<[RealPost], Never>([])
+    @Published private(set) var hasMorePosts = true
+    @Published private(set) var isLoadingPosts = false
+    @Published private(set) var postFeedIssue: String?
+    private var postsGeneration = 0
+    private var postsTask: (id: UUID, task: Task<Void, Error>)?
+    private var postMediaTasks: [UUID: Task<Void, Never>] = [:]
+    private var postsSeenCursors: Set<String> = []
+    private var postVerificationDates: [UUID: Date] = [:]
+    private var verifyingPostIDs: Set<UUID> = []
     /// Exact check-in/Reel IDs, never a shared landmark ID.
     let publicContentChanges = PassthroughSubject<Set<UUID>, Never>()
     private(set) var publicContentRevision = 0
@@ -413,6 +424,7 @@ final class BackendStore: ObservableObject {
         feedPOIs.send(feedPOIs.value)
         feedReels.send(feedReels.value)
         publishFeedRecords()
+        publishPostFeed()
     }
 
     private func prepareProfileAvatar(_ profile: BackendUser) async throws {
@@ -436,8 +448,174 @@ final class BackendStore: ObservableObject {
         try await refresh()
     }
 
+    /// Refresh the head without discarding the older pages somebody is reading.
+    func refreshPosts() async throws { try await loadPosts(refresh: true) }
+
+    func loadMorePosts() async throws { try await loadPosts(refresh: false) }
+
+    private func loadPosts(refresh: Bool) async throws {
+        try requireActive()
+        if let active = postsTask {
+            try await active.task.value
+            return
+        }
+        guard refresh || hasMorePosts else { return }
+        let id = UUID()
+        let generation = postsGeneration
+        let revision = publicContentRevision
+        let task = Task { try await performPostPages(refresh: refresh, generation: generation, revision: revision) }
+        postsTask = (id, task)
+        isLoadingPosts = true
+        postFeedIssue = nil
+        defer {
+            if postsTask?.id == id {
+                postsTask = nil
+                isLoadingPosts = false
+            }
+        }
+        do { try await task.value }
+        catch {
+            if isActive, generation == postsGeneration, !(error is CancellationError) {
+                postFeedIssue = "Couldn't load posts. Tap to retry."
+            }
+            throw error
+        }
+    }
+
+    private func performPostPages(refresh: Bool, generation: Int, revision: Int) async throws {
+        // A refreshed head can overlap pages already held in memory. Skip at
+        // most three duplicate-only pages per request, never crawl all history.
+        for _ in 0..<3 {
+            let cursor = refresh ? nil : localState.postsNextCursor
+            let page = try await api.posts(cursor: cursor)
+            try requireActive()
+            guard generation == postsGeneration, revision == publicContentRevision else { throw CancellationError() }
+            if !refresh, let next = page.nextCursor,
+               next == cursor || postsSeenCursors.contains(next) {
+                throw BackendClientError.message("The server returned a repeated page. Please retry.")
+            }
+            let previousIDs = Set((localState.posts ?? []).map(\.id))
+            let incomingIDs = Set(page.items.map(\.id))
+            var byID = Dictionary((localState.posts ?? []).map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+            for record in page.items { byID[record.id] = record }
+            localState.posts = publicPostRecords(Array(byID.values))
+            // Normal refreshes preserve the old pagination boundary. If a full
+            // new head no longer overlaps, traverse from it to avoid a gap.
+            if !refresh || localState.postsHasLoadedPage != true || previousIDs.isDisjoint(with: incomingIDs) {
+                localState.postsNextCursor = page.nextCursor
+                if refresh { postsSeenCursors.removeAll() }
+            }
+            if !refresh, let cursor { postsSeenCursors.insert(cursor) }
+            localState.postsHasLoadedPage = true
+            hasMorePosts = localState.postsNextCursor != nil
+            let pageRecords = publicPostRecords(page.items)
+            remember(pageRecords)
+            publishPostFeed()
+            let withdrawn = previousIDs.subtracting(Set((localState.posts ?? []).map(\.id)))
+            if !withdrawn.isEmpty { publicContentChanges.send(withdrawn) }
+            // Metadata is shown before even a disk lookup, let alone a download.
+            await loadCachedMedia(pageRecords, identity: localState.user)
+            try requireActive()
+            guard generation == postsGeneration, revision == publicContentRevision else { throw CancellationError() }
+            publishPostFeed()
+            try await persistLocalState()
+            try requireActive()
+            guard generation == postsGeneration, revision == publicContentRevision else { throw CancellationError() }
+            preparePostMedia(pageRecords, generation: generation, revision: revision)
+            if refresh || !hasMorePosts || pageRecords.contains(where: { !previousIDs.contains($0.id) }) { return }
+        }
+    }
+
+    private func preparePostMedia(_ records: [BackendMemory], generation: Int, revision: Int) {
+        guard !records.isEmpty else { return }
+        let id = UUID()
+        postMediaTasks[id] = Task { [weak self] in
+            guard let self else { return }
+            defer { postMediaTasks.removeValue(forKey: id) }
+            guard isActive, generation == postsGeneration, revision == publicContentRevision else { return }
+            do {
+                try await prepareMedia(records) { [weak self] in
+                    guard let self, isActive, !Task.isCancelled,
+                          generation == postsGeneration, revision == publicContentRevision else { return }
+                    publishPostFeed()
+                }
+                guard isActive, !Task.isCancelled,
+                      generation == postsGeneration, revision == publicContentRevision else { return }
+                publishPostFeed()
+            } catch {
+                if isActive, generation == postsGeneration, revision == publicContentRevision,
+                   !(error is CancellationError), issue == nil {
+                    // A missing asset must not gate pagination or make a
+                    // next-page retry pretend to retry media. Selecting the
+                    // card again retries only its missing cached assets.
+                    issue = "Some photos or videos couldn't load. Open the post again to retry."
+                }
+            }
+        }
+    }
+
+    /// Old cached pages may outlive a remote deletion/privacy change. Check
+    /// only the selected Post, at most once per minute; offline browsing stays.
+    func verifyPost(memoryID: UUID) async throws {
+        try requireActive()
+        guard let cached = postFeedRecords.value.first(where: { $0.id == memoryID }),
+              !verifyingPostIDs.contains(memoryID) else { return }
+        if postVerificationDates[memoryID].map({ Date().timeIntervalSince($0) < 60 }) == true {
+            preparePostMedia([cached], generation: postsGeneration, revision: publicContentRevision)
+            return
+        }
+        verifyingPostIDs.insert(memoryID)
+        postVerificationDates[memoryID] = .now
+        defer { verifyingPostIDs.remove(memoryID) }
+        let generation = postsGeneration
+        let revision = publicContentRevision
+        do {
+            let record = try await api.memory(id: memoryID)
+            try requireActive()
+            guard generation == postsGeneration, revision == publicContentRevision else { throw CancellationError() }
+            guard record.id == memoryID else { throw BackendClientError.message("Couldn't check this post. Please try again.") }
+            guard !publicPostRecords([record]).isEmpty else {
+                await withdrawCachedPost(memoryID)
+                return
+            }
+            guard localState.posts?.contains(where: { $0.id == memoryID }) == true else { return }
+            localState.posts = localState.posts?.map { $0.id == memoryID ? record : $0 }
+            remember([record])
+            publishPostFeed()
+            try await persistLocalState()
+            guard generation == postsGeneration, revision == publicContentRevision else { return }
+            preparePostMedia([record], generation: generation, revision: revision)
+        } catch let BackendClientError.http(status, _, _) where [403, 404, 410].contains(status) {
+            guard isActive, generation == postsGeneration, revision == publicContentRevision else { return }
+            await withdrawCachedPost(memoryID)
+        } catch {
+            // A transient failure is not evidence that a cached post is private.
+            throw error
+        }
+    }
+
+    private func withdrawCachedPost(_ id: UUID) async {
+        invalidatePostReads()
+        localState.posts?.removeAll { $0.id == id }
+        publishPostFeed()
+        publicContentChanges.send([id])
+        try? await persistLocalState()
+    }
+
+    private func invalidatePostReads() {
+        postsGeneration += 1
+        postsTask?.task.cancel()
+        postsTask = nil
+        isLoadingPosts = false
+        for task in postMediaTasks.values { task.cancel() }
+        postMediaTasks.removeAll()
+    }
+
     private func performRefresh() async throws {
         try requireActive()
+        // This independent read must never turn an unavailable Post endpoint
+        // into a failed login or prevent POI stories/archive from refreshing.
+        Task { [weak self] in try? await self?.refreshPosts() }
         let mapRevision = mapCacheRevision
         refreshGeneration += 1
         let generation = refreshGeneration
@@ -753,6 +931,8 @@ final class BackendStore: ObservableObject {
         localState.mine = localState.mine.map { $0.id == memoryID ? saved : $0 }
         localState.profile = localState.profile.map { $0.id == memoryID ? saved : $0 }
         localState.feed = localState.feed.map { $0.id == memoryID ? saved : $0 }
+        localState.posts = localState.posts?.map { $0.id == memoryID ? saved : $0 }
+        invalidatePostReads()
         rebuildLocalProjections()
         // The server already committed. A local cache-write error must not
         // label a successful edit as failed or discard the confirmed text.
@@ -801,6 +981,7 @@ final class BackendStore: ObservableObject {
         try requireActive()
         blockedUserIDs.insert(id)
         publicContentRevision += 1
+        invalidatePostReads()
         let removedRecords = knownMemories.values.filter { $0.ownerId == id }
         let ids = Set(removedRecords.map(\.id))
         var mediaIDs = Set(removedRecords.flatMap { $0.attachedMedia.map(\.id) })
@@ -828,6 +1009,7 @@ final class BackendStore: ObservableObject {
         feedReels.send(feedReels.value.filter { $0.userId != id })
         feedPOIs.send(Self.removingMemories(ids, from: feedPOIs.value))
         publishFeedRecords()
+        publishPostFeed()
         publicContentChanges.send(ids)
         try? await persistLocalState()
         await refreshAfterMemoryMutation(confirmation: "This account is blocked.")
@@ -893,6 +1075,7 @@ final class BackendStore: ObservableObject {
 
     private func finishMemoryMutation(_ original: BackendMemory, deleted: Bool) {
         publicContentRevision += 1
+        invalidatePostReads()
         refreshGeneration += 1
         refreshTask?.task.cancel()
         refreshTask = nil
@@ -907,6 +1090,7 @@ final class BackendStore: ObservableObject {
         feedReels.send(feedReels.value.filter { !ids.contains($0.id) })
         feedPOIs.send(Self.removingMemories(ids, from: feedPOIs.value))
         publishFeedRecords()
+        publishPostFeed()
         archive.replaceServerRecords(
             pois: deleted ? Self.removingMemories(ids, from: archive.privatePOIs) : archive.privatePOIs,
             reels: deleted ? archive.privateReels.filter { !ids.contains($0.id) } : archive.privateReels)
@@ -987,6 +1171,7 @@ final class BackendStore: ObservableObject {
                 }
             }
         case let .reel(reel):
+            input.locationName = try await validatedPostLocationName(reel.location?.locationName)
             if let source = reel.bubbleSource {
                 let cluster = try makeClusterSelection(source, parentID: requestID).input
                 input.cluster = cluster
@@ -1073,6 +1258,10 @@ final class BackendStore: ObservableObject {
             localState.feed.removeAll { $0.id == saved.id }
             localState.feed.insert(saved, at: 0)
             publishFeedRecords()
+            if saved.kind == "reel" {
+                localState.posts = [saved] + (localState.posts ?? []).filter { $0.id != saved.id }
+                publishPostFeed()
+            }
         }
         // The save has succeeded even if the following refresh is offline.
         // Do not keep the composer open and invite an accidental second post.
@@ -1141,7 +1330,35 @@ final class BackendStore: ObservableObject {
             intent.append("clusterTitle=\(cluster.title)")
             intent.append("clusterMembers=\(cluster.memoryIds.map(\.uuidString).joined(separator: ","))")
         }
+        if let name = input.locationName {
+            intent.append("locationName=\(name)")
+            intent.append("postLocation=\(input.location.latitude),\(input.location.longitude)")
+        }
         return intent.joined(separator: "\u{0}")
+    }
+
+    /// Warm this while composing, not after the publish tap. A confirmed
+    /// capability is persisted per server so later offline saves remain local.
+    func prepareNamedPostLocations() async {
+        guard isActive, localState.supportsPostLocationNames != true else { return }
+        guard let supported = try? await api.supportsPostLocationNames(), isActive else { return }
+        localState.supportsPostLocationNames = supported
+        try? await persistLocalState()
+    }
+
+    private func validatedPostLocationName(_ name: String?) async throws -> String? {
+        guard let name else { return nil }
+        guard let clean = PostLocationPolicy.normalizedName(name) else {
+            throw BackendClientError.message("Give this location a name of 80 characters or fewer.")
+        }
+        if localState.supportsPostLocationNames != true {
+            await prepareNamedPostLocations()
+        }
+        try requireActive()
+        guard localState.supportsPostLocationNames == true else {
+            throw BackendClientError.message("Named locations aren't available on this server yet. Your draft is still here. Try again after connecting or updating the server.")
+        }
+        return clean
     }
 
     // MARK: - Offline archive and durable publishing
@@ -1167,8 +1384,10 @@ final class BackendStore: ObservableObject {
             privateOverrides = Dictionary(uniqueKeysWithValues: saved.privateOverrides.map { ($0.id, $0) })
             blockedUserIDs = saved.blocked
             mapExcludedMemoryIDs = saved.mapExcludedMemoryIDs ?? []
-            remember(saved.mine + saved.profile + saved.feed)
-            await loadCachedMedia(saved.mine + saved.profile + saved.feed + saved.queued.map(\.record), identity: saved.user)
+            hasMorePosts = saved.postsHasLoadedPage != true || saved.postsNextCursor != nil
+            remember(saved.mine + saved.profile + saved.feed + publicPostRecords(saved.posts ?? []))
+            publishPostFeed()
+            await loadCachedMedia(saved.mine + saved.profile + saved.feed + (saved.posts ?? []) + saved.queued.map(\.record), identity: saved.user)
             try requireActive()
             applyProfile(saved.user)
             rebuildLocalProjections()
@@ -1247,6 +1466,7 @@ final class BackendStore: ObservableObject {
         localState.mine = currentRecords(localState.mine)
         localState.profile = currentRecords(localState.profile, publicOnly: true)
         localState.feed = currentRecords(localState.feed, publicOnly: true)
+        if let posts = localState.posts { localState.posts = publicPostRecords(posts) }
         stateRevision += 1
         try await stateDisk.save(localState, revision: stateRevision)
         // No throwing cancellation check after the atomic write: callers must
@@ -1309,7 +1529,7 @@ final class BackendStore: ObservableObject {
         }
         let queuedIDs = Set(queued.map(\.id))
         let mine = currentRecords(localState.mine).filter { !queuedIDs.contains($0.id) } + queued.map(\.record)
-        remember(mine + localState.profile + localState.feed)
+        remember(mine + localState.profile + localState.feed + publicPostRecords(localState.posts ?? []))
         let privateProjection = project(mine.sorted { $0.activityDate > $1.activityDate })
         let publicProjection = project(currentRecords(localState.profile, publicOnly: true))
         let activeProjection = project(currentRecords(localState.feed, publicOnly: true))
@@ -1320,6 +1540,7 @@ final class BackendStore: ObservableObject {
         feedPOIs.send(activeProjection.pois)
         feedReels.send(activeProjection.reels)
         publishFeedRecords()
+        publishPostFeed()
         updatePendingStatuses()
     }
 
@@ -1338,6 +1559,27 @@ final class BackendStore: ObservableObject {
                 return current
             }
         feedRecords.send(records)
+    }
+
+    private func publicPostRecords(_ records: [BackendMemory]) -> [BackendMemory] {
+        let queuedIDs = Set(localState.queued.map(\.id))
+        var seen = Set<UUID>()
+        return currentRecords(records, publicOnly: true)
+            .filter { $0.kind == "reel" && !queuedIDs.contains($0.id) && seen.insert($0.id).inserted }
+            .sorted { $0.activityDate == $1.activityDate ? $0.id.uuidString > $1.id.uuidString : $0.activityDate > $1.activityDate }
+            .map { record in
+                var current = record
+                if let identity = profileMetadata[record.ownerId] { current.owner = identity }
+                return current
+            }
+    }
+
+    private func publishPostFeed() {
+        guard isActive else { return }
+        let records = publicPostRecords(localState.posts ?? [])
+        postFeedRecords.send(records)
+        let reels = Dictionary(project(records).reels.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        postFeedReels.send(records.compactMap { reels[$0.id] })
     }
 
     func enqueuePublish(_ draft: MapTalkPublishDraft, audience: MapPublishAudience,
@@ -1364,6 +1606,7 @@ final class BackendStore: ObservableObject {
         var cluster: BackendCluster?
         switch draft {
         case let .reel(reel):
+            input.locationName = try await validatedPostLocationName(reel.location?.locationName)
             if let source = reel.bubbleSource {
                 let selection = try makeClusterSelection(source, parentID: requestID)
                 input.cluster = selection.input
@@ -1409,7 +1652,7 @@ final class BackendStore: ObservableObject {
             visibility: "private", location: input.location, caption: input.caption ?? "", place: place,
             media: photos.map { BackendMedia(id: $0.id, mimeType: $0.contentType, byteCount: 0, path: "/v1/media/\($0.id.uuidString.lowercased())") },
             createdAt: publicationDate, publishedAt: nil, expiresAt: .distantFuture, moderationStatus: "local_pending",
-            cluster: cluster)
+            cluster: cluster, locationName: input.locationName)
         var entry = QueuedPublication(input: input, record: record, photos: photos)
         try await stateDisk.copyMedia(sources, items: photos, posters: posters)
         do {
@@ -1650,6 +1893,9 @@ final class BackendStore: ObservableObject {
                     localState.profile.insert(saved, at: 0)
                     localState.feed.removeAll { $0.id == id }
                     localState.feed.insert(saved, at: 0)
+                    if saved.kind == "reel" {
+                        localState.posts = [saved] + (localState.posts ?? []).filter { $0.id != id }
+                    }
                 }
                 localState.queued.removeAll { $0.id == id }
                 do { try await persistLocalState() }
@@ -1720,7 +1966,8 @@ final class BackendStore: ObservableObject {
             cluster.members[memberIndex] = BackendMemory(id: member.id, ownerId: member.ownerId, owner: member.owner,
                 kind: member.kind, visibility: member.visibility, location: member.location, caption: member.caption,
                 place: saved.place, media: saved.media, createdAt: member.createdAt, publishedAt: saved.publishedAt,
-                expiresAt: saved.expiresAt, moderationStatus: saved.moderationStatus)
+                expiresAt: saved.expiresAt, moderationStatus: saved.moderationStatus,
+                locationName: member.locationName)
             localState.queued[index].record.cluster = cluster
             if let previews = localState.queued[index].clusterPreviews {
                 localState.queued[index].clusterPreviews = previews.map { preview in
@@ -1824,6 +2071,9 @@ final class BackendStore: ObservableObject {
         // The account owns a store for one signed-in lifetime. Awaited work from
         // that lifetime must never repopulate its cache after sign-out.
         isActive = false
+        invalidatePostReads()
+        postVerificationDates.removeAll()
+        verifyingPostIDs.removeAll()
         syncAuthorized = false
         syncTask?.cancel()
         syncTask = nil
@@ -1874,6 +2124,10 @@ final class BackendStore: ObservableObject {
         feedPOIs.send([])
         feedReels.send([])
         feedRecords.send([])
+        postFeedRecords.send([])
+        postFeedReels.send([])
+        hasMorePosts = false
+        postFeedIssue = nil
         issue = nil
         mediaDisk.invalidate()
     }
@@ -2013,7 +2267,8 @@ final class BackendStore: ObservableObject {
                     radiusMeters: 220, message: record.caption.isEmpty ? nil : record.caption,
                     attachments: attachments, capsuleId: validatedCluster(in: record)?.id, likes: [], comments: [],
                     visibility: record.visibility == "public" ? .publicAll : .privateOnly,
-                    createdAt: record.createdAt, expiresAt: Self.publicExpiry(for: record), publishedAt: record.publishedAt))
+                    createdAt: record.createdAt, expiresAt: Self.publicExpiry(for: record), publishedAt: record.publishedAt,
+                    locationName: record.locationName))
             } else if let place = record.place {
                 var rated = places[place.id] ?? RatedPOI(
                     poi: .init(id: place.id, name: place.name,

@@ -24,6 +24,7 @@ final class UserProfileViewModel: ObservableObject {
         }
 
         enum Preview {
+            case post([RealPost.Attachment])
             case image(URL)
             case video(URL?)
             case category(POICategory)
@@ -203,17 +204,11 @@ final class UserProfileViewModel: ObservableObject {
     }
 
     private func preview(for real: RealPost) -> HistoryActivity.Preview {
-        for attachment in real.attachments {
-            switch attachment.kind {
-            case let .photo(url):
-                return .image(url)
-            case let .video(_, poster):
-                return .video(poster)
-            case .emoji:
-                continue
-            }
+        let media = real.attachments.filter { attachment in
+            if case .emoji = attachment.kind { return false }
+            return true
         }
-        return .video(nil)
+        return .post(Array(media.prefix(9)))
     }
 
     private func preview(for rated: RatedPOI) -> HistoryActivity.Preview {

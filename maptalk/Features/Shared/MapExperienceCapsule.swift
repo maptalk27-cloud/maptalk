@@ -5,8 +5,9 @@ import SwiftUI
 ///
 /// A map surface owns *which* private or public item is selected. This object
 /// owns the part that must never drift between surfaces: a new selection is
-/// always shown as a compact sheet, and changing selection from the expanded
-/// sheet gets a clean native-sheet reset instead of inheriting the large detent.
+/// always shown compact instead of inheriting the previous large detent.
+/// Hosts with a stable native detent bridge keep their sheet mounted; older
+/// hosts retain the dismiss/reopen fallback until they adopt that bridge.
 final class MapExperiencePresentation: ObservableObject {
     @Published private(set) var compactDetent: PresentationDetent
 
@@ -17,10 +18,12 @@ final class MapExperiencePresentation: ObservableObject {
 
     private var resetToken = UUID()
     private var shouldReopenAfterDismiss = false
+    private let keepsSheetMountedOnSelection: Bool
 
-    init(compactDetent: PresentationDetent) {
+    init(compactDetent: PresentationDetent, keepsSheetMountedOnSelection: Bool = false) {
         self.compactDetent = compactDetent
         self.detent = compactDetent
+        self.keepsSheetMountedOnSelection = keepsSheetMountedOnSelection
     }
 
     var isExpanded: Bool {
@@ -125,6 +128,19 @@ final class MapExperiencePresentation: ObservableObject {
     }
 
     private func resetToCompact(presentIfNeeded: Bool) {
+        if keepsSheetMountedOnSelection {
+            // The home sheet's native bridge can resize in place. A plain
+            // collapse keeps its content identity; a new selection still
+            // invalidates callbacks belonging to the previous content.
+            resetToken = UUID()
+            shouldReopenAfterDismiss = false
+            isResettingPresentation = false
+            if presentIfNeeded { contentRevision &+= 1 }
+            detent = compactDetent
+            if presentIfNeeded { isPresented = true }
+            return
+        }
+
         // A Journey route can request a compact reset and replace the capsule
         // content in the same run loop. Keep that native close/reopen alive so
         // the new content never inherits the previous expanded sheet.
@@ -171,6 +187,7 @@ struct MapExperienceCapsule: View {
     let pager: ExperienceDetailView.SequencePager
     @Binding private var selection: UUID
     let isExpanded: Bool
+    let usesClassicPostPreview: Bool
     let poiBrowsingUserID: UUID?
     let poiOverviewID: UUID?
     let onCollapsedTap: (() -> Void)?
@@ -184,6 +201,7 @@ struct MapExperienceCapsule: View {
         pager: ExperienceDetailView.SequencePager,
         selection: Binding<UUID>,
         isExpanded: Bool,
+        usesClassicPostPreview: Bool = false,
         poiBrowsingUserID: UUID? = nil,
         poiOverviewID: UUID? = nil,
         onCollapsedTap: (() -> Void)? = nil,
@@ -196,6 +214,7 @@ struct MapExperienceCapsule: View {
         self.pager = pager
         _selection = selection
         self.isExpanded = isExpanded
+        self.usesClassicPostPreview = usesClassicPostPreview
         self.poiBrowsingUserID = poiBrowsingUserID
         self.poiOverviewID = poiOverviewID
         self.onCollapsedTap = onCollapsedTap
@@ -211,6 +230,7 @@ struct MapExperienceCapsule: View {
             sequencePager: pager,
             selection: $selection,
             isExpanded: isExpanded,
+            usesClassicPostPreview: usesClassicPostPreview,
             poiBrowsingUserID: poiBrowsingUserID,
             poiOverviewID: poiOverviewID,
             onCollapsedTap: onCollapsedTap,
@@ -254,6 +274,11 @@ extension View {
     ) -> some View {
         presentationDetents([compactDetent, expandedDetent], selection: selection)
             .presentationContentInteraction(.resizes)
+            // The zoom dismissal gesture must not bypass the compact stop.
+            // Keep native resizing available, and permit dismissal only after
+            // the sheet has returned to compact. Single-detent readers may exit.
+            .interactiveDismissDisabled(compactDetent != expandedDetent
+                && selection.wrappedValue == expandedDetent)
             .presentationBackground(.thinMaterial)
             .presentationCompactAdaptation(.none)
             .applyBackgroundInteractionIfAvailable()

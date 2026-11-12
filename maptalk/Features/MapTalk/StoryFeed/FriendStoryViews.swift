@@ -51,11 +51,11 @@ struct FriendStoriesRow: View {
     let userProvider: (UUID) -> User?
     let isUnseen: (FriendStoryGroup) -> Bool
     let onSelect: (UUID) -> Void
-    let alignTrigger: Int
     var usesLightLabels: Bool = false
+    var transitionNamespace: Namespace.ID? = nil
 
     var body: some View {
-        ScrollViewReader { proxy in
+        Group {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 16) {
                     ForEach(groups) { group in
@@ -75,6 +75,9 @@ struct FriendStoriesRow: View {
                                 }
                                 .frame(width: 70, height: 70)
                                 .opacity(selected ? 1 : 0.82)
+                                .modifier(MapTalkPOITransitionSource(
+                                    id: .author(group.authorID), namespace: transitionNamespace,
+                                    keepsSourceVisible: true))
 
                                 Text(user?.handle ?? "Member")
                                     .font(.caption2.weight(usesLightLabels ? .medium : .thin))
@@ -84,8 +87,6 @@ struct FriendStoriesRow: View {
                                     .padding(.vertical, 2)
                             }
                             .frame(width: 72)
-                            .scaleEffect(selected ? 1.08 : 1)
-                            .animation(.interactiveSpring(response: 0.32, dampingFraction: 0.82), value: selected)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("\(user?.handle ?? "Member"), \(group.moments.count) updates")
@@ -96,14 +97,18 @@ struct FriendStoriesRow: View {
                 }
                 .padding(.horizontal, 12)
             }
-            .onChangeCompat(of: alignTrigger) { _ in
-                guard let selectedAuthorID else { return }
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    proxy.scrollTo(selectedAuthorID, anchor: .center)
-                }
-            }
+            // Even one avatar keeps the rail's natural drag-and-return feel.
+            // Let its artwork overflow during the bounce instead of clipping.
+            .scrollBounceBehavior(.always, axes: .horizontal)
+            .scrollClipDisabled()
+            // Selecting or swiping a person's card must not recenter this rail.
+            // Its scroll position belongs exclusively to the user's drag.
         }
         .frame(height: Self.layoutHeight)
+        // A short rail must not claim the empty map beside its avatars.
+        .frame(maxWidth: CGFloat(groups.count) * 72
+            + CGFloat(max(0, groups.count - 1)) * 16 + 24)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("maptalk.friend-story.rail")
     }
 }
@@ -125,7 +130,7 @@ struct FriendStoryContentView: View {
     let onSelectPage: (Int) -> Void
     let onExpand: () -> Void
     let onClose: () -> Void
-    let onJourney: (JourneyPost) -> Void
+    let onJourney: (JourneyPost, FriendStoryPage) -> Void
     let onReadReady: (String) -> Void
     let journeyProvider: (UUID) -> JourneyPost?
     let userProvider: (UUID) -> User?
@@ -134,6 +139,8 @@ struct FriendStoryContentView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
+    @Environment(\.postCardPalette) private var postCardPalette
+    @Environment(\.profileCardSheetMotion) private var sheetMotion
     @State private var readyPageIDs: Set<String> = []
     @State private var selectedProfile: UserMapViewModel.Context?
     @State private var isKeyboardVisible = false
@@ -171,27 +178,23 @@ struct FriendStoryContentView: View {
                 }
             }
         .background(feedPresentation == .posts
-            ? Color(uiColor: .systemBackground) : .black)
-        // The pager itself must reach the sheet's bottom edge; a child cannot
-        // fill the home-indicator inset while its parent clips above it.
-        .ignoresSafeArea(.container, edges: showsFullBleedPOIPreview ? .bottom : [])
+            ? postCardPalette.background : .black)
+        // Match the Bubble Post viewport for every media type. Switching
+        // photo/text ↔ video must not change the pager's safe-area geometry.
+        // POI keeps its existing full-bleed rule.
+        .ignoresSafeArea(.container, edges: feedPresentation == .posts || showsFullBleedPOIPreview ? .bottom : [])
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(feedPresentation == .posts ? "maptalk.posts.card" : "friend-story.card")
         .accessibilityValue(isExpanded ? "Expanded" : "Compact")
         .accessibilityAction(.escape, onClose)
-        .background {
-            if feedPresentation == .personStory {
-                FriendStoryFloatingAccessory(
-                    isVisible: isPlaybackActive && selectedProfile == nil
-                        && activeChildPresentations.isEmpty
-                ) {
-                    navigationHeader
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22))
-                        .environment(\.colorScheme, .dark)
-                        .environment(\.appEnv, environment)
-                }
-            }
-        }
+        .modifier(FriendStoryCardHeader(
+            isEnabled: feedPresentation == .personStory,
+            isVisible: isPlaybackActive && selectedProfile == nil && activeChildPresentations.isEmpty
+        ) {
+            navigationHeader
+                .environment(\.colorScheme, .dark)
+                .environment(\.appEnv, environment)
+        })
         .onChangeCompat(of: page.id) { _ in
             activeChildPresentations.removeAll()
         }
@@ -300,9 +303,21 @@ struct FriendStoryContentView: View {
         })
     }
 
+    private var poiChromePages: [FriendStoryPOIChromePage] {
+        pagerPages.map { candidate in
+            let place: RatedPOI?
+            if case let .poi(rated, _, media) = candidate.content, media != nil {
+                place = rated
+            } else { place = nil }
+            return .init(id: candidate.id, place: place)
+        }
+    }
+
     @ViewBuilder
     private var postPager: some View {
-        if case let .poi(place, _, media) = page.content, let media {
+        if feedPresentation == .posts, let sheetMotion {
+            stablePostPager(motion: sheetMotion)
+        } else if case let .poi(place, _, media) = page.content, let media {
             // A place is the container, not a different card for every visit.
             // Only the media belongs to the horizontal pager; the place shell
             // stays mounted while its exact selected slice changes.
@@ -318,7 +333,7 @@ struct FriendStoryContentView: View {
                                 placePageDots.padding(.bottom, 24)
                             }
                     ),
-                    onJourneyAvatarStackTap: onJourney,
+                    onJourneyAvatarStackTap: { onJourney($0, page) },
                     journeyProvider: journeyProvider,
                     userProvider: userProvider,
                     onPOIContributorViewed: { keys in keys.forEach(onReadReady) },
@@ -328,15 +343,54 @@ struct FriendStoryContentView: View {
                 .environment(\.friendStoryPlaybackEnabled, playbackEnabled)
                 .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
             } else {
-                nativePostPager(mediaOnly: true)
-                    .overlay { FriendStoryPOIChrome(place: place) }
+                compactPOIPager(mediaOnly: true)
                     .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("friend-story.poi.preview")
             }
         } else {
-            nativePostPager(mediaOnly: false)
+            if feedPresentation == .personStory, !isExpanded {
+                compactPOIPager(mediaOnly: false)
+            } else {
+                nativePostPager(mediaOnly: false)
+            }
         }
+    }
+
+    @ViewBuilder
+    private func compactPOIPager(mediaOnly: Bool) -> some View {
+        if let sheetMotion {
+            FriendStoryCompactPOICanvas(motion: sheetMotion, includesBottomSafeArea: mediaOnly) {
+                nativePostPager(mediaOnly: mediaOnly)
+            }
+        } else {
+            nativePostPager(mediaOnly: mediaOnly)
+        }
+    }
+
+    private func stablePostPager(motion: ProfileCardSheetMotion) -> some View {
+        let pagesByMemory = Dictionary(pagerPages.map { ($0.memoryID, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let items = pagerPages.compactMap { candidate -> ExperienceDetailView.SequencePager.Item? in
+            guard case let .reel(real) = candidate.content else { return nil }
+            return .init(id: candidate.memoryID,
+                mode: .real(real, pagerUserProvider(candidate.authorID)))
+        }
+        return ProfileSequencePager(items: items,
+            selection: Binding(get: {
+                pagerPages.first(where: { $0.id == selectedPageID.wrappedValue })?.memoryID ?? page.memoryID
+            }, set: { identifier in
+                guard let candidate = pagesByMemory[identifier] else { return }
+                pageSelection.wrappedValue = candidate.id
+            }),
+            isExpanded: isExpanded, motion: motion, isActive: playbackEnabled,
+            usesFixedCompactCanvas: true,
+            background: { _ in postCardPalette.background }) { item in
+                if let candidate = pagesByMemory[item.id] {
+                    preparedPage(candidate, mediaOnly: false)
+                }
+            }
+            .accessibilityIdentifier("friend-story.post-pager")
     }
 
     @ViewBuilder
@@ -355,14 +409,28 @@ struct FriendStoryContentView: View {
     }
 
     private func nativePostPager(mediaOnly: Bool) -> some View {
-        // The same global sequence and binding still own boundaries between
-        // places and people. There is never an inner and outer horizontal pager.
-        TabView(selection: pageSelection) {
+        // Each swipe advances one update, including across people at the edge.
+        // Keep a single native pager rather than nesting a pager per author.
+        let chromePages = mediaOnly && !isExpanded ? poiChromePages : []
+        let chromeRun = FriendStoryPOIChromeRun(pages: chromePages, selectedID: page.id)
+        return TabView(selection: pageSelection) {
             ForEach(pagerPages) { candidate in
-                Group {
-                    if mediaOnly { mediaPage(for: candidate) }
-                    else { content(for: candidate) }
-                }
+                preparedPage(candidate, mediaOnly: mediaOnly, chromeRun: chromeRun)
+                    .poiChromePageAnchor(id: candidate.id)
+                    .tag(candidate.id)
+            }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        .accessibilityIdentifier("friend-story.post-pager")
+        .fixedPOIChrome(pages: chromePages, selectedID: page.id)
+    }
+
+    private func preparedPage(_ candidate: FriendStoryPage, mediaOnly: Bool,
+                              chromeRun: FriendStoryPOIChromeRun? = nil) -> some View {
+        Group {
+            if mediaOnly { mediaPage(for: candidate, chromeRun: chromeRun) }
+            else { content(for: candidate) }
+        }
                     .background(ExperiencePagerVerticalBounceGuard())
                     // Native paging keeps adjacent cards mounted. Only the
                     // selected card may play, mark read or present a child.
@@ -375,15 +443,10 @@ struct FriendStoryContentView: View {
                         else { activeChildPresentations.remove(id) }
                     })
                     .accessibilityHidden(!isPlaybackActive || candidate.id != page.id)
-                    .tag(candidate.id)
-            }
-        }
-        .tabViewStyle(.page(indexDisplayMode: .never))
-        .accessibilityIdentifier("friend-story.post-pager")
     }
 
     @ViewBuilder
-    private func mediaPage(for candidate: FriendStoryPage) -> some View {
+    private func mediaPage(for candidate: FriendStoryPage, chromeRun: FriendStoryPOIChromeRun?) -> some View {
         if case let .poi(place, _, media) = candidate.content, let media {
             if isExpanded {
                 ExperienceDetailView.POIFeaturedMedia(media: media,
@@ -393,7 +456,7 @@ struct FriendStoryContentView: View {
             } else {
                 FriendStoryPOIPreview(place: place, media: media,
                     isPlaybackActive: playbackEnabled && candidate.id == page.id,
-                    showsPlaceChrome: false)
+                    showsPlaceChrome: chromeRun?.contains(candidate.id) != true)
             }
         } else {
             // The adjacent original card remains in the same native sequence.
@@ -411,8 +474,9 @@ struct FriendStoryContentView: View {
                 mode: .real(displayedReel(real), pagerUserProvider(candidate.authorID)),
                 isExpanded: isExpanded,
                 usesClassicPostPreview: feedPresentation == .posts,
+                recordsActiveCompactViewportOnly: feedPresentation == .posts,
                 onCollapsedTap: onExpand,
-                onJourneyAvatarStackTap: onJourney,
+                onJourneyAvatarStackTap: { onJourney($0, candidate) },
                 journeyProvider: journeyProvider,
                 userProvider: userProvider
             )
@@ -441,7 +505,7 @@ struct FriendStoryContentView: View {
                         poiStorySelection: isExpanded ? nil : .init(checkIn: checkIn, media: media),
                         expandedPOIMedia: isExpanded ? media : nil,
                         onCollapsedTap: onExpand,
-                        onJourneyAvatarStackTap: onJourney,
+                        onJourneyAvatarStackTap: { onJourney($0, candidate) },
                         journeyProvider: journeyProvider,
                         userProvider: userProvider,
                         onPOIContributorViewed: { keys in keys.forEach(onReadReady) },
@@ -480,6 +544,7 @@ struct FriendStoryContentView: View {
         // A native pager can render a neighbor's first frame before selecting
         // it. Remember readiness, but only the active page's delayed task may
         // mark anything viewed (see canMarkViewed).
+        guard !readyPageIDs.contains(id) else { return }
         readyPageIDs.insert(id)
     }
 
@@ -505,7 +570,7 @@ struct FriendStoryContentView: View {
 
 /// Position within this place, separate from the person's stops above. A small
 /// window keeps long visits quiet without hiding the currently selected slice.
-private struct FriendStoryPlacePageDots: View {
+struct FriendStoryPlacePageDots: View {
     let count: Int
     let index: Int
 
@@ -531,6 +596,26 @@ private struct FriendStoryPlacePageDots: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("At this place, item \(index + 1) of \(count)")
             .accessibilityIdentifier("friend-story.moment-position")
+        }
+    }
+}
+
+/// A compact POI is laid out at its own final size, not at the outgoing Post's
+/// height. The native sheet may resize around it without recropping its media.
+private struct FriendStoryCompactPOICanvas<Content: View>: View {
+    @ObservedObject var motion: ProfileCardSheetMotion
+    let includesBottomSafeArea: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        let height = motion.maximumDetentHeight * ProfileCardPagingLayout.poiFraction
+            + (includesBottomSafeArea ? motion.bottomSafeArea : 0)
+        GeometryReader { geometry in
+            content()
+                .frame(width: geometry.size.width,
+                       height: motion.maximumDetentHeight > 0 ? max(1, height) : geometry.size.height)
+                .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+                .clipped()
         }
     }
 }
@@ -573,7 +658,8 @@ struct FriendStoryPOIPreview: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Open check-in media")
             .accessibilityIdentifier("friend-story.poi.media.\(media.id.uuidString)")
-            // The route button is a sibling of the media button, never nested inside it.
+            // A same-place media run draws one fixed layer outside its pager.
+            // Standalone and neighboring places still own their own chrome.
             if showsPlaceChrome { FriendStoryPOIChrome(place: place) }
         }
         .ignoresSafeArea(.container, edges: .bottom)
@@ -597,7 +683,7 @@ struct FriendStoryPOIPreview: View {
 }
 
 /// Place identity belongs to the containing card, not to each media slice.
-private struct FriendStoryPOIChrome: View {
+struct FriendStoryPOIChrome: View {
     let place: RatedPOI
 
     var body: some View {
@@ -653,6 +739,21 @@ private struct FriendStoryProgressBars: View {
     let onSelect: (Int) -> Void
 
     var body: some View {
+        StorySequenceProgressBar(count: count, index: index, onSelect: onSelect)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Update \(pageIndex + 1) of \(pageCount)")
+            .accessibilityValue(authorName)
+            .accessibilityIdentifier("friend-story.page.\(pageID)")
+    }
+}
+
+/// Shared visual and touch target; each browser owns its own sequence/cursor.
+struct StorySequenceProgressBar: View {
+    let count: Int
+    let index: Int
+    let onSelect: (Int) -> Void
+
+    var body: some View {
         GeometryReader { geometry in
             Group {
                 if count <= 12 {
@@ -675,10 +776,6 @@ private struct FriendStoryProgressBars: View {
                 }
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Update \(pageIndex + 1) of \(pageCount)")
-        .accessibilityValue(authorName)
-        .accessibilityIdentifier("friend-story.page.\(pageID)")
     }
 
     private func bar(fraction: CGFloat) -> some View {
@@ -730,13 +827,23 @@ private struct FriendStoryAvatar: View {
 /// over feed reordering, without skipping text-only posts for a prettier cover.
 enum MapTalkPostEntryPage {
     static func resolve(in groups: [FriendStoryGroup], resumePageID: String?) -> FriendStoryPage? {
-        let pages = groups.flatMap(\.pages)
-        return pages.first { $0.id == resumePageID } ?? pages.first
+        // Rendering the floating entry only needs one cover, not a sorted
+        // copy of the entire history on every card/geometry update.
+        var newest: FriendStoryPage?
+        for group in groups {
+            for page in group.pages {
+                if page.id == resumePageID { return page }
+                if newest.map({ FriendStoryPage.newestPostFirst(page, $0) }) ?? true {
+                    newest = page
+                }
+            }
+        }
+        return newest
     }
 
     static func refreshTarget(in groups: [FriendStoryGroup], currentPageID: String?,
                               viewedKeys: Set<String>) -> FriendStoryPage? {
-        let pages = groups.flatMap(\.pages)
+        let pages = groups.flatMap(\.pages).sorted { FriendStoryPage.newestPostFirst($0, $1) }
         let candidates: [FriendStoryPage]
         if let index = pages.firstIndex(where: { $0.id == currentPageID }) {
             // Continue around the feed, avoiding the current card. Once all
@@ -751,25 +858,72 @@ enum MapTalkPostEntryPage {
     }
 }
 
-/// A small, fixed postcard into Posts; the native tab bar keeps its navigation role.
+/// A movable postcard into Posts; its remembered position belongs to the map.
 struct MapTalkPostCoverEntry: View {
-    let post: RealPost
+    let post: RealPost?
     let isResuming: Bool
     let isActive: Bool
+    let isReturning: Bool
+    let needsCardClearance: Bool
     let canvasSize: CGSize
+    let idleBottomInset: CGFloat
     let bottomInset: CGFloat
+    @Binding var position: CGPoint?
+    var excludedFrame: CGRect = .null
+    var topInset: CGFloat = 0
     let action: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.mapTalkCardSources) private var sources
+    @State private var isPressed = false
+    @State private var drag = MapTalkPostEntryDrag()
+    @GestureState private var isDragging = false
+    @State private var suppressTapUntil = Date.distantPast
+    @State private var floatStartedAt = Date.now
+    @State private var floatPausedAt: Date?
 
-    private let shape = RoundedRectangle(cornerRadius: 17, style: .continuous)
+    private let shape = RoundedRectangle(cornerRadius: 19, style: .continuous)
+
+    private var mapCenter: CGPoint {
+        MapTalkPostEntryGeometry.restingCenter(position, canvasSize: canvasSize,
+            topInset: topInset, idleBottomInset: idleBottomInset)
+    }
 
     private var restingCenter: CGPoint {
-        MapTalkPostEntryGeometry.center(canvasSize: canvasSize, bottomInset: bottomInset)
+        // POI clearance is a temporary projection, never a saved drag. Posts
+        // uses the map placement while hidden, so its native return has one
+        // stable destination even after entering from the lifted POI button.
+        MapTalkPostEntryGeometry.restingCenter(position, canvasSize: canvasSize,
+            topInset: topInset, idleBottomInset: idleBottomInset,
+            clearanceBottomInset: needsCardClearance && !isActive ? bottomInset : nil)
+    }
+
+    private var displayedCenter: CGPoint {
+        guard let center = drag.center else { return restingCenter }
+        // Direct manipulation follows the finger. Obstacle projection can
+        // switch nearest edges mid-drag and teleport the entry across buttons.
+        return MapTalkPostEntryGeometry.constrainedCenter(center, canvasSize: canvasSize,
+            topInset: topInset, bottomInset: bottomInset)
+    }
+
+    private var canFloat: Bool {
+        !isActive && !reduceMotion && scenePhase == .active && !isPressed && !drag.isActive
+    }
+
+    private func constrained(_ point: CGPoint) -> CGPoint {
+        MapTalkPostEntryGeometry.constrainedCenter(point, canvasSize: canvasSize,
+            topInset: topInset, bottomInset: bottomInset, excludedFrame: excludedFrame)
+    }
+
+    private func floatingOffset(at date: Date) -> CGFloat {
+        guard !reduceMotion else { return 0 }
+        let elapsed = (floatPausedAt ?? date).timeIntervalSince(floatStartedAt)
+        return sin(elapsed * .pi / 2.4) * 2.5
     }
 
     private var coverURL: URL? {
-        post.attachments.compactMap { attachment -> URL? in
+        post?.attachments.compactMap { attachment -> URL? in
             switch attachment.kind {
             case let .photo(url): return url
             case let .video(_, poster): return poster
@@ -779,16 +933,131 @@ struct MapTalkPostCoverEntry: View {
     }
 
     var body: some View {
-        coverButton
-        .position(restingCenter)
-        .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.86),
-                   value: restingCenter)
-        .frame(width: canvasSize.width, height: canvasSize.height)
-        .transaction { if reduceMotion { $0.animation = nil } }
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !canFloat)) { context in
+            coverButton.offset(y: floatingOffset(at: context.date))
+        }
+        .shadow(color: .black.opacity(0.16), radius: 5, x: 0, y: 3)
+        // Only the postcard owns a drag. Its full-canvas positioning space
+        // must remain available to the native map's pan and pinch gestures.
+        .frame(width: MapTalkPostEntryGeometry.size.width,
+               height: MapTalkPostEntryGeometry.size.height)
+        .contentShape(shape)
+        .highPriorityGesture(dragGesture, including: isActive ? .subviews : .all)
+        .position(displayedCenter)
+        .animation(reduceMotion || isActive ? nil : .easeOut(duration: 0.18), value: restingCenter)
+        .transaction {
+            if reduceMotion || drag.isActive || isActive {
+                $0.animation = nil
+                $0.disablesAnimations = true
+            }
+        }
+        .onChangeCompat(of: canFloat) { enabled in
+            let now = Date.now
+            if enabled, let pausedAt = floatPausedAt {
+                floatStartedAt = floatStartedAt.addingTimeInterval(now.timeIntervalSince(pausedAt))
+                floatPausedAt = nil
+            } else if !enabled, floatPausedAt == nil {
+                floatPausedAt = now
+            }
+        }
+        .onChangeCompat(of: isDragging) { dragging in
+            guard !dragging else { return }
+            // GestureState can reset before onEnded delivers its final sample.
+            // Normal release finishes immediately there; this is cancel-only
+            // cleanup on the next run loop, not a delayed movement animation.
+            DispatchQueue.main.async {
+                guard !isDragging else { return }
+                finishDrag()
+            }
+        }
+        .onChangeCompat(of: canvasSize) { _ in
+            guard let center = position else { return }
+            // Rotation may change the available screen, not the source's
+            // relationship to a sheet or to an animating toolbar.
+            updateDragImmediately {
+                position = MapTalkPostEntryGeometry.constrainedCenter(center,
+                    canvasSize: canvasSize, topInset: topInset, bottomInset: 0)
+            }
+        }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .updating($isDragging) { _, dragging, _ in dragging = true }
+            .onChanged { value in
+                updateDragImmediately {
+                    drag.update(startingAt: restingCenter, translation: value.translation)
+                    suppressTapUntil = .now.addingTimeInterval(0.3)
+                }
+            }
+            .onEnded { value in finishDrag(finalTranslation: value.translation) }
+    }
+
+    private func finishDrag(finalTranslation: CGSize? = nil) {
+        guard drag.isActive else { return }
+        updateDragImmediately {
+            // Normal completion consumes the final gesture sample; cancellation
+            // keeps the last displayed position. Both commit once and release.
+            if let center = drag.finish(finalTranslation: finalTranslation) {
+                position = constrained(center)
+            }
+            isPressed = false
+            suppressTapUntil = .now.addingTimeInterval(0.2)
+        }
+    }
+
+    private func updateDragImmediately(_ update: () -> Void) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction, update)
     }
 
     private var coverButton: some View {
-        Button(action: action) {
+        Button {
+            // A returning entry is already visible and must accept a tap.
+            // Queue the reopen without moving the ongoing zoom's destination.
+            if isReturning {
+                action()
+                return
+            }
+            guard !isDragging, Date.now >= suppressTapUntil else { return }
+            // Capture the map placement including its gentle float, not POI's
+            // temporary lift. POI→Post replaces the already-mounted card;
+            // its hidden source can return to the map placement immediately.
+            let now = Date.now
+            let center = CGPoint(x: mapCenter.x,
+                                 y: mapCenter.y + floatingOffset(at: now))
+            updateDragImmediately {
+                position = center
+                floatStartedAt = now
+                floatPausedAt = now
+            }
+            action()
+        } label: {
+            coverFace
+                // The real destination must exist beneath the shrinking
+                // native snapshot, even before UIKit finishes its callback.
+                // Keep geometry still during return; taps can queue a reopen.
+                .opacity(isActive && !isReturning ? 0 : 1)
+                .background {
+                    if let sources {
+                        MapTalkCardSourceAnchor(id: .posts, registry: sources)
+                    }
+                }
+                .accessibilityHidden(true)
+        }
+        .buttonStyle(MapTalkPostCoverPressStyle { isPressed = $0 })
+        .accessibilityLabel("Posts")
+        .accessibilityValue(isActive && !isReturning ? "Open" : "Closed")
+        .accessibilityHint(post == nil ? "Retry loading posts. Drag to move."
+            : isActive && !isReturning ? "Refresh posts. Swipe down on the card to close."
+            : isResuming ? "Continue where you left off. Drag to move."
+            : "Browse posts. Drag to move.")
+        .accessibilityIdentifier("maptalk.post-entry")
+    }
+
+    // Only the artwork hides; its live native geometry anchor stays mounted.
+    private var coverFace: some View {
             Color(white: 0.22)
                 .frame(width: MapTalkPostEntryGeometry.size.width,
                        height: MapTalkPostEntryGeometry.size.height)
@@ -819,9 +1088,9 @@ struct MapTalkPostCoverEntry: View {
                 .overlay(alignment: .bottom) {
                     HStack(spacing: 3) {
                         Text("Posts")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.white)
-                        if isActive {
+                        if isActive && !isReturning {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 7, weight: .bold))
                                 .foregroundStyle(.white)
@@ -832,15 +1101,7 @@ struct MapTalkPostCoverEntry: View {
                 }
                 .clipShape(shape)
                 .overlay { shape.strokeBorder(.white.opacity(0.92), lineWidth: 1.5) }
-                .shadow(color: .black.opacity(0.16), radius: 5, x: 0, y: 3)
                 .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Posts")
-        .accessibilityValue(isActive ? "Open" : "Closed")
-        .accessibilityHint(isActive ? "Refresh posts. Swipe down on the card to close."
-            : isResuming ? "Continue where you left off." : "Browse posts.")
-        .accessibilityIdentifier("maptalk.post-entry")
     }
 
     private var textCover: some View {
@@ -848,17 +1109,63 @@ struct MapTalkPostCoverEntry: View {
                        startPoint: .topLeading, endPoint: .bottomTrailing)
             .overlay(alignment: .topLeading) {
                 Image(systemName: "quote.opening")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(.white.opacity(0.7))
                     .padding(9)
             }
     }
 }
 
-/// A stable lower-left entry that only moves to clear the native card.
+/// Local gesture state only. Parent map placement is committed once on release,
+/// so every finger update doesn't invalidate the entire map/feed hierarchy.
+struct MapTalkPostEntryDrag {
+    private var origin: CGPoint?
+    private var translation = CGSize.zero
+
+    var isActive: Bool { origin != nil }
+    var center: CGPoint? {
+        origin.map { CGPoint(x: $0.x + translation.width, y: $0.y + translation.height) }
+    }
+
+    mutating func update(startingAt point: CGPoint, translation: CGSize) {
+        if origin == nil { origin = point }
+        self.translation = translation
+    }
+
+    mutating func finish(finalTranslation: CGSize? = nil) -> CGPoint? {
+        if let finalTranslation { translation = finalTranslation }
+        let result = center
+        origin = nil
+        translation = .zero
+        return result
+    }
+}
+
+private struct MapTalkPostCoverPressStyle: ButtonStyle {
+    let onPressChanged: (Bool) -> Void
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .onChangeCompat(of: configuration.isPressed, onPressChanged)
+    }
+}
+
+/// User placement and temporary card clearance are separate. Native Posts
+/// return uses only the former, never the closing sheet's moving geometry.
 enum MapTalkPostEntryGeometry {
-    static let size = CGSize(width: 50, height: 58)
+    static let size = CGSize(width: 56, height: 66)
     private static let edgeInset: CGFloat = 22
+
+    static func restingCenter(_ remembered: CGPoint?, canvasSize: CGSize,
+                              topInset: CGFloat, idleBottomInset: CGFloat,
+                              clearanceBottomInset: CGFloat? = nil) -> CGPoint {
+        let baseline = remembered ?? constrainedCenter(
+            center(canvasSize: canvasSize, bottomInset: idleBottomInset),
+            canvasSize: canvasSize, topInset: topInset, bottomInset: idleBottomInset)
+        guard let clearanceBottomInset else { return baseline }
+        return constrainedCenter(baseline, canvasSize: canvasSize,
+            topInset: topInset, bottomInset: clearanceBottomInset)
+    }
 
     static func sheetClearance(mapFrame: CGRect, sheetFrame: CGRect,
                                baseBottomInset: CGFloat, accessoryHeight: CGFloat = 0) -> CGFloat {
@@ -869,5 +1176,34 @@ enum MapTalkPostEntryGeometry {
         CGPoint(x: min(canvasSize.width / 2, edgeInset + size.width / 2),
                 y: max(min(canvasSize.height / 2, size.height / 2),
                        canvasSize.height - max(0, bottomInset) - size.height / 2))
+    }
+
+    static func constrainedCenter(_ point: CGPoint, canvasSize: CGSize,
+                                  topInset: CGFloat, bottomInset: CGFloat,
+                                  excludedFrame: CGRect = .null) -> CGPoint {
+        let minX = min(canvasSize.width / 2, edgeInset + size.width / 2)
+        let maxX = max(minX, canvasSize.width - edgeInset - size.width / 2)
+        let maxY = max(size.height / 2, canvasSize.height - max(0, bottomInset) - size.height / 2)
+        let minY = min(maxY, max(0, topInset) + edgeInset + size.height / 2)
+        func clamp(_ candidate: CGPoint) -> CGPoint {
+            CGPoint(x: min(maxX, max(minX, candidate.x)),
+                    y: min(maxY, max(minY, candidate.y)))
+        }
+        let bounded = clamp(point)
+        guard !excludedFrame.isNull, !excludedFrame.isEmpty else { return bounded }
+        let obstacle = excludedFrame.insetBy(dx: -size.width / 2 - 12,
+                                            dy: -size.height / 2 - 12)
+        guard obstacle.contains(bounded) else { return bounded }
+        // Move only far enough to clear the controls, not to a screen corner.
+        let candidates = [
+            CGPoint(x: obstacle.minX - 0.5, y: bounded.y),
+            CGPoint(x: obstacle.maxX + 0.5, y: bounded.y),
+            CGPoint(x: bounded.x, y: obstacle.minY - 0.5),
+            CGPoint(x: bounded.x, y: obstacle.maxY + 0.5)
+        ].map(clamp).filter { !obstacle.contains($0) }
+        return candidates.min { lhs, rhs in
+            hypot(lhs.x - bounded.x, lhs.y - bounded.y)
+                < hypot(rhs.x - bounded.x, rhs.y - bounded.y)
+        } ?? bounded
     }
 }

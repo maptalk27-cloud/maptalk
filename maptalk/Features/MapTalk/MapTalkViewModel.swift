@@ -29,6 +29,16 @@ struct MapTalkNearbyPlaceSearchResult {
     }
 }
 
+struct MapTalkPostLocationSearchResult {
+    let options: [MapTalkPostLocationChoice]
+    let issue: POISearchIssue?
+
+    init(options: [MapTalkPostLocationChoice], issue: POISearchIssue? = nil) {
+        self.options = options
+        self.issue = issue
+    }
+}
+
 @MainActor
 final class MapTalkViewModel: ObservableObject {
     enum Scope {
@@ -62,6 +72,12 @@ final class MapTalkViewModel: ObservableObject {
     @Published private(set) var friendStoryRecords: [BackendMemory]?
     @Published private(set) var activityPOIs: [RatedPOI] = []
     @Published private(set) var activityReels: [RealPost] = []
+    /// Historical Posts are independent of the 72-hour person/POI story rail.
+    @Published private(set) var postFeedRecords: [BackendMemory]?
+    @Published private(set) var postFeedReels: [RealPost] = []
+    @Published private(set) var hasMorePosts = false
+    @Published private(set) var isLoadingPosts = false
+    @Published private(set) var postFeedIssue: String?
     @Published var userCoordinate: CLLocationCoordinate2D?
     /// The unprojected device reading is kept alongside the coordinate so a
     /// publish can reject a stale or invalid location instead of silently
@@ -77,6 +93,10 @@ final class MapTalkViewModel: ObservableObject {
     private let environment: AppEnvironment
     private let mapSearchRegion = PassthroughSubject<MKCoordinateRegion, Never>()
     private let nearbyPlaceRefresh = PassthroughSubject<CLLocationCoordinate2D, Never>()
+    // Separate directory/cache: a wider Post search must never broaden the
+    // real-time POI check-in publisher's eligibility or suggestions.
+    private let postLocationDirectory = ApplePOIRepository(
+        searchRadius: PostLocationPolicy.radius, maximumResults: 60)
     private var backendMapSearch: Task<Void, Never>?
     private var lastBackendMapRegion: MKCoordinateRegion?
     @Published private(set) var withdrawnPublicMemoryIDs: Set<UUID> = []
@@ -126,6 +146,17 @@ final class MapTalkViewModel: ObservableObject {
                     repositoryStoryRecords = records
                     rebuildFriendStoryRecords(asOf: .now)
                 }.store(in: &cancellables)
+                backend.postFeedRecords.sink { [weak self] records in
+                    guard let self else { return }
+                    postFeedRecords = records.filter { !self.withdrawnPublicMemoryIDs.contains($0.id) }
+                }.store(in: &cancellables)
+                backend.postFeedReels.sink { [weak self] reels in
+                    guard let self else { return }
+                    postFeedReels = reels.filter { !self.withdrawnPublicMemoryIDs.contains($0.id) }
+                }.store(in: &cancellables)
+                backend.$hasMorePosts.assign(to: &$hasMorePosts)
+                backend.$isLoadingPosts.assign(to: &$isLoadingPosts)
+                backend.$postFeedIssue.assign(to: &$postFeedIssue)
             }
             bind()
         case let .user(user):
@@ -142,6 +173,8 @@ final class MapTalkViewModel: ObservableObject {
         // withdrawn visits immediately, before fetching the current viewport.
         withdrawnPublicMemoryIDs.formUnion(ids)
         repositoryStoryRecords?.removeAll { ids.contains($0.id) }
+        postFeedRecords?.removeAll { ids.contains($0.id) }
+        postFeedReels.removeAll { ids.contains($0.id) }
         rebuildFriendStoryRecords(asOf: .now)
         backendMapSearch?.cancel()
         repositoryPOIs = BackendStore.removingMemories(ids, from: repositoryPOIs)
@@ -166,6 +199,26 @@ final class MapTalkViewModel: ObservableObject {
                 onlyRecentPOIStories: false, userProvider: self.user(for:), now: .now)
             loadUserScope(for: user, updateRegion: false)
         }
+    }
+
+    /// Prefetch before the last card, without blocking swiping or moving the map.
+    func postFeedDidSelect(memoryID: UUID) {
+        guard let backend = environment.backend else { return }
+        Task { try? await backend.verifyPost(memoryID: memoryID) }
+        guard let records = postFeedRecords,
+              let index = records.firstIndex(where: { $0.id == memoryID }),
+              index >= max(0, records.count - 4), postFeedIssue == nil else { return }
+        loadMorePosts()
+    }
+
+    func loadMorePosts() {
+        guard let backend = environment.backend, hasMorePosts, !isLoadingPosts else { return }
+        Task { try? await backend.loadMorePosts() }
+    }
+
+    func refreshPosts() {
+        guard let backend = environment.backend, !isLoadingPosts else { return }
+        Task { try? await backend.refreshPosts() }
     }
 
     func onAppear() {
@@ -331,13 +384,24 @@ final class MapTalkViewModel: ObservableObject {
         selectedMapReel: RealPost? = nil
     ) -> [RealPost] {
         var result = merge(activeFeedReels, with: reals)
+        var unavailableIDs = unavailableMapMemoryIDs
         if let selectedID,
            let selectedMapReel,
            selectedMapReel.id == selectedID,
            !withdrawnPublicMemoryIDs.contains(selectedMapReel.id) {
             result = merge([selectedMapReel], with: result)
+            // A selected, still-authorized Post is not general map discovery.
+            // The map's 72-hour absence must not hide its explicit destination.
+            if selectedMapReel.visibility == .publicAll, environment.backend?.isActive == true,
+               postFeedRecords?.contains(where: {
+                   $0.id == selectedID && $0.ownerId == selectedMapReel.userId
+                       && $0.kind == "reel" && $0.visibility == "public"
+                       && ($0.moderationStatus == nil || $0.moderationStatus == "approved")
+               }) == true {
+                unavailableIDs.remove(selectedID)
+            }
         }
-        return result.filter { !unavailableMapMemoryIDs.contains($0.id) }
+        return result.filter { !unavailableIDs.contains($0.id) }
     }
 
     private var unavailableMapMemoryIDs: Set<UUID> {
@@ -465,6 +529,44 @@ final class MapTalkViewModel: ObservableObject {
     func refreshNearbyPlaces() {
         guard isMapActive, let location = publishableLiveLocation else { return }
         nearbyPlaceRefresh.send(location.coordinate)
+    }
+
+    func postLocationChoices(near location: CLLocation,
+                             matching directoryPlaces: [RatedPOI] = []) -> [MapTalkPostLocationChoice] {
+        MapTalkPostLocations.choices(
+            near: location,
+            ownPosts: environment.myMapArchive.privateReels,
+            places: nearbyPlaceOptions(near: location, withinMeters: PostLocationPolicy.radius,
+                                       matching: directoryPlaces),
+            currentUserID: environment.myMapArchive.currentUserID
+        )
+    }
+
+    func searchPostLocations(_ query: String) async -> MapTalkPostLocationSearchResult {
+        guard let location = publishableLiveLocation else { return .init(options: []) }
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publisher = query.isEmpty
+            ? postLocationDirectory.nearResult(location.coordinate)
+            : postLocationDirectory.searchResult(query, near: location.coordinate)
+        for await result in publisher.values {
+            guard !Task.isCancelled, let current = publishableLiveLocation else {
+                return .init(options: [])
+            }
+            let options = postLocationChoices(near: current, matching: result.places).filter { choice in
+                query.isEmpty || choice.selection.title.localizedStandardContains(query)
+                    || choice.previousPosts.contains { $0.message?.localizedStandardContains(query) == true }
+                    || result.places.contains { place in
+                        let canonical = environment.backend?.canonicalPlaceForSelection(place.poi, fromDirectory: true) ?? place.poi
+                        return choice.selection.title == canonical.name
+                            && CLLocation(latitude: choice.selection.coordinate.latitude,
+                                          longitude: choice.selection.coordinate.longitude)
+                                .distance(from: CLLocation(latitude: canonical.coordinate.latitude,
+                                                          longitude: canonical.coordinate.longitude)) < 1
+                    }
+            }
+            return .init(options: options, issue: result.issue)
+        }
+        return .init(options: postLocationChoices(near: location), issue: .temporarilyUnavailable)
     }
 
     func region(for real: RealPost) -> MKCoordinateRegion {
@@ -627,7 +729,8 @@ final class MapTalkViewModel: ObservableObject {
             comments: [],
             visibility: audience == .livePublic ? .publicAll : .privateOnly,
             createdAt: now,
-            expiresAt: now.addingTimeInterval(StoryReadKeys.freshWindow)
+            expiresAt: now.addingTimeInterval(StoryReadKeys.freshWindow),
+            locationName: PostLocationPolicy.normalizedName(draft.location?.locationName)
         )
 
         if let bubble {
@@ -855,7 +958,6 @@ final class MapTalkViewModel: ObservableObject {
             .sink { [weak self] overlays in
                 guard let self else { return }
                 publishedPOIOverlays = overlays
-                rebuildMapRenderContent()
                 rebuildActiveFeed(asOf: .now)
             }
             .store(in: &cancellables)
@@ -865,7 +967,6 @@ final class MapTalkViewModel: ObservableObject {
             .sink { [weak self] overlays in
                 guard let self else { return }
                 publishedReelOverlays = overlays
-                rebuildMapRenderContent()
                 rebuildActiveFeed(asOf: .now)
             }
             .store(in: &cancellables)

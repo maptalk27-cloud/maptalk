@@ -8,7 +8,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 /// The consumer-facing creation actions. A Place is evidence from a real
-/// location; a Reel is a short thought from that same location.
+/// location; a Post can describe a place in the surrounding neighborhood.
 enum MapTalkPublishDestination: Identifiable, Hashable {
     case place
     case reel
@@ -43,6 +43,7 @@ struct MapTalkReelDraft {
     /// existing map and timeline surfaces already use as their preview.
     let attachments: [RealPost.Attachment]
     let bubbleSource: MapTalkReelBubbleSource?
+    var location: MapTalkPostLocationSelection? = nil
 }
 
 enum MapTalkPublishDraft {
@@ -116,9 +117,8 @@ private struct ReelMediaPressDragGesture: UIGestureRecognizerRepresentable {
 }
 
 /// A custom creation surface rather than a system form. Place keeps the map
-/// as evidence; Reel becomes a content-first story composer. In both cases,
-/// the coordinate is never editable: a post uses the device's live location
-/// when it is finally saved.
+/// as evidence; Reel becomes a content-first story composer with an optional
+/// nearby place. An unselected location still uses the current device fix.
 struct MapTalkPublishComposer: View {
     private static let maximumReelAssets = 9
 
@@ -137,6 +137,9 @@ struct MapTalkPublishComposer: View {
     let nearbyPlaces: [MapTalkNearbyPlaceOption]
     let isLoadingNearbyPlaces: Bool
     let nearbyPlaceIssue: POISearchIssue?
+    let postLocationChoices: [MapTalkPostLocationChoice]
+    let liveLocationKey: String
+    let liveLocation: CLLocation?
     let folders: [JourneyFolder]
     let myMapRecords: [UserMapRecord]
     let currentUserID: UUID
@@ -149,6 +152,7 @@ struct MapTalkPublishComposer: View {
     let onPublish: (MapTalkPublishDraft, MapPublishAudience, UUID) async throws -> Void
     let onSearchNearbyPlaces: (String) async -> MapTalkNearbyPlaceSearchResult
     let onRetryNearbyPlaces: () -> Void
+    let onSearchPostLocations: (String) async -> MapTalkPostLocationSearchResult
 
     @State private var mediaPickerItem: PhotosPickerItem?
     @State private var selectedMedia: ComposerMediaAsset?
@@ -207,6 +211,15 @@ struct MapTalkPublishComposer: View {
     @State private var reelIsImporting = false
     @State private var reelImportToken = UUID()
     @State private var reelAudience: MapPublishAudience = .livePublic
+    @State private var isShowingPostLocations = false
+    @State private var postLocationQuery = ""
+    @State private var selectedPostLocation: MapTalkPostLocationSelection?
+    @State private var loadedPostLocations: [MapTalkPostLocationChoice] = []
+    @State private var loadedPostLocationQuery = ""
+    @State private var loadedPostLocationKey: String?
+    @State private var postLocationIssue: POISearchIssue?
+    @State private var isLoadingPostLocations = false
+    @State private var postLocationRetry = 0
     @State private var isShowingAudienceChoices = false
     @State private var selectedBubbleSource: MapTalkReelBubbleSource?
     @State private var pendingBubbleSource: MapTalkReelBubbleSource?
@@ -303,6 +316,32 @@ struct MapTalkPublishComposer: View {
         return locationAccessIsDenied ? "Location off" : "Finding location…"
     }
 
+    private struct PostLocationRequest: Equatable {
+        let query: String
+        let locationKey: String
+        let retry: Int
+    }
+
+    private var postLocationRequest: PostLocationRequest {
+        .init(query: postLocationQuery.trimmingCharacters(in: .whitespacesAndNewlines),
+              locationKey: liveLocationKey, retry: postLocationRetry)
+    }
+
+    private var visiblePostLocations: [MapTalkPostLocationChoice] {
+        let query = postLocationRequest.query
+        let local = postLocationChoices.filter {
+            query.isEmpty || $0.selection.title.localizedStandardContains(query)
+                || $0.previousPosts.contains { $0.message?.localizedStandardContains(query) == true }
+        }
+        // The response already merges owned history and directory places.
+        // Appending the earlier snapshot would duplicate a history point that
+        // has since resolved to one exact POI coordinate.
+        if loadedPostLocationQuery == query, loadedPostLocationKey == liveLocationKey {
+            return loadedPostLocations
+        }
+        return local
+    }
+
     var body: some View {
         Group {
             switch destination {
@@ -311,20 +350,44 @@ struct MapTalkPublishComposer: View {
             case .reel:
                 ZStack {
                     reelComposer
-                        .allowsHitTesting(isShowingBubblePicker == false)
-                        .accessibilityHidden(isShowingBubblePicker)
+                        .allowsHitTesting(!isShowingBubblePicker && !isShowingPostLocations)
+                        .accessibilityHidden(isShowingBubblePicker || isShowingPostLocations)
 
                     if isShowingBubblePicker {
                         bubblePicker
                             .transition(.move(edge: .trailing))
                     }
+                    if isShowingPostLocations {
+                        MapTalkPostLocationPicker(
+                            choices: visiblePostLocations,
+                            isLoading: isLoadingPostLocations,
+                            issue: postLocationIssue,
+                            hasLiveLocation: hasLiveLocation,
+                            liveLocation: liveLocation,
+                            query: $postLocationQuery,
+                            selection: selectedPostLocation,
+                            onSelect: { choice in
+                                guard !hasUnconfirmedSubmission else { return }
+                                selectedPostLocation = choice
+                                isShowingPostLocations = false
+                                postLocationQuery = ""
+                            },
+                            onBack: { isShowingPostLocations = false },
+                            onRetry: { postLocationRetry += 1 }
+                        )
+                        .transition(.move(edge: .trailing))
+                    }
                 }
                 .animation(.easeOut(duration: 0.18), value: isShowingBubblePicker)
+                .animation(.easeOut(duration: 0.18), value: isShowingPostLocations)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .toolbarVisibility(.hidden, for: .tabBar)
         .accessibilityElement(children: .contain)
+        .task {
+            if destination == .reel { await appEnvironment.backend?.prepareNamedPostLocations() }
+        }
         .accessibilityIdentifier("maptalk.publish-composer")
         .disabled(isSubmitting)
         .allowsHitTesting(isSubmitting == false)
@@ -335,6 +398,28 @@ struct MapTalkPublishComposer: View {
         .onDisappear {
             placeVideoPlayer?.pause()
             pendingVideoPlayer?.pause()
+        }
+        .task(id: postLocationRequest) {
+            guard destination == .reel else { return }
+            let request = postLocationRequest
+            postLocationIssue = nil
+            guard hasLiveLocation else {
+                isLoadingPostLocations = false
+                loadedPostLocations = []
+                loadedPostLocationKey = nil
+                return
+            }
+            isLoadingPostLocations = true
+            if !request.query.isEmpty {
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            }
+            let result = await onSearchPostLocations(request.query)
+            guard !Task.isCancelled, postLocationRequest == request else { return }
+            loadedPostLocations = result.options
+            loadedPostLocationQuery = request.query
+            loadedPostLocationKey = request.locationKey
+            postLocationIssue = result.issue
+            isLoadingPostLocations = false
         }
         .onChange(of: nearbyPlaces.map(\.id)) { _, _ in
             if isShowingNearbyPlaceChoices {
@@ -495,6 +580,7 @@ struct MapTalkPublishComposer: View {
         }
         .clipped()
         .background(Color.white)
+        .environment(\.colorScheme, .light)
         .animation(.easeOut(duration: 0.20), value: isShowingNewPlaceEditor)
     }
 
@@ -506,30 +592,9 @@ struct MapTalkPublishComposer: View {
                 backAction: dismissNearbyPlaceChoices
             )
 
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(Color.black.opacity(0.4))
-                TextField("Search nearby places", text: $nearbyPlaceSearchText)
-                    .font(.system(size: 15))
-                    .foregroundStyle(.black)
-                    .focused($isPlaceSearchFocused)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-                    .onSubmit { isPlaceSearchFocused = false }
-                    .accessibilityIdentifier("maptalk.place.search")
-                if isSearchingPlaces {
-                    ProgressView().controlSize(.small).tint(.gray)
-                }
-                if !nearbyPlaceSearchText.isEmpty {
-                    Button { nearbyPlaceSearchText = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.gray)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear place search")
-                }
-            }
-            .padding(12)
-            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 12))
+            PublishLocationSearchField(text: $nearbyPlaceSearchText,
+                isFocused: $isPlaceSearchFocused, isLoading: isSearchingPlaces,
+                identifier: "maptalk.place.search")
             .padding(.horizontal, 20)
             .padding(.vertical, 8)
 
@@ -556,7 +621,7 @@ struct MapTalkPublishComposer: View {
     private var newPlaceEditorPage: some View {
         VStack(spacing: 0) {
             placePickerHeader(
-                title: "New place",
+                title: "Create new",
                 backLabel: "Back to nearby places",
                 backAction: dismissNewPlaceEditor
             )
@@ -627,28 +692,8 @@ struct MapTalkPublishComposer: View {
         backLabel: String,
         backAction: @escaping () -> Void
     ) -> some View {
-        ZStack {
-            Text(title)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.black)
-
-            HStack {
-                Button(action: backAction) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.black)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(ComposerPressStyle())
-                .accessibilityLabel(backLabel)
-                .accessibilityIdentifier("maptalk.place.picker-back")
-
-                Spacer()
-            }
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 46)
+        PublishLocationPickerHeader(title: title, backLabel: backLabel,
+            backIdentifier: "maptalk.place.picker-back", onBack: backAction)
     }
 
     /// Expression comes first, then the ordered media layout and optional
@@ -1069,12 +1114,17 @@ struct MapTalkPublishComposer: View {
             bubbleSelector
             reelRowDivider
 
-            reelSettingRow(
-                title: "Location",
-                value: locationStatusText,
-                trailingSymbol: hasLiveLocation ? "checkmark" : nil
-            )
-            .accessibilityIdentifier("maptalk.publish-live-location")
+            Button {
+                isTextFocused = false
+                isShowingAudienceChoices = false
+                isShowingPostLocations = true
+            } label: {
+                reelSettingRow(title: "Location",
+                               value: selectedPostLocation?.title ?? locationStatusText,
+                               showsChevron: true)
+            }
+            .buttonStyle(ComposerPressStyle())
+            .accessibilityIdentifier("maptalk.reel.location")
 
             reelRowDivider
 
@@ -1537,14 +1587,7 @@ struct MapTalkPublishComposer: View {
 
     private var nearbyPlaceChoices: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text(nearbyPlaceSearchQuery.isEmpty ? "Nearby places" : "Search results")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.black.opacity(0.48))
-
-                Spacer(minLength: 0)
-            }
-            .frame(height: 42)
+            PublishLocationSectionHeader(title: nearbyPlaceSearchQuery.isEmpty ? "Nearby places" : "Search results")
 
             placePickerDivider
 
@@ -1604,54 +1647,21 @@ struct MapTalkPublishComposer: View {
     }
 
     private var createPlaceButton: some View {
-        Button(action: beginCreatingPlace) {
-            HStack(spacing: 10) {
-                Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .frame(width: 18)
-
-                Text(isCreatingLandmark ? "Edit custom place" : "Create new place")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.black)
-
-                Spacer(minLength: 0)
-            }
-            .frame(height: 56)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("maptalk.place.create-new")
+        PublishLocationCreateButton(title: isCreatingLandmark ? "Edit custom place" : "Create new",
+            identifier: "maptalk.place.create-new", action: beginCreatingPlace)
     }
 
     private func nearbyPlaceChoice(_ option: MapTalkNearbyPlaceOption) -> some View {
         let isSelected = selectedNearbyPlaceOption?.id == option.id
+        let contextBadge: String? = option.place.checkIns.contains { $0.userId == currentUserID }
+            ? "Been here" : (!option.friendUsers.isEmpty ? "Friends"
+                : (option.publicVisitorCount > 0 ? "Check-ins" : nil))
         return Button {
             selectNearbyPlace(option)
         } label: {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(option.place.poi.name)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.black)
-                        .lineLimit(1)
-
-                    Text(nearbyPlaceSummary(option))
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(Color.black.opacity(0.46))
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 8)
-
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(.black)
-                }
-            }
-            .frame(height: 58)
-            .contentShape(Rectangle())
+            PublishLocationChoiceLabel(title: option.place.poi.name,
+                subtitle: nearbyPlaceSummary(option), symbol: option.place.poi.category.symbolName,
+                isSelected: isSelected, badge: contextBadge)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(option.place.poi.name)
@@ -1751,9 +1761,7 @@ struct MapTalkPublishComposer: View {
     }
 
     private var placePickerDivider: some View {
-        Rectangle()
-            .fill(Color.black.opacity(0.085))
-            .frame(height: 0.5)
+        PublishLocationDivider()
     }
 
     private var placeSubmitButton: some View {
@@ -2631,7 +2639,8 @@ struct MapTalkPublishComposer: View {
                 .init(
                     text: trimmedReelText,
                     attachments: Array(reelAssets.prefix(Self.maximumReelAssets)).map(\.reelAttachment),
-                    bubbleSource: normalizedBubbleSource(selectedBubbleSource)
+                    bubbleSource: normalizedBubbleSource(selectedBubbleSource),
+                    location: selectedPostLocation
                 )
             )
         }

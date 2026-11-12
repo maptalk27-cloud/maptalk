@@ -1474,6 +1474,7 @@ struct FriendFootprintOverlay: MapContent {
     let visibility: FriendFootprintScreenVisibility
     let allowsCompactActivation: () -> Bool
     let onTap: (MapTalkFriendFootprint) -> Void
+    var poiTransitionNamespace: Namespace.ID? = nil
 
     var body: some MapContent {
         let visiblePlaces = footprints.filter { visibility.placeIDs.contains($0.id) }
@@ -1523,6 +1524,8 @@ struct FriendFootprintOverlay: MapContent {
                         "maptalk.friend-place.\(isExpanded ? "expanded" : "compact").\(footprint.id)"
                     )
                 }
+                .modifier(MapTalkPOITransitionSource(id: .footprint(footprint.id),
+                                                     namespace: poiTransitionNamespace))
                 .zIndex(selectedID == footprint.id ? 2 : (isExpanded ? 1 : 0))
             }
         }

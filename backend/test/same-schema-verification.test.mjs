@@ -16,6 +16,8 @@ async function fixture(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   const sourcePath = join(directory, 'snapshot.sqlite'), targetPath = join(directory, 'restored.sqlite');
   const db = openDatabase(sourcePath);
+  // Keep this historical verifier's fixture at its original schema.
+  db.exec('ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
   db.exec(`
     INSERT INTO users(id, handle, password_hash, created_at) VALUES ('owner', 'alice', 'kept-secret-hash', 1);
     INSERT INTO places VALUES ('place', 'Private Airport Café', 'airport', 47.45, -122.31, 'airport');

@@ -721,7 +721,7 @@ enum PreviewData {
         return ChengsiMock(
             user: currentUser,
             pois: [recentFootprint, marketFootprint, pastFootprint, laFootprint, londonFootprint, bangkokFootprint],
-            reels: [
+            reels: ownProfileMediaSamples(relativeTo: referenceDate) + [
                 portraitVideoReal,
                 lagosNightReal,
                 nairobiSunriseReal,
@@ -738,6 +738,107 @@ enum PreviewData {
             journeyFolders: journeyFolders
         )
     }()
+
+    /// A compact, labeled matrix for exploring the signed-in user's public Post cards.
+    /// IDs, attachment order, coordinates, and age offsets are stable across launches.
+    /// Only the existing public sample images and mock videos are used here.
+    private static func ownProfileMediaSamples(relativeTo referenceDate: Date) -> [RealPost] {
+        let photoIDs = [
+            "photo-1507525428034-b723cf961d3e",
+            "photo-1469474968028-56623f02e42e",
+            "photo-1500530855697-b586d89ba3ee",
+            "photo-1470770841072-f978cf4d019e",
+            "photo-1477959858617-67f85cf4f1df",
+            "photo-1505764706515-aa95265c5abc",
+            "photo-1500534314209-a25ddb2bd429",
+            "photo-1441974231531-c6227db76b6e",
+            "photo-1489515217757-5fd1be406fef"
+        ]
+        let photos = photoIDs.map {
+            URL(string: "https://images.unsplash.com/\($0)?auto=format&fit=crop&w=900&q=60")!
+        }
+        let landscapeURL = URL(string: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4")!
+        let landscapeMetadata = RealPost.Attachment.VideoMetadata(width: 1920, height: 1080, duration: 15)
+        let bundledPortraitURL = Bundle.main.url(
+            forResource: "istockphoto-1467181036-640_adpp_is", withExtension: "mp4"
+        ) ?? Bundle.main.url(
+            forResource: "istockphoto-1467181036-640_adpp_is", withExtension: "mp4", subdirectory: "Mock"
+        )
+        // ffprobe of the checked-in mock clip: 432 × 768, 7.36 seconds.
+        // If a preview host omits bundle resources, keep the fallback's landscape metadata.
+        let portraitMetadata = bundledPortraitURL == nil
+            ? landscapeMetadata
+            : RealPost.Attachment.VideoMetadata(width: 432, height: 768, duration: 7.36)
+        let portraitLabel = bundledPortraitURL == nil ? "横屏备用" : "竖屏"
+
+        func photo(_ postSeed: Int, _ index: Int) -> RealPost.Attachment {
+            .init(id: uuid(42_000 + (postSeed - 41_000) * 10 + index), kind: .photo(photos[index % photos.count]))
+        }
+
+        func video(_ postSeed: Int, _ index: Int, portrait: Bool) -> RealPost.Attachment {
+            .init(
+                id: uuid(42_000 + (postSeed - 41_000) * 10 + index),
+                kind: .video(
+                    url: portrait ? (bundledPortraitURL ?? landscapeURL) : landscapeURL,
+                    poster: photos[portrait ? 8 : 4]
+                ),
+                videoMetadata: portrait ? portraitMetadata : landscapeMetadata
+            )
+        }
+
+        var posts: [RealPost] = []
+        func append(_ seed: Int, label: String, attachments: [RealPost.Attachment]) {
+            let index = posts.count
+            let createdAt = referenceDate.addingTimeInterval(-TimeInterval(5 + index) * 60)
+            let post = RealPost(
+                id: uuid(seed),
+                userId: currentUser.id,
+                center: .init(
+                    latitude: 47.608 + Double(index / 5) * 0.001,
+                    longitude: -122.337 + Double(index % 5) * 0.001
+                ),
+                radiusMeters: 120,
+                message: "[Mock · \(label)]\n西雅图散步，把日常的光影留在这里。",
+                attachments: attachments,
+                likes: [],
+                comments: [],
+                visibility: .publicAll,
+                createdAt: createdAt,
+                expiresAt: createdAt.addingTimeInterval(24 * 3600)
+            )
+            registerLocationLabel("Seattle, Washington, USA", for: post.id)
+            posts.append(post)
+        }
+
+        for count in 1...9 {
+            let seed = 41_000 + count
+            append(seed, label: "\(count) 张照片", attachments: (0..<count).map { photo(seed, $0) })
+        }
+
+        for count in 1...9 {
+            let seed = 41_010 + count
+            // Both video-first and photo-first ordering are represented; 3–9 items
+            // include two videos, so videos cannot disappear behind a photo cover.
+            let videoIndices: Set<Int> = count == 1 ? [0] : count == 2 ? [1] : [0, count - 1]
+            let attachments = (0..<count).map { index in
+                videoIndices.contains(index)
+                    ? video(seed, index, portrait: index == 0)
+                    : photo(seed, index)
+            }
+            let videoCount = videoIndices.count
+            let label = count == 1
+                ? "1 个视频 · \(portraitLabel)"
+                : "\(count) 项混排 · \(count - videoCount) 张照片 + \(videoCount) 个视频"
+            append(seed, label: label, attachments: attachments)
+        }
+
+        append(41_020, label: "2 个视频 · \(portraitLabel) + 横屏", attachments: [
+            video(41_020, 0, portrait: true), video(41_020, 1, portrait: false)
+        ])
+        append(41_021, label: "纯文字", attachments: [])
+        append(41_022, label: "1 个视频 · 横屏", attachments: [video(41_022, 0, portrait: false)])
+        return posts
+    }
 
     /// The deliberate public subset used by Profile and MapTalk.
     static let chengsiPublishedProfile: ChengsiMock = {

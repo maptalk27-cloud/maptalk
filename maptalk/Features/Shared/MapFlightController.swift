@@ -126,7 +126,7 @@ final class MapFlightController: ObservableObject {
         let centerTolerance: CLLocationDistance
         let earliestStart: CFTimeInterval
         let observationRevision: UInt64
-        let begin: () -> Void
+        let begin: (_ recoveringFromAdjustedOverview: Bool) -> Void
         var isScheduled = false
         var nativeEnded = false
     }
@@ -488,11 +488,11 @@ final class MapFlightController: ObservableObject {
             centerTolerance: max(20, min(target.dominantSpanMeters * 0.1, 500)),
             earliestStart: CACurrentMediaTime() + cruiseDuration,
             observationRevision: cameraObservationRevision,
-            begin: { [weak self] in
+            begin: { [weak self] isRecovery in
                 guard let self, self.activeTransitionID == id else { return }
                 self.completeDive(
                     to: target,
-                    with: durations.zoomIn,
+                    with: isRecovery ? max(durations.zoomIn, 0.55) : durations.zoomIn,
                     transitionID: id,
                     viewport: viewport,
                     cameraPosition: cameraPosition,
@@ -503,17 +503,25 @@ final class MapFlightController: ObservableObject {
             guard let self, self.pendingDive?.id == gateID else { return }
             self.beginDiveIfReady()
         }
-        // Missing callbacks (e.g. a removed map) must neither leave ownership
-        // stuck nor force the unsafe region jump this gate exists to prevent.
+        // Globe views can settle at a renderer-adjusted height without ever
+        // satisfying the exact cruise/whole-route gate (the departure can be
+        // on the other side of Earth). Finish an owned, settled arrival rather
+        // than abandoning the user at continental zoom. Missing observations
+        // or a map that never reached the destination still release ownership.
         DispatchQueue.main.asyncAfter(deadline: .now() + cruiseDuration + 3) { [weak self] in
             guard let self, self.activeTransitionID == id,
-                  self.pendingDive?.id == gateID else { return }
+                  let gate = self.pendingDive, gate.id == gateID,
+                  !gate.isScheduled else { return }
+            if self.canRecoverSettledDive(gate) {
+                self.queueDive(gate, recoveringFromAdjustedOverview: true)
+                return
+            }
             self.cancelActiveTransition()
         }
     }
 
     private func beginDiveIfReady() {
-        guard var gate = pendingDive, !gate.isScheduled,
+        guard let gate = pendingDive, !gate.isScheduled,
               activeTransitionID == gate.transitionID,
               CACurrentMediaTime() >= gate.earliestStart,
               cameraObservationRevision != gate.observationRevision,
@@ -530,6 +538,20 @@ final class MapFlightController: ObservableObject {
             && visibleRegion?.contains(gate.departure, insetFraction: 0.92) == true
             && visibleRegion?.contains(gate.cruiseCamera.centerCoordinate, insetFraction: 0.92) == true
         guard reachedDistance || reachedNativeOverview else { return }
+        queueDive(gate, recoveringFromAdjustedOverview: false)
+    }
+
+    private func canRecoverSettledDive(_ gate: PendingDive) -> Bool {
+        // An old onEnd, a missing map, or an intermediate moving sample is not
+        // authority to land. User gestures and newer selections also revoke the
+        // flight before this path can run, through activeTransitionID.
+        gate.nativeEnded
+            && cameraObservationRevision != gate.observationRevision
+            && visibleRegion?.contains(gate.cruiseCamera.centerCoordinate, insetFraction: 0.92) == true
+    }
+
+    private func queueDive(_ pending: PendingDive, recoveringFromAdjustedOverview: Bool) {
+        var gate = pending
         gate.isScheduled = true
         pendingDive = gate
         // Do not publish another camera command inside MapKit's observation.
@@ -538,7 +560,7 @@ final class MapFlightController: ObservableObject {
             guard let self, self.activeTransitionID == gate.transitionID,
                   self.pendingDive?.id == gate.id else { return }
             self.pendingDive = nil
-            gate.begin()
+            gate.begin(recoveringFromAdjustedOverview)
         }
     }
 

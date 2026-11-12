@@ -476,6 +476,93 @@ struct MapStoryFlightAnimatorTests {
                 "A renderer-clamped overview can land without a requested-height special case")
     }
 
+    @Test
+    func hemisphereFlightFinishesFromSettledAdjustedDestinationOverview() async throws {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let controller = MapFlightController()
+        defer { controller.cancelActiveTransition() }
+        let origin = region(latitude: -1.2921, longitude: 36.8219) // Nairobi
+        let target = region(latitude: 48.117, longitude: -122.76) // Mock BelRed
+        let recorder = CameraCommandRecorder(origin: origin)
+        var completions = 0
+        controller.handleRegionChange(currentRegion: origin, targetRegion: target,
+            cause: .poi, cameraPosition: recorder.binding,
+            onRegionUpdate: { _ in completions += 1 })
+        try await waitUntil { recorder.commands.count == 2 }
+        let cruise = try #require(recorder.commands.last?.position.camera)
+        try await Task.sleep(for: .milliseconds(2_000))
+
+        // A native globe view centered on North America cannot display Nairobi
+        // on the opposite hemisphere, nor must it preserve the requested height.
+        let overview = MKCoordinateRegion(center: target.center,
+            span: .init(latitudeDelta: 70, longitudeDelta: 90))
+        let adjusted = MapCamera(centerCoordinate: target.center,
+            distance: cruise.distance * 0.55, heading: cruise.heading, pitch: cruise.pitch)
+        controller.observeCamera(region: overview, camera: adjusted)
+        controller.observeCameraEnd()
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(recorder.commands.count == 2,
+                "A clamped view must not bypass the normal arrival gate immediately")
+
+        try await waitUntil(timeout: .seconds(4)) { completions == 1 }
+        #expect(recorder.commands.count == 3,
+                "The bounded recovery must issue exactly one landing, not leave a continental map")
+        let landing = try #require(recorder.commands.last?.position.region)
+        #expect(landing.center.distance(to: target.center) < 1)
+        #expect(landing.span.latitudeDelta < 1)
+        controller.observeCamera(region: landing)
+        controller.observeCameraEnd()
+        #expect(controller.pendingLandingRegion == nil)
+        #expect(!controller.hasUnsettledNativeFlight)
+    }
+
+    @Test
+    func adjustedOverviewRecoveryCannotOverridePanReplacementOrMovingCamera() async throws {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let origin = region(latitude: -1.2921, longitude: 36.8219)
+        let target = region(latitude: 48.117, longitude: -122.76)
+        let controllers = (0..<3).map { _ in MapFlightController() }
+        defer { controllers.forEach { $0.cancelActiveTransition() } }
+        let recorders = controllers.map { _ in CameraCommandRecorder(origin: origin) }
+        var completions = [0, 0, 0]
+        for index in controllers.indices {
+            controllers[index].handleRegionChange(currentRegion: origin, targetRegion: target,
+                cause: .poi, cameraPosition: recorders[index].binding,
+                onRegionUpdate: { _ in completions[index] += 1 })
+        }
+        try await waitUntil { recorders.allSatisfy { $0.commands.count == 2 } }
+        let overview = MKCoordinateRegion(center: target.center,
+            span: .init(latitudeDelta: 70, longitudeDelta: 90))
+        for index in controllers.indices {
+            let cruise = try #require(recorders[index].commands.last?.position.camera)
+            controllers[index].observeCamera(region: overview, camera: .init(
+                centerCoordinate: target.center, distance: cruise.distance * 0.55,
+                heading: cruise.heading, pitch: cruise.pitch))
+            controllers[index].observeCameraEnd()
+        }
+
+        let manual = region(latitude: 47.61, longitude: -122.32)
+        controllers[0].cancelActiveTransition()
+        recorders[0].binding.wrappedValue = .region(manual)
+        let replacement = region(latitude: 40.7, longitude: -74.0)
+        controllers[1].handleRegionChange(currentRegion: overview, targetRegion: replacement,
+            cause: .initial, cameraPosition: recorders[1].binding,
+            onRegionUpdate: { _ in completions[1] += 1 })
+        // A new moving sample invalidates the previous native-ended sample.
+        controllers[2].observeCamera(region: overview, camera: .init(
+            centerCoordinate: target.center, distance: 21_000_000, heading: 0, pitch: 36))
+        let commandCounts = recorders.map { $0.commands.count }
+        try await Task.sleep(for: .milliseconds(5_200))
+
+        #expect(recorders.map { $0.commands.count } == commandCounts,
+                "Old watchdog callbacks must not resume after takeover or during native motion")
+        #expect(completions == [0, 1, 0])
+        #expect(recorders[0].commands.last?.position.region?.center.latitude == manual.center.latitude)
+        #expect(recorders[1].commands.last?.position.region?.center.latitude == replacement.center.latitude)
+        #expect(controllers[2].pendingLandingRegion == nil)
+        #expect(!controllers[2].hasUnsettledNativeFlight)
+    }
+
     private func waitUntil(timeout: Duration = .milliseconds(2_500), _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while !condition(), ContinuousClock.now < deadline {

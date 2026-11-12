@@ -97,6 +97,7 @@ struct RealPost: Identifiable, Hashable {
     var createdAt: Date
     var expiresAt: Date
     var publishedAt: Date? = nil
+    var locationName: String? = nil
 
     var activityDate: Date { publishedAt ?? createdAt }
 
