@@ -84,17 +84,20 @@ struct MapNativeFlightDiagnosticTests {
         MKCoordinateRegion(center: center, latitudinalMeters: meters, longitudinalMeters: meters)
     }
 
-    @Test
-    func longDistanceStillUsesOriginalNativeFlight() async throws {
+    @Test(arguments: [false, true])
+    func longDistanceStillUsesOriginalNativeFlight(crossesHemisphere: Bool) async throws {
         guard !UIAccessibility.isReduceMotionEnabled else { return }
         let scene = try #require(UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
-        let honolulu = CLLocationCoordinate2D(latitude: 21.32272, longitude: -157.91080)
-        let seattle = CLLocationCoordinate2D(latitude: 47.6062, longitude: -122.3321)
+        let origin = crossesHemisphere
+            ? CLLocationCoordinate2D(latitude: -1.2921, longitude: 36.8219)
+            : CLLocationCoordinate2D(latitude: 21.32272, longitude: -157.91080)
+        let originLabel = crossesHemisphere ? "NBO" : "HNL"
+        let seattle = CLLocationCoordinate2D(latitude: 47.6084, longitude: -122.3426)
         let viewport = MapCameraViewport(size: scene.coordinateSpace.bounds.size,
             topInset: 115, bottomInset: 335)
-        let recorder = NativeFlightProbeRecorder(initial: Self.region(honolulu, meters: 800))
+        let recorder = NativeFlightProbeRecorder(initial: Self.region(origin, meters: 800))
         let window = UIWindow(windowScene: scene)
         window.frame = scene.coordinateSpace.bounds
         window.windowLevel = .normal + 1
@@ -107,10 +110,11 @@ struct MapNativeFlightDiagnosticTests {
             previousKeyWindow?.makeKey()
         }
         try await Task.sleep(for: .milliseconds(1_800))
-        let neighbors = [honolulu, .init(latitude: honolulu.latitude + 0.001, longitude: honolulu.longitude),
+        try #require(!recorder.frames.isEmpty, "The native Map must report actual camera frames")
+        let neighbors = [origin, .init(latitude: origin.latitude + 0.001, longitude: origin.longitude),
                          seattle, .init(latitude: seattle.latitude + 0.001, longitude: seattle.longitude)]
-        for (label, destination) in [("HNL-SEA", seattle), ("SEA-HNL", honolulu)] {
-            recorder.begin(label: label)
+        for (label, destination) in [("\(originLabel)-SEA", seattle), ("SEA-\(originLabel)", origin)] {
+            recorder.begin(label: label, cinematicDestination: destination)
             recorder.controller.handleRegionChange(currentRegion: recorder.latestRegion,
                 targetRegion: Self.region(destination, meters: 3_600), cause: .poi,
                 viewport: viewport, browsingCoordinates: neighbors,
@@ -120,8 +124,9 @@ struct MapNativeFlightDiagnosticTests {
             // by up to 25%; allow its real MapKit landing to finish as well.
             try await Task.sleep(for: .milliseconds(6_000))
             recorder.report()
+            recorder.verifyNativeEndHandoff(at: Self.region(destination, meters: 800))
             recorder.verifyLanding(at: viewport.framed(Self.region(destination, meters: 800)),
-                routeDistance: honolulu.distance(to: seattle))
+                routeDistance: origin.distance(to: seattle))
         }
     }
 }
@@ -133,6 +138,7 @@ private final class NativeFlightProbeRecorder {
         let center: CLLocationCoordinate2D
         let distance: Double
         let pitch: Double
+        let heading: Double
     }
 
     let controller = MapFlightController()
@@ -142,6 +148,10 @@ private final class NativeFlightProbeRecorder {
     private var commands: [String] = []
     private var transactions: [String] = []
     private var nativeEvents: [String] = []
+    private var cameraCommands: [Frame] = []
+    private var regionCommandTimes: [CFTimeInterval] = []
+    private var endedFrames: [Frame] = []
+    private var nominalCruiseDuration: TimeInterval?
     private var startedAt = CACurrentMediaTime()
     private var label = "prepare"
 
@@ -154,8 +164,11 @@ private final class NativeFlightProbeRecorder {
         Binding(get: { self.store.position }, set: { position, transaction in
             let kind: String
             if let camera = position.camera {
+                self.cameraCommands.append(Frame(time: CACurrentMediaTime(), center: camera.centerCoordinate,
+                    distance: camera.distance, pitch: camera.pitch, heading: camera.heading))
                 kind = "camera lat=\(Self.f(camera.centerCoordinate.latitude)) lon=\(Self.f(camera.centerCoordinate.longitude)) height=\(Int(camera.distance))"
             } else if let region = position.region {
+                self.regionCommandTimes.append(CACurrentMediaTime())
                 kind = "region lat=\(Self.f(region.center.latitude)) lon=\(Self.f(region.center.longitude)) latSpan=\(Self.f(region.span.latitudeDelta))"
             } else {
                 kind = "other"
@@ -174,13 +187,23 @@ private final class NativeFlightProbeRecorder {
         })
     }
 
-    func begin(label: String) {
+    func begin(label: String, cinematicDestination: CLLocationCoordinate2D? = nil) {
         self.label = label
         startedAt = CACurrentMediaTime()
         commands.removeAll()
         transactions.removeAll()
         nativeEvents.removeAll()
-        frames = frames.last.map { [Frame(time: startedAt, center: $0.center, distance: $0.distance, pitch: $0.pitch)] } ?? []
+        cameraCommands.removeAll()
+        regionCommandTimes.removeAll()
+        endedFrames.removeAll()
+        nominalCruiseDuration = cinematicDestination.map {
+            // These long routes use the unchanged 1.5 s cinematic cruise.
+            // Match its pre-flight screen-relative scale, not wall-clock lift time.
+            1.5 * MapFlightPacing.durationScale(travelDistance: latestRegion.center.distance(to: $0),
+                                               visibleSpan: Self.spanMeters(latestRegion))
+        }
+        frames = frames.last.map { [Frame(time: startedAt, center: $0.center,
+            distance: $0.distance, pitch: $0.pitch, heading: $0.heading)] } ?? []
         print("NATIVE-START \(label) visible={\(lastFrameDescription)}")
     }
 
@@ -188,10 +211,12 @@ private final class NativeFlightProbeRecorder {
         controller.observeCamera(region: context.region, camera: context.camera)
         latestRegion = context.region
         frames.append(Frame(time: CACurrentMediaTime(), center: context.camera.centerCoordinate,
-            distance: context.camera.distance, pitch: context.camera.pitch))
+            distance: context.camera.distance, pitch: context.camera.pitch, heading: context.camera.heading))
     }
 
     func ended(_ context: MapCameraUpdateContext) {
+        endedFrames.append(Frame(time: CACurrentMediaTime(), center: context.camera.centerCoordinate,
+            distance: context.camera.distance, pitch: context.camera.pitch, heading: context.camera.heading))
         controller.observeCamera(region: context.region, camera: context.camera)
         controller.observeCameraEnd()
         if !controller.isTransitionInProgress { latestRegion = context.region }
@@ -258,6 +283,37 @@ private final class NativeFlightProbeRecorder {
         }
     }
 
+    func verifyNativeEndHandoff(at target: MKCoordinateRegion) {
+        #expect(cameraCommands.count == 2, "Long routes retain native lift and cruise camera commands")
+        #expect(regionCommandTimes.count == 1, "A flight must issue exactly one region landing")
+        guard cameraCommands.count == 2, let landingTime = regionCommandTimes.first,
+              let nominalCruiseDuration else { return }
+        let cruise = cameraCommands[1]
+        let notBefore = cruise.time + nominalCruiseDuration
+        let tolerance = max(20, min(Self.spanMeters(target) * 0.1, 500))
+        guard let ended = endedFrames.last(where: {
+            $0.time >= cruise.time && $0.time <= landingTime
+                && $0.center.distance(to: target.center) <= tolerance
+        }), !frames.contains(where: {
+            $0.time > ended.time && $0.time < landingTime
+                && (abs($0.center.latitude - ended.center.latitude) > 0.000_000_1
+                    || abs($0.center.longitude - ended.center.longitude) > 0.000_000_1
+                    || abs($0.distance - ended.distance) > 1 || abs($0.pitch - ended.pitch) > 0.001
+                    || abs($0.heading - ended.heading) > 0.001)
+        }) else {
+            // The existing exact-height path may hand off before native onEnd.
+            // Do not mistake that valid, earlier arrival for a missing callback.
+            print("NATIVE-HANDOFF \(label) no-settled-end-before-landing landing=\(Self.f(landingTime - startedAt))")
+            return
+        }
+        let eligibleAt = max(ended.time, notBefore)
+        let extraWait = landingTime - eligibleAt
+        print("NATIVE-HANDOFF \(label) nativeEnd=\(Self.f(ended.time - startedAt)) nominalEarliest=\(Self.f(notBefore - startedAt)) landing=\(Self.f(landingTime - startedAt)) extraWait=\(Self.f(extraWait))")
+        // Exclude the intended minimum cruise and allow simulator scheduling
+        // slack, while catching the former three-second watchdog-driven hover.
+        #expect(extraWait < 0.75, "A settled destination must descend without waiting for the watchdog")
+    }
+
     private var lastFrameDescription: String {
         guard let frame = frames.last else { return "no-frame" }
         return "t=\(Self.f(frame.time - startedAt)) lat=\(Self.f(frame.center.latitude)) lon=\(Self.f(frame.center.longitude)) height=\(Int(frame.distance)) pitch=\(Self.f(frame.pitch))"
@@ -265,6 +321,16 @@ private final class NativeFlightProbeRecorder {
 
     private func time() -> String { Self.f(CACurrentMediaTime() - startedAt) }
     private static func f(_ value: Double) -> String { String(format: "%.4f", value) }
+
+    private static func spanMeters(_ region: MKCoordinateRegion) -> Double {
+        let latitude = region.center.latitude
+        let longitude = region.center.longitude
+        let north = MKMapPoint(CLLocationCoordinate2D(latitude: latitude + region.span.latitudeDelta / 2, longitude: longitude))
+        let south = MKMapPoint(CLLocationCoordinate2D(latitude: latitude - region.span.latitudeDelta / 2, longitude: longitude))
+        let east = MKMapPoint(CLLocationCoordinate2D(latitude: latitude, longitude: longitude + region.span.longitudeDelta / 2))
+        let west = MKMapPoint(CLLocationCoordinate2D(latitude: latitude, longitude: longitude - region.span.longitudeDelta / 2))
+        return max(north.distance(to: south), east.distance(to: west))
+    }
 }
 
 @MainActor

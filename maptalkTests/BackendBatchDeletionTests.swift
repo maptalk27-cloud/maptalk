@@ -14,6 +14,15 @@ struct BackendBatchDeletionTests {
         try await store.refresh()
         fixture.clearRequests()
 
+        let environment = AppEnvironment.connected(to: store)
+        let myMap = UserMapViewModel(environment: environment, dataScope: .privateArchive)
+        let profile = UserProfileViewModel(environment: environment, context: .me)
+        var archiveRefreshes = 0
+        var profileRefreshes = 0
+        let archiveSubscription = myMap.$summary.dropFirst().sink { _ in archiveRefreshes += 1 }
+        let profileSubscription = profile.$summary.dropFirst().sink { _ in profileRefreshes += 1 }
+        defer { archiveSubscription.cancel(); profileSubscription.cancel() }
+
         var feedSnapshots: [Set<UUID>] = []
         let subscription = store.feedPOIs.sink { places in
             feedSnapshots.append(Set(places.flatMap(\.checkIns).map(\.id)))
@@ -33,6 +42,10 @@ struct BackendBatchDeletionTests {
         #expect(fixture.remainingIDs == [fixture.otherVisitID])
         #expect(!fixture.requests.contains("DELETE /v1/memories/\(fixture.otherVisitID.uuidString)"))
         #expect(store.pendingMemoryMutations.isEmpty)
+        #expect(myMap.footprints.isEmpty)
+        #expect(profile.footprints.isEmpty)
+        #expect(archiveRefreshes == 3, "Two atomic deletes followed by one metadata refresh")
+        #expect(profileRefreshes == 3)
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -79,7 +92,11 @@ struct BackendBatchDeletionTests {
         let deletes = fixture.ownVisitIDs.map { "DELETE /v1/memories/\($0.uuidString)" }
         #expect(Array(requests.prefix(deletes.count)) == deletes,
                 "No archive/profile/feed/media refresh may delay the next DELETE")
-        let reads = Array(requests.dropFirst(deletes.count))
+        let allReads = Array(requests.dropFirst(deletes.count))
+        // The durable Posts feed refresh is independent and can still be in
+        // flight when the archive refresh returns. It must not repeat either.
+        #expect(allReads.filter { $0 == "GET /v1/posts" }.count <= 1)
+        let reads = allReads.filter { $0 != "GET /v1/posts" }
         let expectedReads: Set<String> = [
             "GET /v1/me", "GET /v1/me/memories", "GET /v1/feed",
             "GET /v1/users/\(fixture.user.id.uuidString)/memories"
@@ -170,6 +187,7 @@ private final class BatchDeletionFixture: @unchecked Sendable {
                 let values = returnStaleReads ? initialRecords : Array(records.values)
                 let visible: [BackendMemory]
                 switch path {
+                case "/v1/posts": visible = []
                 case "/v1/feed": visible = values
                 case "/v1/me/memories", "/v1/users/\(user.id.uuidString)/memories":
                     visible = values.filter { $0.ownerId == user.id }

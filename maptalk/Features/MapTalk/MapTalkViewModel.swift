@@ -23,12 +23,36 @@ struct MapTalkNearbyPlaceOption: Identifiable {
     var hasHistory: Bool { !ownCheckIns.isEmpty || publicVisitorCount > 0 }
     var historyPriority: Int { !ownCheckIns.isEmpty ? 0 : (publicVisitorCount > 0 ? 1 : 2) }
 
-    static func ranked(_ options: [Self]) -> [Self] {
-        options.sorted { lhs, rhs in
-            if lhs.historyPriority != rhs.historyPriority { return lhs.historyPriority < rhs.historyPriority }
-            if lhs.distanceMeters != rhs.distanceMeters { return lhs.distanceMeters < rhs.distanceMeters }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
+    static func ranked(_ options: [Self], query: String = "") -> [Self] {
+        // Calculate keys once, not repeatedly inside the sort comparator.
+        options.filter {
+            $0.distanceMeters.isFinite && $0.distanceMeters >= 0
+                && !POIRecommendationPolicy.isSupportingFacility(name: $0.place.poi.name,
+                                                                category: $0.place.poi.category)
+        }.map { option in
+            (option: option,
+             match: POIRecommendationPolicy.nameMatch(option.place.poi.name, query: query),
+             score: POIRecommendationPolicy.score(category: option.place.poi.category,
+                 distanceMeters: option.distanceMeters),
+             distance: POIRecommendationPolicy.distanceBand(option.distanceMeters))
+        }.sorted { lhs, rhs in
+            if lhs.match != rhs.match { return lhs.match > rhs.match }
+            // Real history is the primary recommendation signal, not a small
+            // bonus that a nearby hotel can erase. Named searches still put
+            // the requested venue first. Only eligible candidates reach here.
+            if lhs.option.historyPriority != rhs.option.historyPriority {
+                return lhs.option.historyPriority < rhs.option.historyPriority
+            }
+            if lhs.option.ownCheckIns.count != rhs.option.ownCheckIns.count {
+                return lhs.option.ownCheckIns.count > rhs.option.ownCheckIns.count
+            }
+            if lhs.option.publicVisitorCount != rhs.option.publicVisitorCount {
+                return lhs.option.publicVisitorCount > rhs.option.publicVisitorCount
+            }
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
+            return lhs.option.id.uuidString < rhs.option.id.uuidString
+        }.map(\.option)
     }
 }
 
@@ -42,13 +66,53 @@ struct MapTalkNearbyPlaceSearchResult {
     }
 }
 
-struct MapTalkPostLocationSearchResult {
-    let options: [MapTalkPostLocationChoice]
-    let issue: POISearchIssue?
+/// Refresh a search in place. Loading is not an empty result, and results
+/// from an old query must never appear under the next query's text.
+struct MapTalkNearbyPlaceSearchState {
+    private(set) var query = ""
+    private(set) var options: [MapTalkNearbyPlaceOption] = []
+    private(set) var issue: POISearchIssue?
 
-    init(options: [MapTalkPostLocationChoice], issue: POISearchIssue? = nil) {
-        self.options = options
-        self.issue = issue
+    mutating func prepare(for query: String) {
+        guard self.query != query else { return }
+        self.query = query
+        options = []
+        issue = nil
+    }
+
+    mutating func receive(_ result: MapTalkNearbyPlaceSearchResult, for query: String) {
+        guard self.query == query else { return }
+        if result.issue == nil || !result.options.isEmpty {
+            options = result.options
+        }
+        issue = result.issue
+    }
+
+    func presentedOptions(for query: String, nearbyPlaces: [MapTalkNearbyPlaceOption],
+                          location: CLLocation?) -> [MapTalkNearbyPlaceOption] {
+        guard let location else { return [] }
+        let local = query.isEmpty ? nearbyPlaces : nearbyPlaces.filter {
+            $0.place.poi.name.localizedStandardContains(query)
+        }
+        let latest = Dictionary(nearbyPlaces.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+        // Live history wins over an older directory response for the same place.
+        let searched = !query.isEmpty && self.query == query
+            ? options.map { latest[$0.id] ?? $0 } : []
+        var seen = Set<UUID>()
+        let eligible = (local + searched).compactMap { option -> MapTalkNearbyPlaceOption? in
+            guard seen.insert(option.id).inserted else { return nil }
+            // Retaining rows during a refresh must not retain old GPS eligibility.
+            let distance = POISelectionPolicy.distance(from: location.coordinate, to: option.place.poi.coordinate)
+            let radius = query.isEmpty
+                ? POISelectionPolicy.recommendationRadius(hasOwnCheckIns: !option.ownCheckIns.isEmpty)
+                : POISelectionPolicy.searchRadius
+            guard distance <= radius else { return nil }
+            return .init(place: option.place, distanceMeters: distance,
+                         isPublicDirectoryPlace: option.isPublicDirectoryPlace, isInMyMap: option.isInMyMap,
+                         friendUsers: option.friendUsers, publicVisitorCount: option.publicVisitorCount,
+                         ownCheckIns: option.ownCheckIns)
+        }
+        return MapTalkNearbyPlaceOption.ranked(eligible, query: query)
     }
 }
 
@@ -95,7 +159,7 @@ final class MapTalkViewModel: ObservableObject {
     /// The unprojected device reading is kept alongside the coordinate so a
     /// publish can reject a stale or invalid location instead of silently
     /// falling back to wherever the map happened to be browsing.
-    @Published private(set) var liveLocation: CLLocation?
+    private(set) var liveLocation: CLLocation?
     @Published private(set) var locationAuthorization: CLAuthorizationStatus
     @Published private(set) var isLoadingNearbyPlaces = true
     @Published private(set) var nearbyPlaceIssue: POISearchIssue?
@@ -106,10 +170,10 @@ final class MapTalkViewModel: ObservableObject {
     private let environment: AppEnvironment
     private let mapSearchRegion = PassthroughSubject<MKCoordinateRegion, Never>()
     private let nearbyPlaceRefresh = PassthroughSubject<CLLocationCoordinate2D, Never>()
-    // Separate directory/cache: a wider Post search must never broaden the
-    // real-time POI check-in publisher's eligibility or suggestions.
-    private let postLocationDirectory = ApplePOIRepository(
-        searchRadius: PostLocationPolicy.radius, maximumResults: 60)
+    // Derived from the account's durable local archive, not an Apple directory
+    // query. GPS and camera changes never rebuild the owned history/index.
+    @Published private(set) var postLocationLibrary = MapTalkPostLocationLibrary.empty
+    private var postLocationCache = MapTalkPostLocationCache()
     private var backendMapSearch: Task<Void, Never>?
     private var lastBackendMapRegion: MKCoordinateRegion?
     @Published private(set) var withdrawnPublicMemoryIDs: Set<UUID> = []
@@ -132,6 +196,7 @@ final class MapTalkViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var mapActivityCancellables = Set<AnyCancellable>()
     private var isMapActive = true
+    private var isPublishingLocationActive = false
     init(environment: AppEnvironment, scope: Scope = .global) {
         self.environment = environment
         self.scope = scope
@@ -179,6 +244,49 @@ final class MapTalkViewModel: ObservableObject {
         environment.backend?.publicContentChanges
             .sink { [weak self] ids in self?.withdrawPublicMemories(ids) }
             .store(in: &cancellables)
+        environment.backend?.mediaContentChanges
+            .sink { [weak self] ids in self?.refreshVisibleMedia(for: ids) }
+            .store(in: &cancellables)
+    }
+
+    /// Opening one card can hydrate its video after the map metadata arrived.
+    /// Replace media only inside this map's existing public scope; never add
+    /// private records, broaden history, or move the camera during that update.
+    private func refreshVisibleMedia(for ids: Set<UUID>) {
+        guard isMapActive, let backend = environment.backend else { return }
+        let present = Set(repositoryPOIs.flatMap { $0.checkIns.map(\.id) }
+            + repositoryMapReels.map(\.id))
+        let changed = ids.intersection(present)
+        guard !changed.isEmpty else { return }
+        let snapshot = backend.cachedSnapshot(for: Array(changed), publicOnly: true)
+        let visits = Dictionary(snapshot.pois.flatMap(\.checkIns).map { ($0.id, $0.media) },
+                                uniquingKeysWith: { _, latest in latest })
+        let posts = Dictionary(snapshot.reels.map { ($0.id, $0.attachments) },
+                               uniquingKeysWith: { _, latest in latest })
+        repositoryPOIs = repositoryPOIs.map { place in
+            var place = place
+            for index in place.checkIns.indices {
+                if let media = visits[place.checkIns[index].id] {
+                    place.checkIns[index].media = media
+                }
+            }
+            return place
+        }
+        repositoryMapReels = repositoryMapReels.map { post in
+            var post = post
+            if let attachments = posts[post.id] { post.attachments = attachments }
+            return post
+        }
+        rebuildMapRenderContent()
+        if case .user = scope {
+            repositoryActiveReels = repositoryMapReels
+            activeFeedPOIs = repositoryPOIs
+            activeFeedReels = repositoryMapReels
+            activityPOIs = repositoryPOIs
+            activityReels = repositoryMapReels
+            activeFeedItems = MapStoryFeed.items(reals: repositoryMapReels, ratedPOIs: repositoryPOIs,
+                onlyRecentPOIStories: false, userProvider: self.user(for:), now: .now)
+        }
     }
 
     private func withdrawPublicMemories(_ ids: Set<UUID>) {
@@ -237,7 +345,7 @@ final class MapTalkViewModel: ObservableObject {
     func onAppear() {
         guard isMapActive else { return }
         if case .global = scope {
-            environment.location.requestWhenInUse()
+            environment.location.setBrowsingActive(true)
             searchMap(in: lastVisibleRegion ?? region)
             refreshFreshness()
             refreshBackendIfNeeded()
@@ -258,15 +366,24 @@ final class MapTalkViewModel: ObservableObject {
         mapActivityCancellables.removeAll()
         backendMapSearch?.cancel()
         backendMapSearch = nil
+        environment.location.setBrowsingActive(active)
+        environment.location.setPreciseUpdatesActive(active && isPublishingLocationActive)
         guard active else { return }
 
         // CurrentValueSubject replays the latest GPS reading when rebound;
         // publishing keeps using the real device fix, never the map center.
-        environment.location.requestWhenInUse()
         bindMapActivity()
         searchMap(in: lastVisibleRegion ?? lastBackendMapRegion ?? region)
         refreshFreshness()
         refreshBackendIfNeeded()
+    }
+
+    /// Precise GPS is scoped to composing, not to an app left on its home tab.
+    /// The raw device sample remains separate from the map's visual position.
+    func setPublishingLocationActive(_ active: Bool) {
+        guard case .global = scope, isPublishingLocationActive != active else { return }
+        isPublishingLocationActive = active
+        environment.location.setPreciseUpdatesActive(active && isMapActive)
     }
 
     private func refreshBackendIfNeeded() {
@@ -320,7 +437,7 @@ final class MapTalkViewModel: ObservableObject {
                         repositoryMapReels = content.reels
                         rebuildMapRenderContent()
                     }
-                    let content = try await backend.loadMap(region, onUpdate: apply)
+                    let content = try await backend.loadMap(region, includeVideos: false, onUpdate: apply)
                     try Task.checkCancellation()
                     apply(content)
                 } catch {
@@ -458,9 +575,9 @@ final class MapTalkViewModel: ObservableObject {
 
     func centerOnUser() {
         shouldApplyInitialLocation = false
+        environment.location.requestWhenInUse()
         guard let location = MapStartupLocation.usable(environment.location.location.value) else {
             shouldCenterWhenLocationArrives = true
-            environment.location.requestWhenInUse()
             return
         }
         shouldCenterWhenLocationArrives = false
@@ -520,17 +637,12 @@ final class MapTalkViewModel: ObservableObject {
         return nil
     }
 
-    /// Keep the last accuracy-bearing device reading while Core Location
-    /// refreshes in the background. A stationary device (and especially a
-    /// Simulator fixed location) may not emit a new sample every few seconds;
-    /// expiring the value by timestamp made the composer fall back to an
-    /// endless "Locating" state even though its nearby results were valid.
+    /// GPS can stop while another tab is visible. Never turn that old cache
+    /// into current publication evidence. Use the raw service reading (not the
+    /// jitter-filtered map coordinate), with the existing five-minute window
+    /// that tolerates a stationary device without accepting yesterday's fix.
     var publishableLiveLocation: CLLocation? {
-        guard let liveLocation,
-              liveLocation.horizontalAccuracy >= 0 else {
-            return nil
-        }
-        return liveLocation
+        MapStartupLocation.usable(environment.location.location.value)
     }
 
     func publishLocation(for _: MapTalkPublishDestination) -> CLLocation? {
@@ -544,42 +656,8 @@ final class MapTalkViewModel: ObservableObject {
         nearbyPlaceRefresh.send(location.coordinate)
     }
 
-    func postLocationChoices(near location: CLLocation,
-                             matching directoryPlaces: [RatedPOI] = []) -> [MapTalkPostLocationChoice] {
-        MapTalkPostLocations.choices(
-            near: location,
-            ownPosts: environment.myMapArchive.privateReels,
-            places: nearbyPlaceOptions(near: location, withinMeters: PostLocationPolicy.radius,
-                                       matching: directoryPlaces),
-            currentUserID: environment.myMapArchive.currentUserID
-        )
-    }
-
-    func searchPostLocations(_ query: String) async -> MapTalkPostLocationSearchResult {
-        guard let location = publishableLiveLocation else { return .init(options: []) }
-        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let publisher = query.isEmpty
-            ? postLocationDirectory.nearResult(location.coordinate)
-            : postLocationDirectory.searchResult(query, near: location.coordinate)
-        for await result in publisher.values {
-            guard !Task.isCancelled, let current = publishableLiveLocation else {
-                return .init(options: [])
-            }
-            let options = postLocationChoices(near: current, matching: result.places).filter { choice in
-                query.isEmpty || choice.selection.title.localizedStandardContains(query)
-                    || choice.previousPosts.contains { $0.message?.localizedStandardContains(query) == true }
-                    || result.places.contains { place in
-                        let canonical = environment.backend?.canonicalPlaceForSelection(place.poi, fromDirectory: true) ?? place.poi
-                        return choice.selection.title == canonical.name
-                            && CLLocation(latitude: choice.selection.coordinate.latitude,
-                                          longitude: choice.selection.coordinate.longitude)
-                                .distance(from: CLLocation(latitude: canonical.coordinate.latitude,
-                                                          longitude: canonical.coordinate.longitude)) < 1
-                    }
-            }
-            return .init(options: options, issue: result.issue)
-        }
-        return .init(options: postLocationChoices(near: location), issue: .temporarilyUnavailable)
+    func postPublicationLocation(for selection: MapTalkPostLocationSelection) -> CLLocation? {
+        postLocationLibrary.location(for: selection, currentLocation: publishableLiveLocation)
     }
 
     func region(for real: RealPost) -> MKCoordinateRegion {
@@ -628,12 +706,17 @@ final class MapTalkViewModel: ObservableObject {
     func publishPlace(
         _ draft: MapTalkPlaceDraft,
         at location: CLLocation,
-        audience: MapPublishAudience
+        audience: MapPublishAudience,
+        checkInID: UUID = UUID()
     ) -> RatedPOI? {
+        if let saved = environment.myMapArchive.privatePOIs.first(where: {
+            $0.checkIns.contains { $0.id == checkInID }
+        }) { return saved }
         let hasMedia = draft.media != nil
         let newCheckIn = RatedPOI.CheckIn(
+            id: checkInID,
             userId: environment.myMapArchive.currentUserID,
-            endorsement: hasMedia ? .solid : nil,
+            endorsement: nil,
             media: draft.media.map { [$0] } ?? [],
             tag: hasMedia ? .explore : nil
         )
@@ -642,14 +725,8 @@ final class MapTalkViewModel: ObservableObject {
         let publicPlace: RatedPOI?
         switch draft.target {
         case let .existing(existing):
-            let landmarkLocation = CLLocation(
-                latitude: existing.poi.coordinate.latitude,
-                longitude: existing.poi.coordinate.longitude
-            )
-            // A person can select a sparse-list fallback, so submission uses
-            // the same hard ceiling as the picker rather than its usual
-            // tighter radius.
-            guard landmarkLocation.distance(from: location) <= POISelectionPolicy.radius(for: existing.poi.directoryKind) else {
+            guard POISelectionPolicy.canPublish(at: existing.poi.coordinate,
+                kind: existing.poi.directoryKind, from: location) else {
                 return nil
             }
 
@@ -676,7 +753,7 @@ final class MapTalkViewModel: ObservableObject {
                 media: [],
                 checkIns: [newCheckIn],
                 comments: [],
-                endorsements: .init(hype: 0, solid: hasMedia ? 1 : 0, meh: 0, questionable: 0),
+                endorsements: .init(hype: 0, solid: 0, meh: 0, questionable: 0),
                 tags: hasMedia ? [.init(tag: .explore, count: 1)] : [],
                 isFavoritedByCurrentUser: true,
                 favoritesCount: 1
@@ -692,7 +769,7 @@ final class MapTalkViewModel: ObservableObject {
                     comments: [],
                     endorsements: .init(
                         hype: 0,
-                        solid: hasMedia ? 1 : 0,
+                        solid: 0,
                         meh: 0,
                         questionable: 0
                     ),
@@ -743,7 +820,8 @@ final class MapTalkViewModel: ObservableObject {
             visibility: audience == .livePublic ? .publicAll : .privateOnly,
             createdAt: now,
             expiresAt: now.addingTimeInterval(StoryReadKeys.freshWindow),
-            locationName: PostLocationPolicy.normalizedName(draft.location?.locationName)
+            locationName: PostLocationPolicy.normalizedName(draft.location?.locationName),
+            locationID: draft.location?.locationID
         )
 
         if let bubble {
@@ -883,8 +961,19 @@ final class MapTalkViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] location in
                 guard let self, isMapActive else { return }
+                // Stationary GPS noise should not rebuild the whole map. The
+                // composer still receives precise changes, and publishing reads
+                // the raw sample rather than this display-only coordinate.
+                if isPublishingLocationActive { objectWillChange.send() }
                 liveLocation = location
-                userCoordinate = MapStartupLocation.usable(location)?.coordinate
+                let coordinate = MapStartupLocation.usable(location)?.coordinate
+                if let coordinate {
+                    if userCoordinate.map({ $0.distance(to: coordinate) >= 10 }) ?? true {
+                        userCoordinate = coordinate
+                    }
+                } else if userCoordinate != nil {
+                    userCoordinate = nil
+                }
                 if shouldApplyInitialLocation, let location = MapStartupLocation.usable(location) {
                     shouldApplyInitialLocation = false
                     region = MapStartupLocation.region(around: location.coordinate)
@@ -966,13 +1055,19 @@ final class MapTalkViewModel: ObservableObject {
     private func bind() {
         bindMapActivity()
 
-        // Cached/private history can arrive after the directory. Refresh the
-        // visible pickers even when no public feed item changed.
-        Publishers.CombineLatest(environment.myMapArchive.$privatePOIs,
-                                 environment.myMapArchive.$privateReels)
-            .dropFirst()
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.objectWillChange.send() }
+        // One atomic snapshot after archive writes, including the initial local
+        // cache. Never rebuild grouping/coverage from a body or GPS callback.
+        environment.myMapArchive.privateSnapshots
+            .sink { [weak self] snapshot in
+                guard let self else { return }
+                if postLocationCache.update(ownPosts: snapshot.reels, visitedPlaces: snapshot.pois,
+                                            currentUserID: environment.myMapArchive.currentUserID) {
+                    postLocationLibrary = postLocationCache.library
+                } else {
+                    // POI metadata may still change without changing Post areas.
+                    objectWillChange.send()
+                }
+            }
             .store(in: &cancellables)
 
         environment.myMapArchive.$publicPOIOverlays
@@ -1019,30 +1114,37 @@ final class MapTalkViewModel: ObservableObject {
     private func loadUserScope(for user: User, updateRegion: Bool = true) {
         if let backend = environment.backend {
             let revision = backend.publicContentRevision
-            Task { [weak self] in
+            var receivedFirstSnapshot = false
+            let apply: (BackendStore.Snapshot) -> Void = { [weak self] content in
+                guard let self, !Task.isCancelled, backend.isActive,
+                      revision == backend.publicContentRevision else { return }
+                repositoryPOIs = content.pois
+                repositoryMapReels = content.reels
+                repositoryActiveReels = content.reels
+                rebuildMapRenderContent()
+                activeFeedPOIs = content.pois
+                activeFeedReels = content.reels
+                activityPOIs = content.pois
+                activityReels = content.reels
+                activeFeedItems = MapStoryFeed.items(reals: content.reels, ratedPOIs: content.pois,
+                    onlyRecentPOIStories: false, userProvider: self.user(for:), now: .now)
+                if updateRegion, !receivedFirstSnapshot, let contentRegion = UserMapViewModel.region(forCoordinates:
+                    content.pois.map { $0.poi.coordinate } + content.reels.map(\.center)) {
+                    region = contentRegion
+                }
+                // Media arriving later must not pull the camera away
+                // after the person has already started exploring.
+                receivedFirstSnapshot = true
+            }
+            if updateRegion, user.id == backend.user.id {
+                // Profile already displays this verified public snapshot. Reuse it
+                // before the first map frame, rather than waiting for the same
+                // profile's network read. Never seed from the private archive.
+                let cached = backend.ownPublicSnapshots.value
+                if !cached.pois.isEmpty || !cached.reels.isEmpty { apply(cached) }
+            }
+            Task {
                 do {
-                    var receivedFirstSnapshot = false
-                    let apply: (BackendStore.Snapshot) -> Void = { [weak self] content in
-                        guard let self, !Task.isCancelled, backend.isActive,
-                              revision == backend.publicContentRevision else { return }
-                        repositoryPOIs = content.pois
-                        repositoryMapReels = content.reels
-                        repositoryActiveReels = content.reels
-                        rebuildMapRenderContent()
-                        activeFeedPOIs = content.pois
-                        activeFeedReels = content.reels
-                        activityPOIs = content.pois
-                        activityReels = content.reels
-                        activeFeedItems = MapStoryFeed.items(reals: content.reels, ratedPOIs: content.pois,
-                            onlyRecentPOIStories: false, userProvider: self.user(for:), now: .now)
-                        if updateRegion, !receivedFirstSnapshot, let contentRegion = UserMapViewModel.region(forCoordinates:
-                            content.pois.map { $0.poi.coordinate } + content.reels.map(\.center)) {
-                            region = contentRegion
-                        }
-                        // Media arriving later must not pull the camera away
-                        // after the person has already started exploring.
-                        receivedFirstSnapshot = true
-                    }
                     let content = try await backend.loadProfile(userID: user.id, onUpdate: apply)
                     apply(content)
                 } catch {
@@ -1316,9 +1418,11 @@ final class MapTalkViewModel: ObservableObject {
                     latitude: rated.poi.coordinate.latitude,
                     longitude: rated.poi.coordinate.longitude
                 )
+                let allowedRadius = radius ?? POISelectionPolicy.recommendationRadius(
+                    hasOwnCheckIns: rated.checkIns.contains { $0.userId == currentUserID })
+                guard POISelectionPolicy.distance(from: location.coordinate, to: rated.poi.coordinate)
+                    <= allowedRadius else { return nil }
                 let distance = candidate.distance(from: location)
-                let allowedRadius = radius ?? POISelectionPolicy.radius(for: rated.poi.directoryKind)
-                guard distance <= allowedRadius else { return nil }
 
                 // Social proof is derived only from publicly visible source
                 // data. Never infer it from the merged private MyMap copy.

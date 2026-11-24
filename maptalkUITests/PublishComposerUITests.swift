@@ -10,6 +10,99 @@ final class PublishComposerUITests: XCTestCase {
     }
 
     @MainActor
+    func testPostMapSelectsHistoryBeforeConfirmingAndSwitchesRegions() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--mock-data", "--post-location-picker-preview", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        defer { app.terminate() }
+
+        let marker = app.buttons["Sunday by the water"].firstMatch
+        XCTAssertTrue(marker.waitForExistence(timeout: 10))
+        marker.tap()
+        let clear = app.buttons["New pin"]
+        XCTAssertTrue(clear.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["8 posts here"].exists)
+        let selectedNotice = app.descendants(matching: .any)["location-picker-preview.selection"].firstMatch
+        XCTAssertFalse(selectedNotice.exists, "A pin tap must select, not confirm the location")
+        let use = app.buttons["maptalk.post.custom-location-use"]
+        XCTAssertTrue(use.isEnabled)
+        attachScreenshot(app, name: "Historical thumbnail selected, awaiting confirmation")
+        use.tap()
+        XCTAssertTrue(selectedNotice.waitForExistence(timeout: 3))
+        clear.tap()
+        XCTAssertFalse(use.isEnabled)
+        XCTAssertTrue(app.textFields["maptalk.post.custom-location-name"].exists)
+
+        app.buttons["maptalk.post.custom-location-regions"].tap()
+        let regions = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "maptalk.post.region."))
+        XCTAssertTrue(regions.firstMatch.waitForExistence(timeout: 3))
+        XCTAssertEqual(regions.count, 2, "The fixture has two broad areas, not one row per visit or Post")
+        attachScreenshot(app, name: "Regions instead of visited POI rows")
+        regions.element(boundBy: 0).tap()
+        XCTAssertTrue(app.textFields["maptalk.post.custom-location-name"].waitForExistence(timeout: 3))
+        XCTAssertFalse(use.isEnabled)
+    }
+
+    @MainActor
+    func testSavedPlaceOffersOptionalFeedbackAndSkipClosesIt() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        saveLocationOnlyVisit(named: "Feedback skip cafe", in: app)
+
+        let placeTag = app.descendants(matching: .any)["maptalk.poi-feedback.place"].firstMatch
+        XCTAssertTrue(placeTag.waitForExistence(timeout: 5))
+        XCTAssertEqual(placeTag.label, "Place: Feedback skip cafe")
+        XCTAssertFalse(app.staticTexts["How do you feel?"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["maptalk.poi-feedback.comment"].firstMatch.exists)
+        for choice in ["hype", "solid", "meh", "questionable"] {
+            let button = app.buttons["maptalk.poi-feedback.\(choice)"]
+            XCTAssertTrue(button.isHittable)
+            XCTAssertFalse(button.isSelected)
+        }
+        XCTAssertFalse(app.buttons["maptalk.poi-feedback.save"].isEnabled)
+        attachScreenshot(app, name: "Optional feeling after the check-in is already saved")
+        app.buttons["maptalk.poi-feedback.skip"].tap()
+        waitUntilGone(app.buttons["maptalk.poi-feedback.skip"])
+        waitUntilHittable(app.buttons["Add a place"])
+    }
+
+    @MainActor
+    func testSavedPlaceAcceptsACommentWithoutARequiredFeeling() throws {
+        let app = launchDemo()
+        defer { app.terminate() }
+        saveLocationOnlyVisit(named: "Feedback comment cafe", in: app)
+        let comment = app.descendants(matching: .any)["maptalk.poi-feedback.comment"].firstMatch
+        waitUntilHittable(comment)
+        comment.tap()
+        comment.typeText("A quiet corner after lunch.")
+        let save = app.buttons["maptalk.poi-feedback.save"]
+        waitUntilHittable(save)
+        XCTAssertTrue(save.isEnabled)
+        attachScreenshot(app, name: "Optional comment remains usable above the keyboard")
+        XCTAssertFalse(app.buttons["maptalk.poi-feedback.hype"].isSelected)
+        XCTAssertFalse(app.buttons["maptalk.poi-feedback.meh"].isSelected)
+        save.tap()
+        waitUntilGone(save)
+        waitUntilHittable(app.buttons["Add a place"])
+    }
+
+    @MainActor
+    private func saveLocationOnlyVisit(named name: String, in app: XCUIApplication) {
+        openPlace(in: app)
+        openNewPlace(in: app)
+        let field = app.textFields["maptalk.place.new-name"]
+        waitUntilHittable(field)
+        field.tap()
+        field.typeText(name)
+        app.buttons["Use this place"].tap()
+        waitUntilGone(app.keyboards.firstMatch)
+        let save = app.buttons["Add to MyMap"]
+        waitUntilHittable(save)
+        save.tap()
+        waitUntilHittable(app.buttons["maptalk.poi-feedback.skip"])
+    }
+
+    @MainActor
     func testPlaceEntryKeepsCaptureAndLibraryExplicit() throws {
         let app = launchDemo()
         defer { app.terminate() }
@@ -531,7 +624,7 @@ final class PublishComposerUITests: XCTestCase {
         }
         waitUntilHittable(create)
         create.tap()
-        XCTAssertTrue(app.staticTexts["New place"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["maptalk.place.new-name"].waitForExistence(timeout: 5))
     }
 
     @MainActor

@@ -196,6 +196,7 @@ struct MapExperienceCapsule: View {
     let onJourneyAvatarStackTap: ((JourneyPost) -> Void)?
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
+    let postPlaceGroups: [PostPlaceGroup]
 
     init(
         pager: ExperienceDetailView.SequencePager,
@@ -209,7 +210,8 @@ struct MapExperienceCapsule: View {
         userProvider: @escaping (UUID) -> User? = { _ in nil },
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         onPOIContributorViewed: @escaping ([String]) -> Void = { _ in },
-        isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true }
+        isPOIContributorUnseen: @escaping ([String]) -> Bool = { _ in true },
+        postPlaceGroups: [PostPlaceGroup] = []
     ) {
         self.pager = pager
         _selection = selection
@@ -223,6 +225,7 @@ struct MapExperienceCapsule: View {
         self.onJourneyAvatarStackTap = onJourneyAvatarStackTap
         self.onPOIContributorViewed = onPOIContributorViewed
         self.isPOIContributorUnseen = isPOIContributorUnseen
+        self.postPlaceGroups = postPlaceGroups
     }
 
     var body: some View {
@@ -240,6 +243,7 @@ struct MapExperienceCapsule: View {
             onPOIContributorViewed: onPOIContributorViewed,
             isPOIContributorUnseen: isPOIContributorUnseen
         )
+        .fixedPostPlaceChrome(groups: postPlaceGroups, selectedID: selection, isExpanded: isExpanded)
     }
 }
 

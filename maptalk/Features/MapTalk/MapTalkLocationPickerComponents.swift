@@ -35,13 +35,14 @@ struct PublishLocationSearchField: View {
     let isFocused: FocusState<Bool>.Binding
     let isLoading: Bool
     let identifier: String
+    var placeholder: String = "Search nearby places"
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 16))
                 .foregroundStyle(Color.black.opacity(0.42))
-            TextField("Search nearby places", text: $text)
+            TextField(placeholder, text: $text)
                 .font(.system(size: 15))
                 .foregroundStyle(.black)
                 .focused(isFocused)
@@ -50,10 +51,13 @@ struct PublishLocationSearchField: View {
                 .submitLabel(.search)
                 .onSubmit { isFocused.wrappedValue = false }
                 .accessibilityIdentifier(identifier)
-            if isLoading {
-                ProgressView().controlSize(.small).tint(.gray)
-                    .accessibilityLabel("Loading nearby places")
+            ZStack {
+                if isLoading {
+                    ProgressView().controlSize(.small).tint(.gray)
+                        .accessibilityLabel("Loading nearby places")
+                }
             }
+            .frame(width: 16, height: 16)
             if !text.isEmpty {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill")

@@ -424,7 +424,7 @@ private struct POIChromeHostingView: View {
     }
 }
 
-private struct ChromePixels {
+struct ChromePixels {
     let width: Int
     let height: Int
     let rgba: [UInt8]
@@ -478,7 +478,7 @@ private struct ChromePixels {
         return unmatched(first, second) + unmatched(second, first)
     }
 
-    func whiteMask(in rect: CGRect) -> [Bool] {
+    func whiteMask(in rect: CGRect, minimumBrightness: Int = 180) -> [Bool] {
         let left = max(0, Int(rect.minX)), right = min(width, Int(rect.maxX))
         let top = max(0, Int(rect.minY)), bottom = min(height, Int(rect.maxY))
         guard left < right, top < bottom else { return [] }
@@ -486,7 +486,7 @@ private struct ChromePixels {
             (left..<right).map { x in
                 let offset = (y * width + x) * 4
                 let red = Int(rgba[offset]), green = Int(rgba[offset + 1]), blue = Int(rgba[offset + 2])
-                return min(red, green, blue) > 180 && max(red, green, blue) - min(red, green, blue) < 45
+                return min(red, green, blue) > minimumBrightness && max(red, green, blue) - min(red, green, blue) < 45
             }
         }
     }

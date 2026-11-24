@@ -6,13 +6,17 @@ import UIKit
 struct FriendStoryCardHeader<Header: View>: ViewModifier {
     let isEnabled: Bool
     let isVisible: Bool
+    var backgroundMaterial: Material = .regular
+    var backgroundTint: Color = .clear
     @ViewBuilder let header: () -> Header
 
     func body(content: Content) -> some View {
         content.background {
             if isEnabled {
                 FriendStoryFloatingAccessory(isVisible: isVisible) {
-                    header().background(.regularMaterial,
+                    header().background(backgroundTint,
+                                        in: RoundedRectangle(cornerRadius: 22))
+                        .background(backgroundMaterial,
                                         in: RoundedRectangle(cornerRadius: 22))
                         .environment(\.colorScheme, .dark)
                 }
@@ -58,6 +62,7 @@ final class FriendStoryAccessoryController<Content: View>: UIViewController {
     private weak var sheet: UISheetPresentationController?
     private weak var coordinatedTransition: (any UIViewControllerTransitionCoordinator)?
     private var displayLink: CADisplayLink?
+    private var lastGeometry: FriendStoryAccessoryGeometry?
     private var isDismantled = false
     private var isFollowingTransition = false
     private var hasAppeared = false
@@ -128,6 +133,7 @@ final class FriendStoryAccessoryController<Content: View>: UIViewController {
                 sheet = presentation
                 if accessoryContainer.superview !== container {
                     container.addSubview(accessoryContainer)
+                    lastGeometry = nil
                 }
                 if displayLink == nil {
                     let link = CADisplayLink(target: WeakDisplayLinkTarget(self), selector: #selector(WeakDisplayLinkTarget.tick))
@@ -165,26 +171,30 @@ final class FriendStoryAccessoryController<Content: View>: UIViewController {
         guard card.bounds.width > 0, frame.width > 0 else { return }
         // Measure in the card's unscaled space, then apply the same zoom. A
         // fixed-height bar above a shrinking card looks like a detached overlay.
-        let scale = frame.width / card.bounds.width
-        let width = max(0, card.bounds.width - 20)
-        let height = FriendStoryLayout.headerHeight
-        UIView.performWithoutAnimation {
-            accessoryContainer.bounds = CGRect(x: 0, y: 0, width: width, height: height)
-            accessory.frame = accessoryContainer.bounds
-            accessoryContainer.center = CGPoint(x: frame.midX,
-                y: frame.minY - (FriendStoryLayout.headerGap + height / 2) * scale)
-            accessoryContainer.transform = CGAffineTransform(scaleX: scale, y: scale)
-            accessoryContainer.alpha = FriendStoryLayout.accessoryOpacity(
-                cardTop: frame.minY, containerBottom: container.bounds.maxY)
+        let geometry = FriendStoryAccessoryGeometry(cardFrame: frame, cardWidth: card.bounds.width,
+                                                    containerBottom: container.bounds.maxY)
+        if geometry != lastGeometry {
+            lastGeometry = geometry
+            UIView.performWithoutAnimation {
+                accessoryContainer.bounds = geometry.bounds
+                accessory.frame = geometry.bounds
+                accessoryContainer.center = geometry.center
+                accessoryContainer.transform = CGAffineTransform(scaleX: geometry.scale, y: geometry.scale)
+                accessoryContainer.alpha = geometry.opacity
+            }
         }
         updateVisibility(isOffscreen: frame.minY >= container.bounds.maxY)
     }
 
     private func updateVisibility(isOffscreen: Bool = false) {
         let visible = isAccessoryVisible || keepsVisibleForDismissal
-        accessoryContainer.isHidden = !visible || isOffscreen
-        accessoryContainer.isUserInteractionEnabled = isAccessoryVisible && !keepsVisibleForDismissal
-        displayLink?.isPaused = !visible
+        let hidden = !visible || isOffscreen
+        let interactive = isAccessoryVisible && !keepsVisibleForDismissal
+        if accessoryContainer.isHidden != hidden { accessoryContainer.isHidden = hidden }
+        if accessoryContainer.isUserInteractionEnabled != interactive {
+            accessoryContainer.isUserInteractionEnabled = interactive
+        }
+        if displayLink?.isPaused != !visible { displayLink?.isPaused = !visible }
     }
 
     private func coordinateVisibilityTransition() {
@@ -236,6 +246,25 @@ final class FriendStoryAccessoryController<Content: View>: UIViewController {
     }
 
     deinit { displayLink?.invalidate() }
+}
+
+/// The display link must keep observing native interactive drags, but an idle
+/// card should not reassign UIKit layout and compositing properties every frame.
+struct FriendStoryAccessoryGeometry: Equatable {
+    let bounds: CGRect
+    let center: CGPoint
+    let scale: CGFloat
+    let opacity: CGFloat
+
+    init(cardFrame: CGRect, cardWidth: CGFloat, containerBottom: CGFloat) {
+        scale = cardFrame.width / cardWidth
+        let height = FriendStoryLayout.headerHeight
+        bounds = CGRect(x: 0, y: 0, width: max(0, cardWidth - 20), height: height)
+        center = CGPoint(x: cardFrame.midX,
+                         y: cardFrame.minY - (FriendStoryLayout.headerGap + height / 2) * scale)
+        opacity = FriendStoryLayout.accessoryOpacity(cardTop: cardFrame.minY,
+                                                    containerBottom: containerBottom)
+    }
 }
 
 /// CADisplayLink retains its target; the target must not keep the presentation

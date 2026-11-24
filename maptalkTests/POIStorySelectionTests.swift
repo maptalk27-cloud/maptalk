@@ -10,6 +10,93 @@ struct POIStorySelectionTests {
     private let bob = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
     @Test
+    func downloadedVisitMediaPreservesPassedPlaceMetadataAndMembership() throws {
+        let pending = visit(201, author: alice, media: [], secondsAgo: 10)
+        let older = visit(202, author: bob, media: [photo(102)], secondsAgo: 30)
+        let original = rated([pending, older])
+        let video = RatedPOI.Media(id: uuid(103), kind: .video(url: url(103), poster: nil))
+        var downloaded = rated([
+            visit(201, author: alice, media: [video], secondsAgo: 999),
+            visit(203, author: bob, media: [photo(104)], secondsAgo: 1)
+        ])
+        downloaded.highlight = "Must not replace the place's text"
+        downloaded.comments = []
+        downloaded.favoritesCount = 999
+        downloaded.endorsements.hype = 999
+        downloaded.checkIns[0].comment = "Must not replace the visit's text"
+        let merged = ExperienceDetailView.mergingMedia(into: original, from: downloaded)
+
+        #expect(merged.checkIns.map(\.id) == original.checkIns.map(\.id))
+        #expect(merged.checkIns[0].media == [video])
+        #expect(merged.checkIns[0].createdAt == pending.createdAt)
+        #expect(merged.checkIns[0].comment == pending.comment)
+        #expect(merged.checkIns[0].endorsement == pending.endorsement)
+        #expect(merged.checkIns[1] == older)
+        #expect(Set(merged.media.map(\.id)) == Set([uuid(102), uuid(103)]))
+        #expect(merged.poi == original.poi)
+        #expect(merged.highlight == original.highlight)
+        #expect(merged.secondary == original.secondary)
+        #expect(merged.comments == original.comments)
+        #expect(merged.endorsements == original.endorsements)
+        #expect(merged.tags == original.tags)
+        #expect(merged.favoritesCount == original.favoritesCount)
+        #expect(merged.isFavoritedByCurrentUser == original.isFavoritedByCurrentUser)
+
+        let detail = ExperienceDetailView(mode: .poi(merged), isExpanded: false, poiBrowsingUserID: alice)
+        let selection = try #require(detail.browsingPOISelection(for: merged))
+        #expect(selection.checkIn.id == pending.id)
+        #expect(selection.media == video)
+    }
+
+    @Test
+    func downloadingDoesNotExpandAnIntentionallyFilteredGalleryOrAcceptOtherOwnersMedia() {
+        let included = photo(101)
+        let hiddenFromGallery = photo(102)
+        var original = rated([visit(201, author: alice, media: [included, hiddenFromGallery], secondsAgo: 10)])
+        original.media = [included]
+        let differentOwner = rated([visit(201, author: bob, media: [photo(103)], secondsAgo: 1)])
+        let unchanged = ExperienceDetailView.mergingMedia(into: original, from: differentOwner)
+        #expect(unchanged.checkIns == original.checkIns)
+        #expect(unchanged.media == [included])
+        #expect(ExperienceDetailView.mergingMedia(into: original, from: original).media == [included])
+    }
+
+    @Test
+    func downloadedPostMediaDoesNotChangePrivacyCaptionTimeOrEngagement() {
+        let date = Date(timeIntervalSinceReferenceDate: 1_000)
+        let post = RealPost(id: uuid(701), userId: alice,
+            center: .init(latitude: 47.6, longitude: -122.3), radiusMeters: 50,
+            message: "Original caption", attachments: [], capsuleId: uuid(702), likes: [bob],
+            comments: [.init(id: uuid(703), userId: bob, text: "Original comment", createdAt: date)],
+            visibility: .privateOnly, createdAt: date, expiresAt: date.addingTimeInterval(3_600),
+            publishedAt: nil, locationName: "Original location", locationID: uuid(704))
+        var hydrated = post
+        hydrated.attachments = [.init(id: uuid(705), kind: .video(url: url(705), poster: nil))]
+        hydrated.message = "Stale caption"
+        hydrated.likes = []
+        hydrated.comments = []
+        hydrated.visibility = .publicAll
+        hydrated.createdAt = .now
+        hydrated.locationName = "Different name"
+        hydrated.capsuleId = nil
+        let merged = ExperienceDetailView.mergingMedia(into: post, from: hydrated)
+
+        #expect(merged.attachments == hydrated.attachments)
+        #expect(merged.message == post.message)
+        #expect(merged.visibility == post.visibility)
+        #expect(merged.likes == post.likes)
+        #expect(merged.comments == post.comments)
+        #expect(merged.createdAt == post.createdAt)
+        #expect(merged.publishedAt == post.publishedAt)
+        #expect(merged.expiresAt == post.expiresAt)
+        #expect(merged.center.latitude == post.center.latitude)
+        #expect(merged.center.longitude == post.center.longitude)
+        #expect(merged.locationName == post.locationName)
+        #expect(merged.locationID == post.locationID)
+        #expect(merged.capsuleId == post.capsuleId)
+    }
+
+    @Test
     func selectedSliceUsesOriginalCardWithoutReplacingPlaceStatistics() throws {
         let first = photo(101)
         let selectedMedia = photo(102)

@@ -749,6 +749,31 @@ final class maptalkUITests: XCTestCase {
     }
 
     @MainActor
+    func testMyMapListRestoresAnOlderRowAfterMapPreview() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--mock-data"]
+        app.launch()
+        openMyMapList(app)
+
+        let olderRecord = app.buttons[
+            "mymap.list-record.00000000-0000-0000-0000-000000000116"
+        ]
+        for _ in 0..<6 {
+            if olderRecord.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(olderRecord.isHittable, "The older memory must be reachable by native list scrolling")
+        olderRecord.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["mymap.compact-capsule"].waitForExistence(timeout: 5))
+
+        let returnToList = app.buttons["Return to list"]
+        XCTAssertTrue(returnToList.waitForExistence(timeout: 3))
+        returnToList.tap()
+        let restored = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: olderRecord)
+        wait(for: [restored], timeout: 5)
+    }
+
+    @MainActor
     func testMyMapPortraitVideoCardKeepsSharedChromeAndExpandsFullWidth() throws {
         // This existing memory contains the bundled portrait MP4, three likes,
         // and an attached Journey. It exercises the actual shared card without

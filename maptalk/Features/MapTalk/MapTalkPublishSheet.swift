@@ -137,7 +137,7 @@ struct MapTalkPublishComposer: View {
     let nearbyPlaces: [MapTalkNearbyPlaceOption]
     let isLoadingNearbyPlaces: Bool
     let nearbyPlaceIssue: POISearchIssue?
-    let postLocationChoices: [MapTalkPostLocationChoice]
+    let postLocationLibrary: MapTalkPostLocationLibrary
     let liveLocationKey: String
     let liveLocation: CLLocation?
     let folders: [JourneyFolder]
@@ -152,7 +152,6 @@ struct MapTalkPublishComposer: View {
     let onPublish: (MapTalkPublishDraft, MapPublishAudience, UUID) async throws -> Void
     let onSearchNearbyPlaces: (String) async -> MapTalkNearbyPlaceSearchResult
     let onRetryNearbyPlaces: () -> Void
-    let onSearchPostLocations: (String) async -> MapTalkPostLocationSearchResult
 
     @State private var mediaPickerItem: PhotosPickerItem?
     @State private var selectedMedia: ComposerMediaAsset?
@@ -185,9 +184,7 @@ struct MapTalkPublishComposer: View {
     @State private var isShowingNearbyPlaceChoices = false
     @State private var isShowingNewPlaceEditor = false
     @State private var nearbyPlaceSearchText = ""
-    @State private var nearbyPlaceSearchResults: [MapTalkNearbyPlaceOption] = []
-    @State private var nearbyResultsQuery = ""
-    @State private var nearbyPlaceSearchIssue: POISearchIssue?
+    @State private var nearbyPlaceSearch = MapTalkNearbyPlaceSearchState()
     @State private var nearbySearchRetry = 0
     @State private var isSearchingPlaces = false
     /// Keep the person's choice independent from live search results. Nearby
@@ -210,11 +207,6 @@ struct MapTalkPublishComposer: View {
     @State private var isShowingPostLocations = false
     @State private var postLocationQuery = ""
     @State private var selectedPostLocation: MapTalkPostLocationSelection?
-    @State private var loadedPostLocations: [MapTalkPostLocationChoice] = []
-    @State private var loadedPostLocationRequest: PostLocationRequest?
-    @State private var postLocationIssue: POISearchIssue?
-    @State private var isLoadingPostLocations = false
-    @State private var postLocationRetry = 0
     @State private var isShowingAudienceChoices = false
     @State private var selectedBubbleSource: MapTalkReelBubbleSource?
     @State private var pendingBubbleSource: MapTalkReelBubbleSource?
@@ -253,14 +245,8 @@ struct MapTalkPublishComposer: View {
     }
 
     private var presentedNearbyPlaces: [MapTalkNearbyPlaceOption] {
-        guard !nearbyPlaceSearchQuery.isEmpty else { return MapTalkNearbyPlaceOption.ranked(nearbyPlaces) }
-        let local = nearbyPlaces.filter { $0.place.poi.name.localizedStandardContains(nearbyPlaceSearchQuery) }
-        let latest = Dictionary(nearbyPlaces.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
-        // Keep live history for known places; a directory response must not
-        // replace it with an older, history-free copy or append it at the end.
-        let searched = nearbyPlaceSearchResults.map { latest[$0.id] ?? $0 }
-        var seen = Set<UUID>()
-        return MapTalkNearbyPlaceOption.ranked((local + searched).filter { seen.insert($0.id).inserted })
+        nearbyPlaceSearch.presentedOptions(for: nearbyPlaceSearchQuery, nearbyPlaces: nearbyPlaces,
+                                           location: hasLiveLocation ? liveLocation : nil)
     }
 
     private var nearbyPlaceSearchQuery: String {
@@ -271,7 +257,7 @@ struct MapTalkPublishComposer: View {
         let query: String
         let isVisible: Bool
         let hasLiveLocation: Bool
-        let nearbyPlaceIDs: [UUID]
+        let locationKey: String
         let retry: Int
     }
 
@@ -279,7 +265,7 @@ struct MapTalkPublishComposer: View {
         .init(query: nearbyPlaceSearchQuery,
               isVisible: isShowingNearbyPlaceChoices && !isShowingNewPlaceEditor,
               hasLiveLocation: hasLiveLocation,
-              nearbyPlaceIDs: nearbyPlaces.map(\.id), retry: nearbySearchRetry)
+              locationKey: liveLocationKey, retry: nearbySearchRetry)
     }
 
     private var remainingReelAssetCapacity: Int {
@@ -314,47 +300,6 @@ struct MapTalkPublishComposer: View {
         return locationAccessIsDenied ? "Location off" : "Finding location…"
     }
 
-    private struct PostLocationRequest: Equatable {
-        let query: String
-        let locationKey: String
-        let retry: Int
-        let history: [PostLocationHistoryRevision]
-    }
-
-    private struct PostLocationHistoryRevision: Equatable {
-        let id: String
-        let postIDs: [UUID]
-        let checkInIDs: [UUID]
-        let publicVisitors: Int
-        let latest: Date?
-    }
-
-    private var postLocationRequest: PostLocationRequest {
-        .init(query: postLocationQuery.trimmingCharacters(in: .whitespacesAndNewlines),
-              locationKey: liveLocationKey, retry: postLocationRetry,
-              history: postLocationChoices.filter(\.hasHistory).map {
-                  .init(id: $0.id, postIDs: $0.previousPosts.map(\.id),
-                        checkInIDs: $0.placeOption?.ownCheckIns.map(\.id) ?? [],
-                        publicVisitors: $0.placeOption?.publicVisitorCount ?? 0,
-                        latest: $0.lastOwnActivityAt)
-              }.sorted { $0.id < $1.id })
-    }
-
-    private var visiblePostLocations: [MapTalkPostLocationChoice] {
-        let request = postLocationRequest
-        let query = request.query
-        let local = postLocationChoices.filter {
-            query.isEmpty || $0.selection.title.localizedStandardContains(query)
-                || $0.previousPosts.contains { $0.message?.localizedStandardContains(query) == true }
-        }
-        // The response already merges owned history and directory places.
-        // Appending the earlier snapshot would duplicate a history point that
-        // has since resolved to one exact POI coordinate.
-        if loadedPostLocationRequest == request {
-            return loadedPostLocations
-        }
-        return local
-    }
 
     var body: some View {
         Group {
@@ -373,10 +318,7 @@ struct MapTalkPublishComposer: View {
                     }
                     if isShowingPostLocations {
                         MapTalkPostLocationPicker(
-                            choices: visiblePostLocations,
-                            isLoading: isLoadingPostLocations,
-                            issue: postLocationIssue,
-                            hasLiveLocation: hasLiveLocation,
+                            library: postLocationLibrary,
                             liveLocation: liveLocation,
                             query: $postLocationQuery,
                             selection: selectedPostLocation,
@@ -386,8 +328,7 @@ struct MapTalkPublishComposer: View {
                                 isShowingPostLocations = false
                                 postLocationQuery = ""
                             },
-                            onBack: { isShowingPostLocations = false },
-                            onRetry: { postLocationRetry += 1 }
+                            onBack: { isShowingPostLocations = false }
                         )
                         .transition(.move(edge: .trailing))
                     }
@@ -400,7 +341,7 @@ struct MapTalkPublishComposer: View {
         .toolbarVisibility(.hidden, for: .tabBar)
         .accessibilityElement(children: .contain)
         .task {
-            if destination == .reel { await appEnvironment.backend?.prepareNamedPostLocations() }
+            await appEnvironment.backend?.prepareNamedPostLocations()
         }
         .accessibilityIdentifier("maptalk.publish-composer")
         .disabled(isSubmitting)
@@ -413,37 +354,13 @@ struct MapTalkPublishComposer: View {
             placeVideoPlayer?.pause()
             pendingVideoPlayer?.pause()
         }
-        .task(id: postLocationRequest) {
-            guard destination == .reel else { return }
-            let request = postLocationRequest
-            postLocationIssue = nil
-            guard hasLiveLocation else {
-                isLoadingPostLocations = false
-                loadedPostLocations = []
-                loadedPostLocationRequest = nil
-                return
-            }
-            isLoadingPostLocations = true
-            if !request.query.isEmpty {
-                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
-            }
-            let result = await onSearchPostLocations(request.query)
-            guard !Task.isCancelled, postLocationRequest == request else { return }
-            loadedPostLocations = result.options
-            loadedPostLocationRequest = request
-            postLocationIssue = result.issue
-            isLoadingPostLocations = false
-        }
         .onChange(of: nearbyPlaces.map(\.id)) { _, _ in
             synchronizeNearbySelection()
         }
         .task(id: nearbyPlaceSearchRequest) {
             let request = nearbyPlaceSearchRequest
-            if nearbyResultsQuery != request.query {
-                nearbyPlaceSearchResults = []
-                nearbyResultsQuery = request.query
-            }
-            nearbyPlaceSearchIssue = nil
+            nearbyPlaceSearch.prepare(for: request.query)
+            if !request.hasLiveLocation { nearbyPlaceSearch = .init() }
             guard request.isVisible, request.hasLiveLocation, !request.query.isEmpty else {
                 isSearchingPlaces = false
                 return
@@ -452,10 +369,7 @@ struct MapTalkPublishComposer: View {
             do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
             let results = await onSearchNearbyPlaces(request.query)
             guard !Task.isCancelled, nearbyPlaceSearchRequest == request else { return }
-            if results.issue == nil || !results.options.isEmpty {
-                nearbyPlaceSearchResults = results.options
-            }
-            nearbyPlaceSearchIssue = results.issue
+            nearbyPlaceSearch.receive(results, for: request.query)
             isSearchingPlaces = false
         }
         .onChange(of: hasLiveLocation) { _, isReady in
@@ -1125,7 +1039,7 @@ struct MapTalkPublishComposer: View {
                 isShowingPostLocations = true
             } label: {
                 reelSettingRow(title: "Location",
-                               value: selectedPostLocation?.title ?? locationStatusText,
+                               value: selectedPostLocation?.title ?? "Choose a place",
                                showsChevron: true)
             }
             .buttonStyle(ComposerPressStyle())
@@ -1591,13 +1505,13 @@ struct MapTalkPublishComposer: View {
     }
 
     private var nearbyPlaceChoices: some View {
-        VStack(spacing: 0) {
+        let options = presentedNearbyPlaces
+        return VStack(spacing: 0) {
             PublishLocationSectionHeader(title: nearbyPlaceSearchQuery.isEmpty ? "Nearby places" : "Search results")
 
             placePickerDivider
 
-            if (nearbyPlaceSearchQuery.isEmpty ? nearbyPlaceIssue : nearbyPlaceSearchIssue) != nil,
-               !isSearchingPlaces, !isLoadingNearbyPlaces {
+            if displayedPlaceIssue != nil {
                 HStack(spacing: 12) {
                     Text("Places couldn't refresh.")
                         .font(.system(size: 14))
@@ -1613,15 +1527,15 @@ struct MapTalkPublishComposer: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.black)
                     .accessibilityIdentifier("maptalk.place.search.retry")
+                    .disabled(isSearchingPlaces || isLoadingNearbyPlaces)
                 }
                 .frame(minHeight: 56)
             }
 
-            if presentedNearbyPlaces.isEmpty,
-               (nearbyPlaceSearchQuery.isEmpty ? nearbyPlaceIssue : nearbyPlaceSearchIssue) == nil {
+            if options.isEmpty, displayedPlaceIssue == nil {
                 VStack(spacing: 10) {
-                    if isLoadingNearbyPlaces, !isSearchingPlaces,
-                       nearbyPlaceSearchQuery.isEmpty || !hasLiveLocation {
+                    if isSearchingPlaces || (isLoadingNearbyPlaces
+                        && (nearbyPlaceSearchQuery.isEmpty || !hasLiveLocation)) {
                         ProgressView()
                             .controlSize(.small)
                             .tint(.black)
@@ -1632,7 +1546,7 @@ struct MapTalkPublishComposer: View {
                     }
 
                     Text(nearbyPlaceSearchQuery.isEmpty || !hasLiveLocation ? emptyNearbyPlacesMessage
-                        : (isSearchingPlaces ? "Searching nearby…" : "No matching place nearby"))
+                         : (isSearchingPlaces ? "Searching nearby…" : "No matching place nearby"))
                         .font(.system(size: 14, weight: .regular))
                         .foregroundStyle(Color.black.opacity(0.52))
                 }
@@ -1640,7 +1554,7 @@ struct MapTalkPublishComposer: View {
                 .frame(height: 180)
             } else {
                 LazyVStack(spacing: 0) {
-                    ForEach(Array(presentedNearbyPlaces.enumerated()), id: \.element.id) { index, option in
+                    ForEach(Array(options.enumerated()), id: \.element.id) { index, option in
                         if index > 0 {
                             placePickerDivider
                         }
@@ -1649,6 +1563,11 @@ struct MapTalkPublishComposer: View {
                 }
             }
         }
+    }
+
+    private var displayedPlaceIssue: POISearchIssue? {
+        guard !nearbyPlaceSearchQuery.isEmpty else { return nearbyPlaceIssue }
+        return nearbyPlaceSearch.query == nearbyPlaceSearchQuery ? nearbyPlaceSearch.issue : nil
     }
 
     private var createPlaceButton: some View {
@@ -1662,7 +1581,8 @@ struct MapTalkPublishComposer: View {
             selectNearbyPlace(option)
         } label: {
             PublishLocationChoiceLabel(title: option.place.poi.name,
-                subtitle: option.locationSubtitle, symbol: option.place.poi.category.symbolName,
+                subtitle: option.locationSubtitle,
+                symbol: option.place.poi.category.symbolName,
                 isSelected: isSelected, badge: option.historyBadge, detail: option.historyDetail)
         }
         .buttonStyle(.plain)
@@ -2427,7 +2347,7 @@ struct MapTalkPublishComposer: View {
         isTextFocused = false
         isPlaceSearchFocused = false
         nearbyPlaceSearchText = ""
-        nearbyPlaceSearchResults = []
+        nearbyPlaceSearch = .init()
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -2585,12 +2505,20 @@ struct MapTalkPublishComposer: View {
     private func submit(_ audience: MapPublishAudience) {
         guard canSubmit else { return }
 
-        guard hasLiveLocation else {
+        if destination == .place, !hasLiveLocation {
             withAnimation(.easeOut(duration: 0.15)) {
                 submissionIssue = locationAccessIsDenied
                     ? "Allow location access in Settings to publish here."
                     : "Finding your location. Try again in a moment."
             }
+            return
+        }
+
+        // A Post is intentionally placed, never silently anchored to today's
+        // GPS. Reusing an owned location remains available without a GPS fix.
+        if destination == .reel, selectedPostLocation == nil {
+            isTextFocused = false
+            isShowingPostLocations = true
             return
         }
 
@@ -2918,6 +2846,7 @@ struct MapTalkPublishComposer: View {
                     isChoosingVideoClip = true
                     return
                 }
+                guard mediaImportToken == token, !Task.isCancelled else { return }
                 let prepared = try await PublishVideoNormalizer.prepare(sourceURL: source, timeRange: timeRange)
                 let preview = try? await makeVideoPreview(for: prepared)
                 asset = .video(id: UUID(), url: prepared, preview: preview)

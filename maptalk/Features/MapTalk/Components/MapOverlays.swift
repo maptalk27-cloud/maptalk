@@ -17,24 +17,40 @@ struct MapOverlays: MapContent {
     let onTapPOI: ((RatedPOI) -> Void)?
     var showsSelectedReelRangeOnly = false
     var poiTransitionNamespace: Namespace.ID? = nil
+    var postPlaceGroups: [PostPlaceGroup]? = nil
+
+    private var displayedPosts: [RealPost] {
+        postPlaceGroups?.map(\.latestPost) ?? reals
+    }
+
+    private func postGroup(for post: RealPost) -> PostPlaceGroup? {
+        postPlaceGroups?.first { $0.posts.contains { $0.id == post.id } }
+    }
+
+    private func isPostSelected(_ post: RealPost) -> Bool {
+        post.id == selectedStoryId || postGroup(for: post)?.posts.contains { $0.id == selectedStoryId } == true
+    }
 
     var body: some MapContent {
-        ForEach(reals.filter { !showsSelectedReelRangeOnly || selectedStoryId == $0.id }) { real in
+        ForEach(displayedPosts.filter { !showsSelectedReelRangeOnly || isPostSelected($0) }) { real in
             MapCircle(center: real.center, radius: real.radiusMeters)
                 .foregroundStyle(Theme.neonPrimary.opacity(0.15))
                 .stroke(Theme.neonPrimary, lineWidth: 2)
         }
 
-        ForEach(reals) { real in
+        ForEach(displayedPosts) { real in
             Annotation("", coordinate: real.center) {
                 let user = userProvider(real.userId)
-                let isSelected = selectedStoryId == real.id
+                let isSelected = isPostSelected(real)
+                let group = postGroup(for: real)
                 // The public map identifies Reels by their author. Reducing
                 // range-circle clutter must not replace that identity with media.
                 let usesContentMarker = displayMode == .content || useTimelineStyle
                 let isUnseen = isRealUnseen(real)
                 let baseMarker: AnyView = {
-                    if usesContentMarker {
+                    if let group {
+                        return AnyView(PostPlaceMapMarker(post: real, count: group.count, isSelected: isSelected))
+                    } else if usesContentMarker {
                         return AnyView(
                             RealMapThumbnail(
                                 real: real,
@@ -68,8 +84,8 @@ struct MapOverlays: MapContent {
                 }()
                 .accessibilityElement(children: .ignore)
                 .accessibilityIdentifier("maptalk.marker.reel.\(real.id.uuidString)")
-                .accessibilityLabel("\(user?.handle ?? "Member") Reel")
-                .accessibilityValue("\(usesContentMarker ? "Content" : "Avatar")\(isSelected ? ", selected" : "")")
+                .accessibilityLabel("\(user?.handle ?? "Member") Post")
+                .accessibilityValue("\(group.map { "\($0.count) posts" } ?? (usesContentMarker ? "Content" : "Avatar"))\(isSelected ? ", selected" : "")")
                 .modifier(MapTalkPOITransitionSource(id: .reel(real.id),
                                                      namespace: poiTransitionNamespace))
 
@@ -77,7 +93,7 @@ struct MapOverlays: MapContent {
                     marker
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            onTapReal(real)
+                            onTapReal(group?.posts.first { $0.id == selectedStoryId } ?? real)
                         }
                 } else {
                     marker
@@ -238,7 +254,7 @@ private struct RealAvatarMarker: View {
                 backgroundFill
 
                 if let url = user?.avatarURL {
-                    MapImage(url: url) { phase in
+                    MapImage(url: url, thumbnailSize: CGSize(width: markerDiameter, height: markerDiameter)) { phase in
                         switch phase {
                         case let .success(image):
                             image
@@ -335,7 +351,7 @@ private struct JourneyMapMarker: View {
                     )
 
                 if let url = user?.avatarURL {
-                    MapImage(url: url) { phase in
+                    MapImage(url: url, thumbnailSize: CGSize(width: size, height: size)) { phase in
                         switch phase {
                         case let .success(image):
                             image.resizable().scaledToFill()

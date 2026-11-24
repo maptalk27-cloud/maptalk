@@ -21,6 +21,7 @@ final class BackendStore: ObservableObject {
     let archive: MyMapArchiveStore
     @Published private(set) var ownPublicPOIs: [RatedPOI] = []
     @Published private(set) var ownPublicReels: [RealPost] = []
+    let ownPublicSnapshots = CurrentValueSubject<Snapshot, Never>((pois: [], reels: []))
     @Published var issue: String?
     let feedPOIs = CurrentValueSubject<[RatedPOI], Never>([])
     let feedReels = CurrentValueSubject<[RealPost], Never>([])
@@ -40,16 +41,24 @@ final class BackendStore: ObservableObject {
     private var verifyingPostIDs: Set<UUID> = []
     /// Exact check-in/Reel IDs, never a shared landmark ID.
     let publicContentChanges = PassthroughSubject<Set<UUID>, Never>()
+    /// Media readiness is not a content/privacy change. Detail views can
+    /// refresh their existing scope without refetching metadata or moving it
+    /// into another feed. Bubble updates identify the authorized parent only.
+    let mediaContentChanges = PassthroughSubject<Set<UUID>, Never>()
     private(set) var publicContentRevision = 0
     private let placeHistoryScopeID = UUID()
     @Published private(set) var ownedMemories: [UUID: BackendMemory] = [:]
     @Published private(set) var pendingMemoryMutations: Set<UUID> = []
     @Published private(set) var pendingPublications: [UUID: PendingPublicationStatus] = [:]
     @Published private(set) var publicationProgress: [UUID: Double] = [:]
+    @Published private(set) var pendingPOIFeedbackIDs: Set<UUID> = []
     @Published private var commentThreads: [BackendCommentTarget: [BackendComment]] = [:]
     private var commentThreadRevisions: [BackendCommentTarget: Int] = [:]
     /// Includes cancellations still waiting for server acknowledgement.
-    var hasPendingSyncWork: Bool { !localState.queued.isEmpty }
+    var hasPendingSyncWork: Bool { !localState.queued.isEmpty || !(localState.poiFeedbackQueue ?? []).isEmpty }
+    /// Publication/cancellation safety still blocks logout. Independent optional
+    /// feedback may remain scoped on disk for the next sign-in instead.
+    var hasPendingPublicationSyncWork: Bool { !localState.queued.isEmpty }
     private var privateOverrides: [UUID: BackendMemory] = [:]
     private var deletedMemoryIDs: Set<UUID> = []
     private var mediaRevision = 0
@@ -88,6 +97,9 @@ final class BackendStore: ObservableObject {
     private var syncRetryTask: Task<Void, Never>?
     private var syncRetryCounts: [UUID: Int] = [:]
     private var syncRetryDates: [UUID: Date] = [:]
+    private var feedbackRetryCounts: [UUID: Int] = [:]
+    private var feedbackRetryDates: [UUID: Date] = [:]
+    private var confirmedPOIFeedbackRevisions: [UUID: Int] = [:]
     private var currentSyncID: UUID?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var backgroundExecutionExpired = false
@@ -137,7 +149,7 @@ final class BackendStore: ObservableObject {
             snapshot.cluster = nil
             return snapshot
         }
-        let projection = project(members)
+        let projection = project(members, applyPendingFeedback: false)
         var references: [JourneyFolder.MemberReference] = []
         for member in members {
             let reference: JourneyFolder.MemberReference?
@@ -148,7 +160,7 @@ final class BackendStore: ObservableObject {
         return JourneyPost(id: cluster.id, userId: parent.ownerId, title: cluster.title, content: "",
             coordinate: .init(latitude: parent.location.latitude, longitude: parent.location.longitude),
             createdAt: parent.activityDate, orderedMemberReferences: references,
-            reels: projection.reels, pois: projection.pois, likes: [], comments: [])
+            reels: projection.reels, pois: projection.pois, likes: [], comments: [], isPublishedSnapshot: true)
     }
 
     private func validatedCluster(in parent: BackendMemory) -> BackendCluster? {
@@ -215,6 +227,11 @@ final class BackendStore: ObservableObject {
                 }
                 // V1 snapshots never recursively include another cluster.
                 member.cluster = nil
+                // A Bubble freezes server-confirmed content. An optional local
+                // feeling must not become a dependency of publishing a Bubble.
+                if localState.poiFeedbackQueue?.contains(where: { $0.id == member.id }) == true {
+                    member.feedback = knownMemories[member.id]?.feedback
+                }
                 members.append(member)
             }
         }
@@ -332,6 +349,13 @@ final class BackendStore: ObservableObject {
 
     func canonicalPlaceID(for sourceID: UUID) -> UUID? { placeAliases[sourceID] }
 
+    /// Directory identities survive the server assigning a canonical POI ID.
+    /// This is a Post subject key only; it never turns a Post into a check-in.
+    func postLocationIdentity(for placeID: UUID) -> UUID {
+        placeAliases.filter { $0.value == placeID }.map(\.key)
+            .min { $0.uuidString < $1.uuidString } ?? placeID
+    }
+
     /// The server's stored classification defines the allowed publish radius
     /// for an existing place. Apple may have richer metadata now, but that does
     /// not silently upgrade a legacy canonical place or its publication rules.
@@ -413,18 +437,27 @@ final class BackendStore: ObservableObject {
         for id in knownMemories.keys where knownMemories[id]?.ownerId == profile.id {
             knownMemories[id]?.owner = profile
         }
-        for id in ownedMemories.keys where ownedMemories[id]?.ownerId == profile.id {
-            ownedMemories[id]?.owner = profile
+        var updatedOwned = ownedMemories
+        var changedOwned = false
+        for id in updatedOwned.keys where updatedOwned[id]?.ownerId == profile.id {
+            updatedOwned[id]?.owner = profile
+            changedOwned = true
         }
+        if changedOwned { ownedMemories = updatedOwned }
     }
 
     private func republishUserProjections() {
-        ownPublicPOIs = ownPublicPOIs.map { $0 }
-        ownPublicReels = ownPublicReels.map { $0 }
+        replaceOwnPublicProjection((ownPublicPOIs, ownPublicReels))
         feedPOIs.send(feedPOIs.value)
         feedReels.send(feedReels.value)
         publishFeedRecords()
         publishPostFeed()
+    }
+
+    private func replaceOwnPublicProjection(_ snapshot: Snapshot) {
+        ownPublicPOIs = snapshot.pois
+        ownPublicReels = snapshot.reels
+        ownPublicSnapshots.send(snapshot)
     }
 
     private func prepareProfileAvatar(_ profile: BackendUser) async throws {
@@ -526,7 +559,8 @@ final class BackendStore: ObservableObject {
         }
     }
 
-    private func preparePostMedia(_ records: [BackendMemory], generation: Int, revision: Int) {
+    private func preparePostMedia(_ records: [BackendMemory], generation: Int, revision: Int,
+                                  includeVideos: Bool = false) {
         guard !records.isEmpty else { return }
         let id = UUID()
         postMediaTasks[id] = Task { [weak self] in
@@ -534,11 +568,12 @@ final class BackendStore: ObservableObject {
             defer { postMediaTasks.removeValue(forKey: id) }
             guard isActive, generation == postsGeneration, revision == publicContentRevision else { return }
             do {
-                try await prepareMedia(records) { [weak self] in
+                try await prepareMedia(records, includeVideos: includeVideos,
+                                       onProgress: { [weak self] in
                     guard let self, isActive, !Task.isCancelled,
                           generation == postsGeneration, revision == publicContentRevision else { return }
                     publishPostFeed()
-                }
+                })
                 guard isActive, !Task.isCancelled,
                       generation == postsGeneration, revision == publicContentRevision else { return }
                 publishPostFeed()
@@ -561,7 +596,8 @@ final class BackendStore: ObservableObject {
         guard let cached = postFeedRecords.value.first(where: { $0.id == memoryID }),
               !verifyingPostIDs.contains(memoryID) else { return }
         if postVerificationDates[memoryID].map({ Date().timeIntervalSince($0) < 60 }) == true {
-            preparePostMedia([cached], generation: postsGeneration, revision: publicContentRevision)
+            preparePostMedia([cached], generation: postsGeneration, revision: publicContentRevision,
+                             includeVideos: true)
             return
         }
         verifyingPostIDs.insert(memoryID)
@@ -584,7 +620,7 @@ final class BackendStore: ObservableObject {
             publishPostFeed()
             try await persistLocalState()
             guard generation == postsGeneration, revision == publicContentRevision else { return }
-            preparePostMedia([record], generation: generation, revision: revision)
+            preparePostMedia([record], generation: generation, revision: revision, includeVideos: true)
         } catch let BackendClientError.http(status, _, _) where [403, 404, 410].contains(status) {
             guard isActive, generation == postsGeneration, revision == publicContentRevision else { return }
             await withdrawCachedPost(memoryID)
@@ -646,24 +682,37 @@ final class BackendStore: ObservableObject {
         try await persistLocalState()
         lastRefreshAt = .now
         issue = nil
+        if !(localState.poiFeedbackQueue ?? []).isEmpty {
+            await refreshPOIFeedbackCapability(retryRejected: true)
+            startPendingSync()
+        }
         // Metadata is already visible and durable. A missing image is not a
         // failed login or an empty archive; media fills in without blocking UI.
+        var unpublishedMediaIDs = Set(records.flatMap(\.attachedMedia).map(\.id)
+            + records.filter { $0.ownerId != user.id }.compactMap { $0.owner.avatar?.id })
+            .filter { localMedia[$0] == nil }
         do {
             try await prepareProfileAvatar(identity)
             try requireActive()
             guard generation == refreshGeneration else { return }
             if identityRevision == profileRevision, !isUpdatingProfile { applyProfile(localState.user) }
-            try await prepareMedia(records) { [weak self] in
+            try await prepareMedia(records, includeVideos: false, onMediaProgress: { [weak self] mediaIDs in
                 guard let self, isActive, !Task.isCancelled, generation == refreshGeneration else { return }
-                rebuildLocalProjections()
-            }
+                rebuildLocalProjections(hydratedMediaIDs: mediaIDs)
+                unpublishedMediaIDs.subtract(mediaIDs)
+            })
         } catch {
             if isActive, !(error is CancellationError) { issue = "Some photos or videos couldn't load. They will retry when you refresh." }
         }
         try requireActive()
         guard generation == refreshGeneration else { return }
         if identityRevision == profileRevision, !isUpdatingProfile { applyProfile(localState.user) }
-        rebuildLocalProjections()
+        // Each successful media batch already committed its affected scopes.
+        // Identity is independently published above, so no duplicate full
+        // archive/profile rebuild is needed at the end of hydration.
+        // A fatal download can interrupt a batch after a sibling succeeded;
+        // publish only those otherwise uncommitted assets on that error path.
+        rebuildLocalProjections(hydratedMediaIDs: unpublishedMediaIDs.filter { localMedia[$0] != nil })
     }
 
     func loadProfile(userID: UUID, onUpdate: ((Snapshot) -> Void)? = nil) async throws -> Snapshot {
@@ -695,14 +744,53 @@ final class BackendStore: ObservableObject {
         try requireActive()
         guard contentRevision == publicContentRevision else { throw CancellationError() }
         if userID != user.id || (identityRevision == profileRevision && !isUpdatingProfile) { applyProfile(identity) }
-        try await prepareMedia(visible) { [weak self] in
+        try await prepareMedia(visible, onProgress: { [weak self] in
             guard let self, isActive, !Task.isCancelled, contentRevision == publicContentRevision else { return }
             onUpdate?(project(currentRecords(visible, publicOnly: true)))
-        }
+        })
         try requireActive()
         guard contentRevision == publicContentRevision else { throw CancellationError() }
         if userID != user.id || (identityRevision == profileRevision && !isUpdatingProfile) { applyProfile(identity) }
         return project(currentRecords(records, publicOnly: true))
+    }
+
+    /// Read only the caller's already-authorized scope. In particular this
+    /// never fills a map or public profile with private archive records.
+    func cachedSnapshot(for memoryIDs: [UUID], publicOnly: Bool = false) -> Snapshot {
+        guard isActive else { return ([], []) }
+        let records = currentRecords(memoryIDs.compactMap { knownMemories[$0] }, publicOnly: publicOnly)
+            .filter { $0.ownerId == user.id || Self.isPubliclyVisible($0) }
+        return project(records)
+    }
+
+    /// Full videos belong to a visible card, not to opening the app. Call with
+    /// the current memory and, at most, its next neighbor. IDs are exact visits
+    /// or Posts, never a shared place ID. Bubble media remains attached to its
+    /// authorized parent and is never registered as independent records.
+    @discardableResult
+    func ensureMedia(for memoryIDs: [UUID]) async throws -> Snapshot {
+        try requireActive()
+        let revision = publicContentRevision
+        let records = currentRecords(memoryIDs.compactMap { knownMemories[$0] })
+            .filter { $0.ownerId == user.id || Self.isPubliclyVisible($0) }
+        guard !records.isEmpty else { return ([], []) }
+        // Explicitly opening a Post also prepares its published Bubble, just
+        // as before; this never happens from the passive startup refresh.
+        let mediaIDs = Set(records.flatMap(\.attachedMedia).map(\.id))
+        let missingIDs = mediaIDs.filter { localMedia[$0] == nil }
+        guard !missingIDs.isEmpty else { return project(records) }
+        let changedRecordIDs = Set(records.map(\.id))
+        try await prepareMedia(records, includeVideos: true,
+                               onMediaProgress: { [weak self] hydratedIDs in
+            guard let self, isActive, !Task.isCancelled, revision == publicContentRevision else { return }
+            let changed = hydratedIDs.intersection(missingIDs)
+            guard !changed.isEmpty else { return }
+            rebuildLocalProjections(hydratedMediaIDs: changed)
+            mediaContentChanges.send(changedRecordIDs)
+        })
+        try requireActive()
+        guard revision == publicContentRevision else { throw CancellationError() }
+        return project(records)
     }
 
     struct PlaceHistoryPage {
@@ -757,10 +845,10 @@ final class BackendStore: ObservableObject {
                 records: records, requestedCursors: requestedCursors)
         }
         onUpdate?(snapshot())
-        try await prepareMedia(newRecords) { [weak self] in
+        try await prepareMedia(newRecords, includeVideos: true, onProgress: { [weak self] in
             guard let self, isActive, !Task.isCancelled, revision == publicContentRevision else { return }
             onUpdate?(snapshot())
-        }
+        })
         try requireActive()
         guard revision == publicContentRevision else { throw CancellationError() }
         return snapshot()
@@ -791,7 +879,8 @@ final class BackendStore: ObservableObject {
         return true
     }
 
-    func loadMap(_ region: MKCoordinateRegion, onUpdate: ((Snapshot) -> Void)? = nil) async throws -> Snapshot {
+    func loadMap(_ region: MKCoordinateRegion, includeVideos: Bool = true,
+                 onUpdate: ((Snapshot) -> Void)? = nil) async throws -> Snapshot {
         try requireActive()
         let mapRevision = mapCacheRevision
         let previouslyKnownIDs = Set(knownMemories.keys)
@@ -853,10 +942,10 @@ final class BackendStore: ObservableObject {
         try requireActive()
         guard contentRevision == publicContentRevision else { throw CancellationError() }
         onUpdate?(project(currentMapRecords(visible)))
-        try await prepareMedia(visible) { [weak self] in
+        try await prepareMedia(visible, includeVideos: includeVideos, onProgress: { [weak self] in
             guard let self, isActive, !Task.isCancelled, contentRevision == publicContentRevision else { return }
             onUpdate?(project(currentMapRecords(visible)))
-        }
+        })
         try requireActive()
         guard contentRevision == publicContentRevision else { throw CancellationError() }
         return project(currentMapRecords(records))
@@ -865,25 +954,48 @@ final class BackendStore: ObservableObject {
     /// A POI row groups visits. The menu offers each of this person's visits
     /// separately so a place-level action can never withdraw someone else's post.
     func manageableMemories(for reference: JourneyFolder.MemberReference) -> [BackendMemory] {
-        ownedMemories.values.filter { record in
-            guard record.ownerId == user.id, !deletedMemoryIDs.contains(record.id) else { return false }
-            switch reference {
-            case let .reel(id): return record.kind == "reel" && record.id == id
-            case let .poi(id): return record.kind == "poi" && record.place?.id == id
+        manageableMemories(for: reference, records: ownedMemories, ownerID: user.id)
+    }
+
+    /// Menus need content/ownership changes, not the store's byte-level upload
+    /// progress. Use the emitted records: @Published sends before storage changes.
+    func manageableMemoriesPublisher(for reference: JourneyFolder.MemberReference) -> AnyPublisher<[BackendMemory], Never> {
+        $ownedMemories.combineLatest($user.map(\.id).removeDuplicates())
+            .map { [weak self] records, ownerID in
+                self?.manageableMemories(for: reference, records: records, ownerID: ownerID) ?? []
             }
-        }.sorted { $0.activityDate > $1.activityDate }
+            .eraseToAnyPublisher()
+    }
+
+    private func manageableMemories(for reference: JourneyFolder.MemberReference,
+                                    records: [UUID: BackendMemory], ownerID: UUID) -> [BackendMemory] {
+        let matches: [BackendMemory]
+        switch reference {
+        case let .reel(id):
+            matches = records[id].map { $0.kind == "reel" ? [$0] : [] } ?? []
+        case let .poi(id):
+            matches = records.values.filter { $0.kind == "poi" && $0.place?.id == id }
+        }
+        return matches.filter { $0.ownerId == ownerID && !deletedMemoryIDs.contains($0.id) }
+            .sorted { $0.activityDate > $1.activityDate }
     }
 
     func makePrivate(memoryID: UUID) async throws {
         let original = try beginMemoryMutation(memoryID)
+        let feedbackRevision = confirmedPOIFeedbackRevisions[memoryID, default: 0]
         defer { pendingMemoryMutations.remove(memoryID) }
-        let saved = try await api.makeMemoryPrivate(id: memoryID)
+        var saved = try await api.makeMemoryPrivate(id: memoryID)
         try requireActive()
         guard saved.id == memoryID, saved.ownerId == user.id, saved.visibility == "private" else {
             throw BackendClientError.message("The server didn't confirm this post is private. Please refresh and retry.")
         }
+        if confirmedPOIFeedbackRevisions[memoryID, default: 0] != feedbackRevision {
+            // A feedback PUT can finish while an older privacy PATCH response
+            // is still travelling. Preserve its newer confirmed field only.
+            saved.feedback = knownMemories[memoryID]?.feedback
+        }
         privateOverrides[memoryID] = saved
-        ownedMemories[memoryID] = saved
+        ownedMemories[memoryID] = applyingPendingPOIFeedback(to: saved)
         knownMemories[memoryID] = saved
         finishMemoryMutation(original, deleted: false)
         try? await persistLocalState()
@@ -914,6 +1026,7 @@ final class BackendStore: ObservableObject {
         guard saved.id == memoryID, saved.ownerId == user.id, saved.kind == "reel",
               saved.caption == text, saved.visibility == original.visibility,
               saved.createdAt == original.createdAt, saved.publishedAt == original.publishedAt,
+              saved.locationName == original.locationName, saved.locationId == original.locationId,
               saved.media.map(\.id) == original.media.map(\.id),
               saved.cluster?.id == original.cluster?.id,
               saved.cluster?.members.map(\.id) == original.cluster?.members.map(\.id) else {
@@ -966,6 +1079,7 @@ final class BackendStore: ObservableObject {
         try await api.deleteMemory(id: memoryID)
         try requireActive()
         deletedMemoryIDs.insert(memoryID)
+        removePendingPOIFeedback(memoryID)
         privateOverrides.removeValue(forKey: memoryID)
         ownedMemories.removeValue(forKey: memoryID)
         knownMemories.removeValue(forKey: memoryID)
@@ -1069,6 +1183,7 @@ final class BackendStore: ObservableObject {
         places.compactMap { place in
             var result = place
             result.checkIns.removeAll { ids.contains($0.id) }
+            result.refreshEndorsementSummary()
             return result.checkIns.isEmpty ? nil : result
         }
     }
@@ -1085,37 +1200,39 @@ final class BackendStore: ObservableObject {
             commentThreads.removeValue(forKey: .place(placeID))
         }
         let ids: Set<UUID> = [original.id]
-        ownPublicReels.removeAll { ids.contains($0.id) }
-        ownPublicPOIs = Self.removingMemories(ids, from: ownPublicPOIs)
+        replaceOwnPublicProjection((Self.removingMemories(ids, from: ownPublicPOIs),
+            ownPublicReels.filter { !ids.contains($0.id) }))
         feedReels.send(feedReels.value.filter { !ids.contains($0.id) })
         feedPOIs.send(Self.removingMemories(ids, from: feedPOIs.value))
         publishFeedRecords()
         publishPostFeed()
-        archive.replaceServerRecords(
-            pois: deleted ? Self.removingMemories(ids, from: archive.privatePOIs) : archive.privatePOIs,
-            reels: deleted ? archive.privateReels.filter { !ids.contains($0.id) } : archive.privateReels)
-        if deleted {
-            if original.kind == "reel" {
-                archive.removeFromPrivateArchive(.reel(original.id))
-            } else if let placeID = original.place?.id,
-                      !archive.privatePOIs.contains(where: { $0.id == placeID }) {
-                archive.removeFromPrivateArchive(.poi(placeID))
+        archive.withSnapshotUpdate {
+            archive.replaceServerRecords(
+                pois: deleted ? Self.removingMemories(ids, from: archive.privatePOIs) : archive.privatePOIs,
+                reels: deleted ? archive.privateReels.filter { !ids.contains($0.id) } : archive.privateReels)
+            if deleted {
+                if original.kind == "reel" {
+                    archive.removeFromPrivateArchive(.reel(original.id))
+                } else if let placeID = original.place?.id,
+                          !archive.privatePOIs.contains(where: { $0.id == placeID }) {
+                    archive.removeFromPrivateArchive(.poi(placeID))
+                }
+                // Shared uploaded photos may still belong to another post. Keep
+                // those; purge only assets no remaining known own post references.
+                let retained = Set(ownedMemories.values.flatMap { $0.attachedMedia.map(\.id) }
+                    + profileMetadata.values.compactMap { $0.avatar?.id })
+                let removed = Set(original.attachedMedia.map(\.id)).subtracting(retained)
+                mediaRevision += 1
+                for id in removed {
+                    mediaDownloads.removeValue(forKey: id)?.cancel()
+                    localMedia.removeValue(forKey: id)
+                    localPosters.removeValue(forKey: id)
+                }
+                uploadedMedia = uploadedMedia.filter { !removed.contains($0.value.id) }
+                mediaDisk.remove(removed)
             }
-            // Shared uploaded photos may still belong to another post. Keep
-            // those; purge only assets no remaining known own post references.
-            let retained = Set(ownedMemories.values.flatMap { $0.attachedMedia.map(\.id) }
-                + profileMetadata.values.compactMap { $0.avatar?.id })
-            let removed = Set(original.attachedMedia.map(\.id)).subtracting(retained)
-            mediaRevision += 1
-            for id in removed {
-                mediaDownloads.removeValue(forKey: id)?.cancel()
-                localMedia.removeValue(forKey: id)
-                localPosters.removeValue(forKey: id)
-            }
-            uploadedMedia = uploadedMedia.filter { !removed.contains($0.value.id) }
-            mediaDisk.remove(removed)
+            rebuildClusterCatalogs()
         }
-        rebuildClusterCatalogs()
         publicContentChanges.send(ids)
     }
 
@@ -1172,6 +1289,15 @@ final class BackendStore: ObservableObject {
             }
         case let .reel(reel):
             input.locationName = try await validatedPostLocationName(reel.location?.locationName)
+            if let pending = pendingInputs[requestID] {
+                // A capability learned between uncertain retries must not
+                // alter the already-sent request, including an absent ID.
+                input.locationId = pending.input.locationId == nil ? nil
+                    : reel.location?.locationID.map { postLocationIdentity(for: $0) }
+            } else {
+                input.locationId = await supportedPostLocationIdentity(reel.location?.locationID)
+            }
+            try requireActive()
             if let source = reel.bubbleSource {
                 let cluster = try makeClusterSelection(source, parentID: requestID).input
                 input.cluster = cluster
@@ -1266,11 +1392,12 @@ final class BackendStore: ObservableObject {
         // The save has succeeded even if the following refresh is offline.
         // Do not keep the composer open and invite an accidental second post.
         if let reel = projection.reels.first {
-            archive.saveReel(reel, audience: visibleAudience)
-            rebuildClusterCatalogs()
+            archive.withSnapshotUpdate {
+                archive.saveReel(reel, audience: visibleAudience)
+                rebuildClusterCatalogs()
+            }
             if visibleAudience == .livePublic {
-                ownPublicReels.removeAll { $0.id == reel.id }
-                ownPublicReels.insert(reel, at: 0)
+                replaceOwnPublicProjection((ownPublicPOIs, [reel] + ownPublicReels.filter { $0.id != reel.id }))
                 feedReels.send([reel] + feedReels.value.filter { $0.id != reel.id })
             }
             refreshAfterConfirmedPublish()
@@ -1287,8 +1414,7 @@ final class BackendStore: ObservableObject {
         let publicPlace = visibleAudience == .livePublic ? merging(ownPublicPOIs.first { $0.id == newPlace.id }) : nil
         archive.savePOI(privatePlace, publicVersion: publicPlace, audience: visibleAudience)
         if let publicPlace {
-            ownPublicPOIs.removeAll { $0.id == publicPlace.id }
-            ownPublicPOIs.insert(publicPlace, at: 0)
+            replaceOwnPublicProjection(([publicPlace] + ownPublicPOIs.filter { $0.id != publicPlace.id }, ownPublicReels))
             var activePlace = feedPOIs.value.first { $0.id == newPlace.id } ?? newPlace
             activePlace.checkIns.removeAll { $0.id == saved.id }
             activePlace.checkIns.append(contentsOf: newPlace.checkIns)
@@ -1334,16 +1460,34 @@ final class BackendStore: ObservableObject {
             intent.append("locationName=\(name)")
             intent.append("postLocation=\(input.location.latitude),\(input.location.longitude)")
         }
+        if let identity = input.locationId {
+            intent.append("locationId=\(identity.uuidString)")
+        }
         return intent.joined(separator: "\u{0}")
     }
 
     /// Warm this while composing, not after the publish tap. A confirmed
     /// capability is persisted per server so later offline saves remain local.
     func prepareNamedPostLocations() async {
-        guard isActive, localState.supportsPostLocationNames != true else { return }
-        guard let supported = try? await api.supportsPostLocationNames(), isActive else { return }
-        localState.supportsPostLocationNames = supported
+        guard isActive,
+              localState.supportsPostLocationNames != true || localState.supportsPostLocationIdentity != true
+                || (localState.poiCheckInRadiusMeters ?? 0) < POISelectionPolicy.searchRadius
+                || localState.supportsPOIFeedback == nil else { return }
+        guard let supported = try? await api.postLocationCapabilities(), isActive else { return }
+        localState.supportsPostLocationNames = supported.supportsPostLocationNames == true
+        localState.supportsPostLocationIdentity = supported.supportsPostLocationIdentity == true
+        localState.poiCheckInRadiusMeters = supported.poiCheckInRadiusMeters
+        localState.supportsPOIFeedback = supported.features?.poiFeedback == true
         try? await persistLocalState()
+    }
+
+    private func supportedPostLocationIdentity(_ identity: UUID?) async -> UUID? {
+        guard let identity else { return nil }
+        if localState.supportsPostLocationIdentity == nil { await prepareNamedPostLocations() }
+        // Older servers reject unknown JSON keys. Never retrofit persisted
+        // queues: their original bytes and idempotency hashes remain valid.
+        guard localState.supportsPostLocationIdentity == true else { return nil }
+        return postLocationIdentity(for: identity)
     }
 
     private func validatedPostLocationName(_ name: String?) async throws -> String? {
@@ -1363,6 +1507,165 @@ final class BackendStore: ObservableObject {
 
     // MARK: - Offline archive and durable publishing
 
+    /// Completes when the edit is safely on this phone. Publishing and feedback
+    /// use separate durable intents, so a slow upload can never lose its hash.
+    func savePOIFeedback(memoryID: UUID, endorsement: RatedPOI.Endorsement?, comment: String) async throws {
+        try requireActive()
+        guard let original = ownedMemories[memoryID], original.ownerId == user.id,
+              original.kind == "poi", !deletedMemoryIDs.contains(memoryID),
+              !localState.queued.contains(where: { $0.id == memoryID && $0.cancelled }) else {
+            throw BackendClientError.message("You can only add a feeling to your own place check-in.")
+        }
+        let clean = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.utf16.count <= 1_000, !clean.contains("\0") else {
+            throw BackendClientError.message("Keep your comment to 1,000 characters or fewer.")
+        }
+        let feedback = BackendPOIFeedback(endorsement: endorsement?.rawValue, comment: clean)
+        let previous = localState.poiFeedbackQueue?.first { $0.id == memoryID }
+        if previous == nil, feedback == original.feedback || (feedback.isEmpty && original.feedback == nil) { return }
+        let entry = QueuedPOIFeedback(id: memoryID, ownerID: user.id, revision: UUID(), feedback: feedback)
+        // A confirmed synchronous publish can be visible before its background
+        // archive refresh. Keep that parent alongside the durable edit too.
+        if !localState.queued.contains(where: { $0.id == memoryID }),
+           !localState.mine.contains(where: { $0.id == memoryID }) {
+            localState.mine.append(privateOverrides[memoryID] ?? knownMemories[memoryID] ?? original)
+        }
+        var queue = localState.poiFeedbackQueue ?? []
+        queue.removeAll { $0.id == memoryID }
+        queue.append(entry)
+        localState.poiFeedbackQueue = queue
+        do { try await persistLocalState() }
+        catch {
+            if localState.poiFeedbackQueue?.first(where: { $0.id == memoryID })?.revision == entry.revision {
+                localState.poiFeedbackQueue?.removeAll { $0.id == memoryID }
+                if let previous { localState.poiFeedbackQueue?.append(previous) }
+                rebuildLocalProjections()
+            }
+            throw error
+        }
+        try requireActive()
+        feedbackRetryDates.removeValue(forKey: memoryID)
+        feedbackRetryCounts.removeValue(forKey: memoryID)
+        rebuildLocalProjections()
+        startPendingSync()
+    }
+
+    private func applyingPendingPOIFeedback(to record: BackendMemory) -> BackendMemory {
+        guard record.ownerId == user.id, record.kind == "poi",
+              let pending = localState.poiFeedbackQueue?.first(where: {
+                  $0.id == record.id && $0.ownerID == user.id
+              }) else { return record }
+        var result = record
+        result.feedback = pending.feedback.isEmpty ? nil : pending.feedback
+        return result
+    }
+
+    private var eligiblePOIFeedback: [QueuedPOIFeedback] {
+        guard localState.supportsPOIFeedback != false else { return [] }
+        return (localState.poiFeedbackQueue ?? []).filter { entry in
+            entry.ownerID == user.id && entry.failure == nil && !deletedMemoryIDs.contains(entry.id)
+                && !pendingMemoryMutations.contains(entry.id)
+                && !localState.queued.contains(where: { $0.id == entry.id })
+        }
+    }
+
+    /// A confirmed old server keeps the edit local without repeatedly calling
+    /// an unsupported endpoint. A normal refresh checks again after an upgrade.
+    private func refreshPOIFeedbackCapability(retryRejected: Bool = false) async {
+        guard isActive, let supported = try? await api.postLocationCapabilities(), isActive else { return }
+        localState.supportsPOIFeedback = supported.features?.poiFeedback == true
+        if retryRejected, localState.supportsPOIFeedback == true, var queued = localState.poiFeedbackQueue {
+            for index in queued.indices {
+                queued[index].failure = nil
+                feedbackRetryDates.removeValue(forKey: queued[index].id)
+                feedbackRetryCounts.removeValue(forKey: queued[index].id)
+            }
+            localState.poiFeedbackQueue = queued
+        }
+        try? await persistLocalState()
+    }
+
+    private func removePendingPOIFeedback(_ id: UUID) {
+        localState.poiFeedbackQueue?.removeAll { $0.id == id }
+        pendingPOIFeedbackIDs.remove(id)
+        feedbackRetryCounts.removeValue(forKey: id)
+        feedbackRetryDates.removeValue(forKey: id)
+    }
+
+    private func deferPOIFeedbackRetry(_ id: UUID) {
+        let attempt = min(6, (feedbackRetryCounts[id] ?? 0) + 1)
+        feedbackRetryCounts[id] = attempt
+        feedbackRetryDates[id] = Date().addingTimeInterval(max(0.01, retryDelay(attempt)))
+    }
+
+    private func syncPendingPOIFeedback(respectingBackoff: Bool) async {
+        guard isActive, syncAuthorized, !Task.isCancelled else { return }
+        let ready = eligiblePOIFeedback.filter {
+            !respectingBackoff || (feedbackRetryDates[$0.id] ?? .distantPast) <= Date()
+        }
+        guard !ready.isEmpty else { return }
+        if localState.supportsPOIFeedback == nil { await refreshPOIFeedbackCapability() }
+        guard isActive, !Task.isCancelled else { return }
+        guard localState.supportsPOIFeedback == true else {
+            if localState.supportsPOIFeedback == nil { ready.forEach { deferPOIFeedbackRetry($0.id) } }
+            return
+        }
+        for candidate in ready {
+            guard let entry = eligiblePOIFeedback.first(where: { $0.id == candidate.id }) else { continue }
+            do {
+                let saved = try await api.updatePOIFeedback(id: entry.id, feedback: entry.feedback)
+                try requireActive()
+                guard !deletedMemoryIDs.contains(entry.id),
+                      let latest = localState.poiFeedbackQueue?.first(where: { $0.id == entry.id }) else { continue }
+                guard saved.id == entry.id, saved.ownerId == user.id, saved.kind == "poi",
+                      saved.feedback == (entry.feedback.isEmpty ? nil : entry.feedback) else {
+                    throw BackendClientError.message("The server didn't confirm your feeling. It is still saved on this phone.")
+                }
+                // Another local edit won while this request was in flight.
+                guard latest.revision == entry.revision else { continue }
+                invalidateRefresh()
+                // Merge only the feedback. A concurrent visibility change or
+                // deletion must never be undone by a late public response.
+                func merge(_ record: BackendMemory) -> BackendMemory {
+                    guard record.id == entry.id, record.ownerId == user.id else { return record }
+                    var changed = record
+                    changed.feedback = saved.feedback
+                    return changed
+                }
+                localState.mine = localState.mine.map(merge)
+                localState.profile = localState.profile.map(merge)
+                localState.feed = localState.feed.map(merge)
+                if let record = privateOverrides[entry.id] { privateOverrides[entry.id] = merge(record) }
+                if let record = knownMemories[entry.id] { knownMemories[entry.id] = merge(record) }
+                confirmedPOIFeedbackRevisions[entry.id, default: 0] += 1
+                localState.poiFeedbackQueue?.removeAll { $0.id == entry.id && $0.revision == entry.revision }
+                do { try await persistLocalState() }
+                catch {
+                    // Retrying a PUT after disk failure is safe and never
+                    // republishes the parent's media or publication time.
+                    if localState.poiFeedbackQueue?.contains(where: { $0.id == entry.id }) != true {
+                        localState.poiFeedbackQueue = (localState.poiFeedbackQueue ?? []) + [entry]
+                    }
+                    throw error
+                }
+                feedbackRetryCounts.removeValue(forKey: entry.id)
+                feedbackRetryDates.removeValue(forKey: entry.id)
+                rebuildLocalProjections()
+            } catch is CancellationError { return }
+            catch {
+                guard isActive, let index = localState.poiFeedbackQueue?.firstIndex(where: {
+                    $0.id == entry.id && $0.revision == entry.revision
+                }) else { continue }
+                if case let BackendClientError.http(status, _, _) = error,
+                   [400, 403, 404, 409, 410, 413, 415, 422].contains(status) {
+                    localState.poiFeedbackQueue?[index].failure = "Saved on this phone. Pull to refresh and try again."
+                } else { deferPOIFeedbackRetry(entry.id) }
+                try? await persistLocalState()
+                updatePendingStatuses()
+            }
+        }
+    }
+
     func cacheVerifiedIdentity(profile: BackendUser? = nil) async throws {
         try requireActive()
         if let profile, profile.id == user.id {
@@ -1377,7 +1680,8 @@ final class BackendStore: ObservableObject {
         do {
             guard let saved = try await stateDisk.load(), saved.ownerID == user.id,
                   saved.user.id == user.id, saved.server == api.baseURL.absoluteString,
-                  saved.queued.allSatisfy({ $0.record.ownerId == user.id && $0.record.id == $0.id }) else { return false }
+                  saved.queued.allSatisfy({ $0.record.ownerId == user.id && $0.record.id == $0.id }),
+                  (saved.poiFeedbackQueue ?? []).allSatisfy({ $0.ownerID == user.id }) else { return false }
             try requireActive()
             localState = saved
             deletedMemoryIDs = saved.deleted
@@ -1410,6 +1714,14 @@ final class BackendStore: ObservableObject {
             localState.queued[index].failure = nil
             syncRetryCounts.removeValue(forKey: key)
             syncRetryDates.removeValue(forKey: key)
+        }
+        if var feedback = localState.poiFeedbackQueue {
+            for index in feedback.indices where id == nil || feedback[index].id == id {
+                feedback[index].failure = nil
+                feedbackRetryCounts.removeValue(forKey: feedback[index].id)
+                feedbackRetryDates.removeValue(forKey: feedback[index].id)
+            }
+            localState.poiFeedbackQueue = feedback
         }
         updatePendingStatuses()
         Task { [weak self] in
@@ -1474,15 +1786,24 @@ final class BackendStore: ObservableObject {
     }
 
     private func remember(_ records: [BackendMemory]) {
+        var updatedOwned = ownedMemories
+        var changedOwned = false
+        var profiles: [UUID: BackendUser] = [:]
         for record in records {
             knownMemories[record.id] = record
-            if record.ownerId == user.id { ownedMemories[record.id] = record }
-            else { applyProfile(record.owner) }
+            if record.ownerId == user.id {
+                updatedOwned[record.id] = applyingPendingPOIFeedback(to: record)
+                changedOwned = true
+            } else { profiles[record.owner.id] = record.owner }
             if let place = record.place, record.moderationStatus != "local_pending" {
                 knownPlaceIDs.insert(place.id)
                 if let sourceID = place.sourceId { placeAliases[sourceID] = place.id }
             }
         }
+        // Row action subscribers need the completed metadata batch, not one
+        // full-dictionary notification for every record in a warm refresh.
+        if changedOwned { ownedMemories = updatedOwned }
+        for profile in profiles.values { applyProfile(profile) }
     }
 
     private func loadCachedMedia(_ records: [BackendMemory], identity: BackendUser) async {
@@ -1498,6 +1819,9 @@ final class BackendStore: ObservableObject {
     }
 
     private func updatePendingStatuses() {
+        pendingPOIFeedbackIDs = Set((localState.poiFeedbackQueue ?? []).filter {
+            $0.ownerID == user.id && !deletedMemoryIDs.contains($0.id)
+        }.map(\.id))
         var statuses: [UUID: PendingPublicationStatus] = [:]
         for entry in localState.queued where !entry.cancelled {
             if let failure = entry.failure { statuses[entry.id] = .failed(failure) }
@@ -1505,14 +1829,20 @@ final class BackendStore: ObservableObject {
             else if pendingPublications[entry.id] == .processing { statuses[entry.id] = .processing }
             else { statuses[entry.id] = .waiting }
         }
-        pendingPublications = statuses
+        if pendingPublications != statuses { pendingPublications = statuses }
         publicationProgress = publicationProgress.filter { statuses[$0.key] != nil }
     }
 
-    private func rebuildLocalProjections() {
+    private func setPendingPublicationStatus(_ status: PendingPublicationStatus, for id: UUID) {
+        guard pendingPublications[id] != status else { return }
+        pendingPublications[id] = status
+    }
+
+    private func rebuildLocalProjections(hydratedMediaIDs: Set<UUID>? = nil) {
         guard isActive else { return }
+        if let hydratedMediaIDs, hydratedMediaIDs.isEmpty { return }
         let queued = localState.queued.filter { !$0.cancelled && !deletedMemoryIDs.contains($0.id) }
-        for entry in queued {
+        for entry in hydratedMediaIDs == nil ? queued : [] {
             for photo in entry.photos {
                 localMedia[photo.id] = stateDisk.mediaURL(photo)
                 let poster = stateDisk.posterURL(photo.id)
@@ -1529,19 +1859,47 @@ final class BackendStore: ObservableObject {
         }
         let queuedIDs = Set(queued.map(\.id))
         let mine = currentRecords(localState.mine).filter { !queuedIDs.contains($0.id) } + queued.map(\.record)
-        remember(mine + localState.profile + localState.feed + publicPostRecords(localState.posts ?? []))
-        let privateProjection = project(mine.sorted { $0.activityDate > $1.activityDate })
-        let publicProjection = project(currentRecords(localState.profile, publicOnly: true))
-        let activeProjection = project(currentRecords(localState.feed, publicOnly: true))
-        archive.replaceServerRecords(pois: privateProjection.pois, reels: privateProjection.reels)
-        rebuildClusterCatalogs()
-        ownPublicPOIs = publicProjection.pois
-        ownPublicReels = publicProjection.reels
-        feedPOIs.send(activeProjection.pois)
-        feedReels.send(activeProjection.reels)
-        publishFeedRecords()
-        publishPostFeed()
-        updatePendingStatuses()
+        func isAffected(_ records: [BackendMemory]) -> Bool {
+            guard let hydratedMediaIDs else { return true }
+            return records.contains { record in
+                record.attachedMedia.contains { hydratedMediaIDs.contains($0.id) }
+                    || record.owner.avatar.map { hydratedMediaIDs.contains($0.id) } == true
+            }
+        }
+        if hydratedMediaIDs == nil {
+            remember(mine + localState.profile + localState.feed + publicPostRecords(localState.posts ?? []))
+        } else {
+            // Avatar lookups read the user registry rather than card fields.
+            var profiles: [UUID: BackendUser] = [:]
+            for record in localState.feed where record.ownerId != user.id && isAffected([record]) {
+                profiles[record.owner.id] = record.owner
+            }
+            for profile in profiles.values { applyProfile(profile) }
+        }
+        let privateChanged = isAffected(mine)
+        let clustersChanged = hydratedMediaIDs == nil || knownMemories.values.contains {
+            $0.cluster != nil && isAffected([$0])
+        }
+        archive.withSnapshotUpdate {
+            if privateChanged {
+                let projection = project(mine)
+                archive.replaceServerRecords(pois: projection.pois, reels: projection.reels)
+            }
+            if clustersChanged { rebuildClusterCatalogs() }
+        }
+        if isAffected(localState.profile) {
+            replaceOwnPublicProjection(project(currentRecords(localState.profile, publicOnly: true)))
+        }
+        if isAffected(localState.feed) {
+            let projection = project(currentRecords(localState.feed, publicOnly: true))
+            feedPOIs.send(projection.pois)
+            feedReels.send(projection.reels)
+        }
+        if isAffected(localState.posts ?? []) { publishPostFeed() }
+        if hydratedMediaIDs == nil {
+            publishFeedRecords()
+            updatePendingStatuses()
+        }
     }
 
     private func publishFeedRecords() {
@@ -1554,7 +1912,7 @@ final class BackendStore: ObservableObject {
             .filter { !queuedIDs.contains($0.id) }
             .sorted { $0.activityDate == $1.activityDate ? $0.id.uuidString < $1.id.uuidString : $0.activityDate > $1.activityDate }
             .map { record in
-                var current = record
+                var current = applyingPendingPOIFeedback(to: record)
                 if let identity = profileMetadata[record.ownerId] { current.owner = identity }
                 return current
             }
@@ -1607,6 +1965,8 @@ final class BackendStore: ObservableObject {
         switch draft {
         case let .reel(reel):
             input.locationName = try await validatedPostLocationName(reel.location?.locationName)
+            input.locationId = await supportedPostLocationIdentity(reel.location?.locationID)
+            try requireActive()
             if let source = reel.bubbleSource {
                 let selection = try makeClusterSelection(source, parentID: requestID)
                 input.cluster = selection.input
@@ -1628,17 +1988,32 @@ final class BackendStore: ObservableObject {
                 input.place = .init(name: name, category: category.rawValue, sourceId: requestID)
                 place = BackendPlace(id: requestID, sourceId: requestID, name: name, category: category.rawValue, coordinate: input.location)
             case let .existing(rated):
-                let canonical = placeAliases[rated.poi.id] ?? rated.poi.id
+                let selected = canonicalPlaceForSelection(rated.poi)
+                guard POISelectionPolicy.canPublish(at: selected.coordinate, kind: selected.directoryKind,
+                    from: location) else {
+                    throw BackendClientError.message("Choose a place within 500 m of your current location.")
+                }
+                let distance = POISelectionPolicy.distance(from: location.coordinate, to: selected.coordinate)
+                if distance > POISelectionPolicy.nearbyRadius {
+                    // Capability is warmed while composing. Never make an
+                    // offline publish tap wait for a network probe, or enqueue
+                    // a new payload that the old server will refuse later.
+                    guard let supportedRadius = localState.poiCheckInRadiusMeters,
+                          supportedRadius.isFinite, supportedRadius >= POISelectionPolicy.searchRadius else {
+                        throw BackendClientError.message("This server still supports check-ins within 150 m. Choose a closer place, or try again after the server update.")
+                    }
+                }
+                let canonical = selected.id
                 if knownPlaceIDs.contains(canonical) { input.placeId = canonical }
                 else {
-                    input.place = .init(name: rated.poi.name, category: rated.poi.category.rawValue,
-                        coordinate: .init(latitude: rated.poi.coordinate.latitude, longitude: rated.poi.coordinate.longitude),
-                        sourceId: rated.poi.id, directoryKind: rated.poi.directoryKind?.rawValue)
+                    input.place = .init(name: selected.name, category: selected.category.rawValue,
+                        coordinate: .init(latitude: selected.coordinate.latitude, longitude: selected.coordinate.longitude),
+                        sourceId: rated.poi.id, directoryKind: selected.directoryKind?.rawValue)
                 }
-                place = BackendPlace(id: canonical, sourceId: rated.poi.id, name: rated.poi.name,
-                    category: rated.poi.category.rawValue,
-                    coordinate: .init(latitude: rated.poi.coordinate.latitude, longitude: rated.poi.coordinate.longitude),
-                    directoryKind: rated.poi.directoryKind?.rawValue)
+                place = BackendPlace(id: canonical, sourceId: rated.poi.id, name: selected.name,
+                    category: selected.category.rawValue,
+                    coordinate: .init(latitude: selected.coordinate.latitude, longitude: selected.coordinate.longitude),
+                    directoryKind: selected.directoryKind?.rawValue)
             }
             if let media = value.media {
                 switch media.kind {
@@ -1652,7 +2027,7 @@ final class BackendStore: ObservableObject {
             visibility: "private", location: input.location, caption: input.caption ?? "", place: place,
             media: photos.map { BackendMedia(id: $0.id, mimeType: $0.contentType, byteCount: 0, path: "/v1/media/\($0.id.uuidString.lowercased())") },
             createdAt: publicationDate, publishedAt: nil, expiresAt: .distantFuture, moderationStatus: "local_pending",
-            cluster: cluster, locationName: input.locationName)
+            cluster: cluster, locationName: input.locationName, locationId: input.locationId)
         var entry = QueuedPublication(input: input, record: record, photos: photos)
         try await stateDisk.copyMedia(sources, items: photos, posters: posters)
         do {
@@ -1699,10 +2074,12 @@ final class BackendStore: ObservableObject {
             syncRetryTask?.cancel()
             syncRetryTask = nil
             syncRetryDates.removeAll()
+            feedbackRetryDates.removeAll()
         }
         guard automaticallySync, syncAuthorized, isActive, connectionAvailable != false,
               !backgroundExecutionExpired, syncTask == nil,
-              localState.queued.contains(where: { $0.cancelled || $0.failure == nil }) else { return }
+              localState.queued.contains(where: { $0.cancelled || $0.failure == nil })
+                || !eligiblePOIFeedback.isEmpty else { return }
         syncRetryTask?.cancel()
         syncRetryTask = nil
         syncTask = Task { [weak self] in
@@ -1718,7 +2095,7 @@ final class BackendStore: ObservableObject {
     private func schedulePendingRetry() {
         guard automaticallySync, isActive, syncAuthorized, connectionAvailable != false,
               !backgroundExecutionExpired else { return }
-        let dates = localState.queued.filter { entry in
+        var dates = localState.queued.filter { entry in
             if entry.cancelled { return true }
             guard entry.failure == nil else { return false }
             // A blocked source owns its retry/error UI. Do not wake forever
@@ -1727,6 +2104,7 @@ final class BackendStore: ObservableObject {
             return !localState.queued.contains { cluster.memoryIds.contains($0.id) }
         }
             .map { syncRetryDates[$0.id] ?? Date() }
+        dates += eligiblePOIFeedback.map { feedbackRetryDates[$0.id] ?? Date() }
         guard let next = dates.min() else { return }
         let delay = max(0.01, next.timeIntervalSinceNow)
         syncRetryTask?.cancel()
@@ -1773,7 +2151,7 @@ final class BackendStore: ObservableObject {
                localState.queued.contains(where: { cluster.memoryIds.contains($0.id) }) {
                 // Sources can fail/back off independently. Never send the
                 // parent early (404), nor permanently fail it just for waiting.
-                pendingPublications[id] = .waiting
+                setPendingPublicationStatus(.waiting, for: id)
                 syncRetryDates[id] = Date().addingTimeInterval(max(1, retryDelay(1)))
                 continue
             }
@@ -1784,14 +2162,14 @@ final class BackendStore: ObservableObject {
                 try Task.checkCancellation()
                 try requireActive()
                 if entry.cancelled { try await finishCancelledPublication(id); continue }
-                pendingPublications[id] = .uploading
+                setPendingPublicationStatus(.uploading, for: id)
                 for photo in entry.photos where photo.uploaded == nil {
                     let url = stateDisk.mediaURL(photo)
                     try requireActive()
                     guard let current = localState.queued.first(where: { $0.id == id }), !current.cancelled else { break }
                     let finishedCount = current.photos.filter { $0.uploaded != nil }.count
                     let attachmentCount = max(1, current.photos.count)
-                    pendingPublications[id] = .uploading
+                    setPendingPublicationStatus(.uploading, for: id)
                     let confirmedProgress = Double(finishedCount) / Double(attachmentCount)
                     // Keep the last acknowledged fraction while PUT reconciles
                     // an interrupted video. Its response is authoritative and
@@ -1811,11 +2189,11 @@ final class BackendStore: ObservableObject {
                             }, onProgress: { [weak self] fraction in
                                 guard let self, canUpdatePublicationProgress(id) else { return }
                                 publicationProgress[id] = (Double(finishedCount) + fraction) / Double(attachmentCount)
-                                pendingPublications[id] = .uploading
+                                setPendingPublicationStatus(.uploading, for: id)
                             }, onProcessing: { [weak self] in
                                 guard let self, canUpdatePublicationProgress(id) else { return }
                                 failurePhase = .videoProcessing
-                                pendingPublications[id] = .processing
+                                setPendingPublicationStatus(.processing, for: id)
                             })
                         reconcilingVideoUpload = false
                     } else {
@@ -1831,14 +2209,14 @@ final class BackendStore: ObservableObject {
                     try await persistLocalState()
                     if canUpdatePublicationProgress(id) {
                         publicationProgress[id] = Double(finishedCount + 1) / Double(attachmentCount)
-                        pendingPublications[id] = .uploading
+                        setPendingPublicationStatus(.uploading, for: id)
                     }
                 }
                 guard let index = localState.queued.firstIndex(where: { $0.id == id }) else { continue }
                 if localState.queued[index].cancelled { try await finishCancelledPublication(id); continue }
                 // Video processing is complete. Photo uploads and the final
                 // post confirmation use the ordinary uploading state again.
-                pendingPublications[id] = .uploading
+                setPendingPublicationStatus(.uploading, for: id)
                 localState.queued[index].input.mediaIds = localState.queued[index].photos.compactMap { $0.uploaded?.id }
                 localState.queued[index].attemptedPost = true
                 failurePhase = .localCommit
@@ -1915,7 +2293,9 @@ final class BackendStore: ObservableObject {
                 remember([saved])
                 rebuildLocalProjections()
             } catch is CancellationError {
-                if localState.queued.contains(where: { $0.id == id && !$0.cancelled }) { pendingPublications[id] = .waiting }
+                if localState.queued.contains(where: { $0.id == id && !$0.cancelled }) {
+                    setPendingPublicationStatus(.waiting, for: id)
+                }
                 return
             }
             catch {
@@ -1940,7 +2320,7 @@ final class BackendStore: ObservableObject {
                         syncRetryCounts[id] = attempt
                         syncRetryDates[id] = Date().addingTimeInterval(max(0.01, retryDelay(attempt)))
                     }
-                    pendingPublications[id] = permanent ? .failed(message) : .waiting
+                    setPendingPublicationStatus(permanent ? .failed(message) : .waiting, for: id)
                     try? await persistLocalState()
                     updatePendingStatuses()
                     // A single interrupted video must not strand independent
@@ -1948,6 +2328,7 @@ final class BackendStore: ObservableObject {
                 }
             }
         }
+        await syncPendingPOIFeedback(respectingBackoff: respectingBackoff)
     }
 
     private func canUpdatePublicationProgress(_ id: UUID) -> Bool {
@@ -1967,7 +2348,7 @@ final class BackendStore: ObservableObject {
                 kind: member.kind, visibility: member.visibility, location: member.location, caption: member.caption,
                 place: saved.place, media: saved.media, createdAt: member.createdAt, publishedAt: saved.publishedAt,
                 expiresAt: saved.expiresAt, moderationStatus: saved.moderationStatus,
-                locationName: member.locationName)
+                locationName: member.locationName, locationId: member.locationId, feedback: member.feedback)
             localState.queued[index].record.cluster = cluster
             if let previews = localState.queued[index].clusterPreviews {
                 localState.queued[index].clusterPreviews = previews.map { preview in
@@ -2022,12 +2403,16 @@ final class BackendStore: ObservableObject {
     private func cancelQueuedPublication(id: UUID) async throws {
         guard let index = localState.queued.firstIndex(where: { $0.id == id }) else { return }
         let original = localState.queued[index]
+        let originalFeedback = localState.poiFeedbackQueue
         localState.queued[index].cancelled = true
         deletedMemoryIDs.insert(id)
+        removePendingPOIFeedback(id)
         do { try await persistLocalState() }
         catch {
             if let index = localState.queued.firstIndex(where: { $0.id == id }) { localState.queued[index] = original }
             deletedMemoryIDs.remove(id)
+            localState.poiFeedbackQueue = originalFeedback
+            updatePendingStatuses()
             throw error
         }
         ownedMemories.removeValue(forKey: id)
@@ -2067,7 +2452,7 @@ final class BackendStore: ObservableObject {
         rebuildLocalProjections()
     }
 
-    func clearLocalMedia(preservePendingPublications: Bool = false) {
+    func clearLocalMedia(preservePendingPublications: Bool = false, preservePendingPOIFeedback: Bool = false) {
         // The account owns a store for one signed-in lifetime. Awaited work from
         // that lifetime must never repopulate its cache after sign-out.
         isActive = false
@@ -2081,17 +2466,29 @@ final class BackendStore: ObservableObject {
         syncRetryTask = nil
         syncRetryDates.removeAll()
         syncRetryCounts.removeAll()
+        feedbackRetryDates.removeAll()
+        feedbackRetryCounts.removeAll()
+        confirmedPOIFeedbackRevisions.removeAll()
         endSyncBackgroundGrace()
         pathMonitor?.cancel()
         pathMonitor = nil
         activationSubscription = nil
         pendingPublications.removeAll()
         publicationProgress.removeAll()
-        let preserved = preservePendingPublications ? BackendLocalState(ownerID: user.id,
-            server: api.baseURL.absoluteString, user: localState.user, queued: localState.queued,
+        let feedbackIDs = Set((localState.poiFeedbackQueue ?? []).map(\.id))
+        let keepFeedback = preservePendingPublications || preservePendingPOIFeedback
+        let preserved = keepFeedback ? BackendLocalState(ownerID: user.id,
+            server: api.baseURL.absoluteString, user: localState.user,
+            queued: preservePendingPublications ? localState.queued : [],
             deleted: localState.deleted) : nil
-        stateDisk.invalidate(preserving: preserved)
+        var durable = preserved
+        durable?.mine = currentRecords(localState.mine.filter { feedbackIDs.contains($0.id) })
+        durable?.poiFeedbackQueue = localState.poiFeedbackQueue
+        durable?.supportsPOIFeedback = localState.supportsPOIFeedback
+        stateDisk.invalidate(preserving: durable)
         localState.queued.removeAll()
+        localState.poiFeedbackQueue = nil
+        pendingPOIFeedbackIDs.removeAll()
         refreshTask?.task.cancel()
         refreshTask = nil
         for download in mediaDownloads.values { download.cancel() }
@@ -2117,10 +2514,11 @@ final class BackendStore: ObservableObject {
         selectionDirectoryCategories.removeAll()
         user.avatarURL = nil
         users = [user.id: user]
-        archive.replaceServerRecords(pois: [], reels: [])
-        archive.replaceServerBubbles(privateBubbles: [], publicBubbles: [])
-        ownPublicPOIs = []
-        ownPublicReels = []
+        archive.withSnapshotUpdate {
+            archive.replaceServerRecords(pois: [], reels: [])
+            archive.replaceServerBubbles(privateBubbles: [], publicBubbles: [])
+        }
+        replaceOwnPublicProjection(([], []))
         feedPOIs.send([])
         feedReels.send([])
         feedRecords.send([])
@@ -2137,24 +2535,37 @@ final class BackendStore: ObservableObject {
         guard isActive else { throw CancellationError() }
     }
 
-    private func prepareMedia(_ records: [BackendMemory], onProgress: (() -> Void)? = nil) async throws {
+    private func prepareMedia(_ records: [BackendMemory], includeVideos: Bool = true,
+                              onMediaProgress: ((Set<UUID>) -> Void)? = nil,
+                              onProgress: (() -> Void)? = nil) async throws {
         try requireActive()
         let contentRevision = publicContentRevision
         var mediaByID: [UUID: BackendMedia] = [:]
+        var preparedOwned = ownedMemories
+        var changedOwned = false
         for var record in records {
             if record.ownerId == user.id, let current = profileMetadata[user.id] { record.owner = current }
             knownMemories[record.id] = record
-            if record.ownerId == user.id { ownedMemories[record.id] = record }
+            if record.ownerId == user.id {
+                preparedOwned[record.id] = record
+                changedOwned = true
+            }
             else { profileMetadata[record.owner.id] = record.owner }
             if let place = record.place {
                 knownPlaceIDs.insert(place.id)
                 if let sourceID = place.sourceId { placeAliases[sourceID] = place.id }
             }
-            for media in record.attachedMedia where localMedia[media.id] == nil { mediaByID[media.id] = media }
+            for media in record.attachedMedia where localMedia[media.id] == nil {
+                guard includeVideos || media.mimeType != "video/mp4" else { continue }
+                mediaByID[media.id] = media
+            }
             if record.ownerId != user.id, let avatar = record.owner.avatar, localMedia[avatar.id] == nil {
                 mediaByID[avatar.id] = avatar
             }
         }
+        if changedOwned { ownedMemories = preparedOwned }
+        // Passive startup/viewport reads fetch covers, not every historical
+        // MP4. Explicit card/profile/history requests may include full videos.
         // A small fixed concurrency limit avoids both serial photo waits and
         // hundreds of simultaneous downloads for a large map viewport.
         // Complete lightweight covers first, instead of an arbitrary dictionary
@@ -2166,8 +2577,9 @@ final class BackendStore: ObservableObject {
             for start in stride(from: 0, to: media.count, by: 4) {
                 try requireActive()
                 guard contentRevision == publicContentRevision else { throw CancellationError() }
+                let batch = media[start..<min(start + 4, media.count)]
                 try await withThrowingTaskGroup(of: (any Error)?.self) { group in
-                    for item in media[start..<min(start + 4, media.count)] {
+                    for item in batch {
                         group.addTask {
                             do {
                                 try await self.prepareMedium(item, contentRevision: contentRevision)
@@ -2189,17 +2601,25 @@ final class BackendStore: ObservableObject {
                 try requireActive()
                 guard contentRevision == publicContentRevision else { throw CancellationError() }
                 onProgress?()
+                onMediaProgress?(Set(batch.compactMap { localMedia[$0.id] == nil ? nil : $0.id }))
             }
         }
         try requireActive()
         guard contentRevision == publicContentRevision else { throw CancellationError() }
+        var updatedOwned = ownedMemories
+        var changedOwner = false
+        var profiles: [UUID: BackendUser] = [:]
         for var record in records {
             // A map/list read started before a profile PATCH can finish later.
             // Only /me or the confirmed PATCH may change our own identity.
             if record.ownerId == user.id, let current = profileMetadata[user.id] { record.owner = current }
-            if record.ownerId == user.id { ownedMemories[record.id]?.owner = record.owner }
-            else { applyProfile(record.owner) }
+            if record.ownerId == user.id, updatedOwned[record.id] != nil {
+                updatedOwned[record.id]?.owner = record.owner
+                changedOwner = true
+            } else if record.ownerId != user.id { profiles[record.owner.id] = record.owner }
         }
+        if changedOwner { ownedMemories = updatedOwned }
+        for profile in profiles.values { applyProfile(profile) }
         // Successful assets have already reached the visible projection. Keep
         // the failure recoverable so the next refresh retries only missing media.
         if let firstDownloadFailure { throw firstDownloadFailure }
@@ -2251,11 +2671,12 @@ final class BackendStore: ObservableObject {
         }
     }
 
-    private func project(_ records: [BackendMemory]) -> (pois: [RatedPOI], reels: [RealPost]) {
+    private func project(_ records: [BackendMemory], applyPendingFeedback: Bool = true) -> (pois: [RatedPOI], reels: [RealPost]) {
         var places: [UUID: RatedPOI] = [:]
         var reels: [RealPost] = []
-        for record in records.sorted(by: { $0.activityDate == $1.activityDate
+        for source in records.sorted(by: { $0.activityDate == $1.activityDate
             ? $0.id.uuidString < $1.id.uuidString : $0.activityDate > $1.activityDate }) {
+            let record = applyPendingFeedback ? applyingPendingPOIFeedback(to: source) : source
             let attachments = record.media.compactMap { media -> RealPost.Attachment? in
                 guard let url = localMedia[media.id] else { return nil }
                 return .init(id: media.id, kind: media.mimeType == "video/mp4"
@@ -2268,7 +2689,7 @@ final class BackendStore: ObservableObject {
                     attachments: attachments, capsuleId: validatedCluster(in: record)?.id, likes: [], comments: [],
                     visibility: record.visibility == "public" ? .publicAll : .privateOnly,
                     createdAt: record.createdAt, expiresAt: Self.publicExpiry(for: record), publishedAt: record.publishedAt,
-                    locationName: record.locationName))
+                    locationName: record.locationName, locationID: record.locationId))
             } else if let place = record.place {
                 var rated = places[place.id] ?? RatedPOI(
                     poi: .init(id: place.id, name: place.name,
@@ -2284,11 +2705,18 @@ final class BackendStore: ObservableObject {
                         ? .video(url: url, poster: localPosters[item.id]) : .photo(url))
                 }
                 rated.checkIns.append(.init(id: record.id, userId: record.ownerId, createdAt: record.createdAt,
-                    endorsement: nil, media: media, tag: nil, publishedAt: record.publishedAt))
+                    endorsement: record.feedback?.endorsement.flatMap(RatedPOI.Endorsement.init(rawValue:)),
+                    media: media, tag: nil, publishedAt: record.publishedAt,
+                    comment: record.feedback?.comment.isEmpty == false ? record.feedback?.comment : nil))
                 places[place.id] = rated
             }
         }
-        return (Array(places.values).sorted { $0.poi.name < $1.poi.name }, reels)
+        let projectedPlaces = places.values.map { place in
+            var result = place
+            result.refreshEndorsementSummary()
+            return result
+        }
+        return (projectedPlaces.sorted { $0.poi.name < $1.poi.name }, reels)
     }
 }
 
@@ -2303,7 +2731,7 @@ final class BackendPOIRepository: POIRepository, ActivePOIRepository {
                 Task { @MainActor in
                     do {
                         let region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 30_000, longitudinalMeters: 30_000)
-                        promise(.success(try await store.loadMap(region).pois))
+                        promise(.success(try await store.loadMap(region, includeVideos: false).pois))
                     } catch { if store.isActive { store.issue = error.localizedDescription }; promise(.success([])) }
                 }
             }
@@ -2320,7 +2748,7 @@ final class BackendRealRepository: RealRepository {
         return Deferred { [store] in
             Future { promise in
                 Task { @MainActor in
-                    do { promise(.success(try await store.loadMap(MKCoordinateRegion(rect)).reels)) }
+                    do { promise(.success(try await store.loadMap(MKCoordinateRegion(rect), includeVideos: false).reels)) }
                     catch { if store.isActive { store.issue = error.localizedDescription }; promise(.success([])) }
                 }
             }

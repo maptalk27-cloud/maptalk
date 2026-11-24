@@ -157,6 +157,7 @@ final class UserMapViewModel: ObservableObject {
         }
         if resolvedContext.isCurrentUser, let backend = environment.backend {
             backend.$pendingPublications
+                .removeDuplicates()
                 .sink { [weak self] in self?.pendingPublications = $0 }
                 .store(in: &archiveCancellables)
             backend.$user
@@ -236,6 +237,17 @@ final class UserMapViewModel: ObservableObject {
         emptyMapLocationCancellable = nil
     }
 
+    /// Empty MyMap needs one startup fix, not continuous GPS while browsing
+    /// an archive. Wait until the page is visible before asking permission.
+    func requestInitialEmptyMapLocationIfNeeded() {
+        guard usesCurrentLocationForEmptyMap, isWaitingForInitialEmptyMapLocation,
+              footprints.isEmpty, reels.isEmpty else { return }
+        centerEmptyMapOnInitialLocationIfAvailable()
+        if isWaitingForInitialEmptyMapLocation {
+            environment.location.requestWhenInUse()
+        }
+    }
+
     private func centerEmptyMapOnInitialLocationIfAvailable() {
         guard isWaitingForInitialEmptyMapLocation else { return }
         if let location = MapStartupLocation.usable(environment.location.location.value) {
@@ -256,9 +268,9 @@ final class UserMapViewModel: ObservableObject {
     }
 
     private func bindPublishedProfile(_ backend: BackendStore) {
-        Publishers.CombineLatest(backend.$ownPublicPOIs, backend.$ownPublicReels)
-            .sink { [weak self] pois, reels in
-                self?.applyPublishedProfile(pois: pois, reels: reels)
+        backend.ownPublicSnapshots
+            .sink { [weak self] snapshot in
+                self?.applyPublishedProfile(pois: snapshot.pois, reels: snapshot.reels)
             }
             .store(in: &archiveCancellables)
     }
@@ -300,18 +312,13 @@ final class UserMapViewModel: ObservableObject {
             .compactMap { $0 }
             .sink { [weak self] in self?.issue = $0 }
             .store(in: &archiveCancellables)
-        Publishers.CombineLatest4(
-            archive.$privatePOIs,
-            archive.$privateReels,
-            archive.$privateBubbleCatalog,
-            archive.$journeyFolders
-        )
-        .sink { [weak self] pois, reels, bubbles, folders in
+        archive.privateSnapshots
+        .sink { [weak self] snapshot in
             self?.applyPrivateArchive(
-                pois: pois,
-                reels: reels,
-                bubbles: bubbles,
-                folders: folders
+                pois: snapshot.pois,
+                reels: snapshot.reels,
+                bubbles: snapshot.bubbles,
+                folders: snapshot.folders
             )
         }
         .store(in: &archiveCancellables)

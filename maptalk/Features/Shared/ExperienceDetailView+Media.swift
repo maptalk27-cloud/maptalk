@@ -2,6 +2,17 @@ import AVKit
 import SwiftUI
 import UIKit
 
+private struct POIMediaLightboxEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var poiMediaLightboxEnabled: Bool {
+        get { self[POIMediaLightboxEnabledKey.self] }
+        set { self[POIMediaLightboxEnabledKey.self] = newValue }
+    }
+}
+
 // MARK: - Media
 
 extension ExperienceDetailView {
@@ -20,6 +31,7 @@ struct POIFeaturedMedia: View {
     @State private var childPresentationID = UUID()
     @State private var isVisible = true
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
+    @Environment(\.poiMediaLightboxEnabled) private var lightboxEnabled
 
     private var item: MediaDisplayItem {
         switch media.kind {
@@ -31,22 +43,18 @@ struct POIFeaturedMedia: View {
     }
 
     var body: some View {
-        Button {
-            isLightboxPresented = true
-        } label: {
-            mediaViewport
-            .mask {
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .white, location: 0.02),
-                    .init(color: .white, location: 0.98),
-                    .init(color: .clear, location: 1)
-                ], startPoint: .top, endPoint: .bottom)
+        Group {
+            if lightboxEnabled {
+                Button { isLightboxPresented = true } label: {
+                    mediaSurface
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open check-in media")
+            } else {
+                mediaSurface
+                    .accessibilityLabel("Check-in media")
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Open check-in media")
         .accessibilityIdentifier("experience.poi.featured-media.\(media.id.uuidString)")
         .onScrollVisibilityChange(threshold: 0.15) { isVisible = $0 }
         .onChangeCompat(of: isLightboxPresented) { presented in
@@ -63,6 +71,19 @@ struct POIFeaturedMedia: View {
                 .environment(\.friendStoryOnMediaReady, nil)
                 .environment(\.friendStoryChildPresentationChanged, nil)
         }
+    }
+
+    private var mediaSurface: some View {
+        mediaViewport
+            .mask {
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .white, location: 0.02),
+                    .init(color: .white, location: 0.98),
+                    .init(color: .clear, location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+            }
+            .contentShape(Rectangle())
     }
 
     @ViewBuilder

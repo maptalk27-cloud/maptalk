@@ -120,6 +120,7 @@ struct ProfileSequencePager<Page: View>: View {
                                     : maximum * ProfileCardPagingLayout.fraction(for: item.mode)
                                         + motion.bottomSafeArea + verticalAllowance)
                             .frame(height: stageHeight, alignment: .bottom)
+                            .postPlaceChromePage(postID: item.id)
                             .background(background(item))
                             .clipped()
                             .id(item.id)

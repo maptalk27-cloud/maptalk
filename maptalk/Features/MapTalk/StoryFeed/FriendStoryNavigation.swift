@@ -617,12 +617,35 @@ struct FriendStoryFlow: View {
                         onPOIContributorViewed: { $0.forEach(onRead) },
                         isPOIContributorUnseen: { keys in keys.contains { !viewedKeys.contains($0) } }
                     )
+                    .environment(\.experienceLiveMediaHydrationEnabled, false)
                 } else {
                     MapJourneyEmptyCapsule()
                 }
             }
         }
         .environment(\.friendStoryPlaybackEnabled, allowsPlayback && scenePhase == .active && navigation.routes.last?.id == route.id)
+        .task(id: allowsPlayback && scenePhase == .active && navigation.routes.last?.id == route.id ? route.id : nil) {
+            guard allowsPlayback, scenePhase == .active, navigation.routes.last?.id == route.id,
+                  case let .bubble(scope) = route.content, scope.journey.isPublishedSnapshot,
+                  let backend = environment.backend else { return }
+            let parentID = scope.journey.id
+            do {
+                // Opening the Bubble can cancel its parent Post's task. Its
+                // visible root owns the same parent-authorized download now;
+                // never resolve frozen members through their live record IDs.
+                try await backend.ensureMedia(for: [parentID])
+                guard !Task.isCancelled, navigation.routes.last?.id == route.id,
+                      let refreshed = backend.journey(for: parentID, publicOnly: true),
+                      let index = navigation.routes.firstIndex(where: { $0.id == route.id }),
+                      case let .bubble(current) = navigation.routes[index].content,
+                      current.journey.id == parentID else { return }
+                // Replace bytes in the existing route, not its identity,
+                // selected member, camera or return position. Both the Home
+                // progress view and the fallback capsule observe this scope.
+                navigation.routes[index].content = .bubble(MapJourneyScope(journey: refreshed,
+                                                                           userProvider: userProvider))
+            } catch { }
+        }
         .task(id: placeHistoryRetry[route.id, default: 0]) {
             guard case let .place(place) = route.content,
                   let backend = environment.backend,

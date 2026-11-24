@@ -19,6 +19,20 @@ enum MapPublishAudience: Hashable {
 /// baseline is seeded once per app environment rather than once per view.
 @MainActor
 final class MyMapArchiveStore: ObservableObject {
+    struct Snapshot {
+        let pois: [RatedPOI]
+        let reels: [RealPost]
+        let bubbles: [JourneyPost]
+        let folders: [JourneyFolder]
+    }
+
+    /// Consumers that derive a complete timeline observe one committed value,
+    /// never the intermediate POI/Reel/Bubble assignments of a server refresh.
+    let privateSnapshots = CurrentValueSubject<Snapshot, Never>(
+        Snapshot(pois: [], reels: [], bubbles: [], folders: []))
+    private var snapshotUpdateDepth = 0
+    private var hasPendingSnapshot = false
+
     /// New public content that MapTalk can overlay on top of its read-only
     /// repository stream.
     @Published private(set) var publicPOIOverlays: [RatedPOI]
@@ -29,10 +43,10 @@ final class MyMapArchiveStore: ObservableObject {
 
     /// Everything the current person can revisit in MyMap, including items
     /// also present in the public overlays above.
-    @Published private(set) var privatePOIs: [RatedPOI]
-    @Published private(set) var privateReels: [RealPost]
-    @Published private(set) var privateBubbleCatalog: [JourneyPost]
-    @Published private(set) var journeyFolders: [JourneyFolder]
+    @Published private(set) var privatePOIs: [RatedPOI] { didSet { publishPrivateSnapshot() } }
+    @Published private(set) var privateReels: [RealPost] { didSet { publishPrivateSnapshot() } }
+    @Published private(set) var privateBubbleCatalog: [JourneyPost] { didSet { publishPrivateSnapshot() } }
+    @Published private(set) var journeyFolders: [JourneyFolder] { didSet { publishPrivateSnapshot() } }
 
     /// Existing published Journey capsules are legacy presentation data. They
     /// stay immutable here, while `JourneyFolder` remains the editable local
@@ -76,13 +90,37 @@ final class MyMapArchiveStore: ObservableObject {
             privateReels = baseline.reels
             journeyFolders = baseline.journeyFolders.filter { $0.userId == ownerID }
         }
+        publishPrivateSnapshot()
+    }
+
+    /// Synchronous transactions preserve immediate local updates and the
+    /// initial CurrentValueSubject snapshot without scheduling UI work later.
+    func withSnapshotUpdate(_ update: () -> Void) {
+        snapshotUpdateDepth += 1
+        defer {
+            snapshotUpdateDepth -= 1
+            if snapshotUpdateDepth == 0, hasPendingSnapshot { publishPrivateSnapshot() }
+        }
+        update()
+    }
+
+    private func publishPrivateSnapshot() {
+        guard snapshotUpdateDepth == 0 else {
+            hasPendingSnapshot = true
+            return
+        }
+        hasPendingSnapshot = false
+        privateSnapshots.send(Snapshot(pois: privatePOIs, reels: privateReels,
+            bubbles: privateBubbleCatalog, folders: journeyFolders))
     }
 
     func replaceServerRecords(pois: [RatedPOI], reels: [RealPost]) {
-        privatePOIs = pois
-        privateReels = reels
-        publicPOIOverlays = []
-        publicReelOverlays = []
+        withSnapshotUpdate {
+            privatePOIs = pois
+            privateReels = reels
+            publicPOIOverlays = []
+            publicReelOverlays = []
+        }
     }
 
     /// Replace server projections as media fills in or a parent is withdrawn.
@@ -164,6 +202,37 @@ final class MyMapArchiveStore: ObservableObject {
         }
 
         return privateVersion
+    }
+
+    /// Demo feedback updates only its authored visit. Never promote a private
+    /// visit into the public projection or rewrite a published Bubble snapshot.
+    @discardableResult
+    func updatePOIFeedback(checkInID: UUID, endorsement: RatedPOI.Endorsement?, comment: String) -> Bool {
+        let text = comment.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.utf16.count <= 1_000,
+              let placeIndex = privatePOIs.firstIndex(where: { place in
+                  place.checkIns.contains { $0.id == checkInID && $0.userId == currentUserID }
+              }),
+              let visitIndex = privatePOIs[placeIndex].checkIns.firstIndex(where: { $0.id == checkInID }) else {
+            return false
+        }
+        var personalPlace = privatePOIs[placeIndex]
+        personalPlace.checkIns[visitIndex].endorsement = endorsement
+        personalPlace.checkIns[visitIndex].comment = text.isEmpty ? nil : text
+        personalPlace.refreshEndorsementSummary()
+        privatePOIs[placeIndex] = personalPlace
+
+        if let publicIndex = publicPOIOverlays.firstIndex(where: { $0.id == personalPlace.id }),
+           let publicVisitIndex = publicPOIOverlays[publicIndex].checkIns.firstIndex(where: {
+               $0.id == checkInID && $0.userId == currentUserID
+           }) {
+            var publicPlace = publicPOIOverlays[publicIndex]
+            publicPlace.checkIns[publicVisitIndex].endorsement = endorsement
+            publicPlace.checkIns[publicVisitIndex].comment = text.isEmpty ? nil : text
+            publicPlace.refreshEndorsementSummary()
+            publicPOIOverlays[publicIndex] = publicPlace
+        }
+        return true
     }
 
     /// Saves a Reel to MyMap and, for a live post, makes it available as a
@@ -282,22 +351,24 @@ final class MyMapArchiveStore: ObservableObject {
     /// Removes only the MyMap copy. A live-post overlay remains live on the
     /// public map, matching MyMap's existing "remove from MyMap" meaning.
     func removeFromPrivateArchive(_ reference: JourneyFolder.MemberReference) {
-        switch reference {
-        case let .reel(id):
-            privateReels.removeAll { $0.id == id }
-        case let .poi(id):
-            privatePOIs.removeAll { $0.id == id }
-        }
-
-        journeyFolders = journeyFolders.map { folder in
-            var updated = folder
-            updated.memberReferences.removeAll { $0 == reference }
-            if updated.memberReferences.count != folder.memberReferences.count {
-                updated.updatedAt = .now
+        withSnapshotUpdate {
+            switch reference {
+            case let .reel(id):
+                privateReels.removeAll { $0.id == id }
+            case let .poi(id):
+                privatePOIs.removeAll { $0.id == id }
             }
-            return updated
+
+            journeyFolders = journeyFolders.map { folder in
+                var updated = folder
+                updated.memberReferences.removeAll { $0 == reference }
+                if updated.memberReferences.count != folder.memberReferences.count {
+                    updated.updatedAt = .now
+                }
+                return updated
+            }
+            persistFolders()
         }
-        persistFolders()
     }
 
     private func normalizedFolderTitle(_ title: String) -> String {

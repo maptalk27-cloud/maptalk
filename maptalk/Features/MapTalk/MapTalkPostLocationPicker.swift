@@ -1,29 +1,22 @@
 import CoreLocation
 import SwiftUI
 
-/// A small step inside the Post composer. The owner supplies nearby results;
+/// A small step inside the Post composer. The owner supplies personal history;
 /// choosing a row changes only this draft's coordinate, never its content.
 struct MapTalkPostLocationPicker: View {
-    let choices: [MapTalkPostLocationChoice]
-    let isLoading: Bool
-    let issue: POISearchIssue?
-    let hasLiveLocation: Bool
+    let library: MapTalkPostLocationLibrary
     let liveLocation: CLLocation?
     @Binding var query: String
     let selection: MapTalkPostLocationSelection?
     let onSelect: (MapTalkPostLocationSelection?) -> Void
     let onBack: () -> Void
-    let onRetry: () -> Void
 
     @FocusState private var isSearchFocused: Bool
     @State private var isChoosingOnMap = false
 
-    private var previousLocations: [MapTalkPostLocationChoice] {
-        choices.filter(\.hasHistory)
-    }
-
-    private var nearbyLocations: [MapTalkPostLocationChoice] {
-        choices.filter { !$0.hasHistory }
+    private var choices: [MapTalkPostLocationChoice] { library.choices(matching: query) }
+    private var canOpenMap: Bool {
+        liveLocation != nil || !library.coverage.areas.isEmpty || !library.choices.isEmpty
     }
 
     private var isSearching: Bool {
@@ -32,8 +25,8 @@ struct MapTalkPostLocationPicker: View {
 
     var body: some View {
         ZStack {
-            if isChoosingOnMap, let liveLocation {
-                MapTalkCustomPostLocationPicker(origin: liveLocation, selection: selection,
+            if isChoosingOnMap {
+                MapTalkCustomPostLocationPicker(library: library, origin: liveLocation, selection: selection,
                     onSelect: onSelect, onBack: { isChoosingOnMap = false })
                     .transition(.move(edge: .trailing))
             } else {
@@ -53,46 +46,26 @@ struct MapTalkPostLocationPicker: View {
                     onBack()
                 }
             PublishLocationSearchField(text: $query, isFocused: $isSearchFocused,
-                isLoading: isLoading, identifier: "maptalk.post.location-search")
+                isLoading: false, identifier: "maptalk.post.location-search",
+                placeholder: "Search your Post locations")
                 .padding(.horizontal, 20)
                 .padding(.vertical, 8)
 
             ScrollView(showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if issue != nil, !isLoading, hasLiveLocation { refreshIssue }
-                    if hasLiveLocation {
-                        if !previousLocations.isEmpty {
-                            choiceSection("Visited & posted", choices: previousLocations)
+                    PublishLocationSectionHeader(title: "Your Post locations")
+                    ForEach(choices) { choice in
+                        VStack(spacing: 0) {
+                            PublishLocationDivider()
+                            choiceRow(choice)
                         }
-                        if !nearbyLocations.isEmpty || choices.isEmpty {
-                            choiceSection(isSearching ? "Search results" : "Nearby places",
-                                          choices: nearbyLocations, showsRange: previousLocations.isEmpty)
-                        }
-                    } else {
-                        PublishLocationSectionHeader(title: "Nearby places", detail: "Within 5 km")
-                        PublishLocationDivider()
                     }
-
-                    if !hasLiveLocation {
-                        emptyState(symbol: "location.slash", title: "Waiting for your location",
-                                   detail: "Nearby places will appear when your location is available.")
-                    } else {
-                        if choices.isEmpty {
-                            if isLoading {
-                                VStack(spacing: 12) {
-                                    ProgressView().controlSize(.small).tint(.black)
-                                    Text(isSearching ? "Searching nearby…" : "Finding nearby places…")
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .frame(maxWidth: .infinity, minHeight: 150)
-                            } else if issue == nil {
-                                emptyState(symbol: "mappin.slash",
-                                           title: isSearching ? "No matching places nearby" : "No nearby places yet",
-                                           detail: isSearching ? "Try another place name."
-                                            : "Create a new location on the map.")
-                            }
-                        }
+                    if choices.isEmpty {
+                        emptyState(symbol: "mappin.slash",
+                                   title: isSearching ? "No matching Post locations" : "No Post locations yet",
+                                   detail: isSearching ? "Try another location name."
+                                    : canOpenMap ? "Create a new location on the map."
+                                    : "Enable location to create your first Post location.")
                     }
                 }
                 .padding(.horizontal, 20)
@@ -103,7 +76,7 @@ struct MapTalkPostLocationPicker: View {
 
             VStack(spacing: 0) {
                 PublishLocationDivider()
-                PublishLocationCreateButton(isEnabled: liveLocation != nil,
+                PublishLocationCreateButton(isEnabled: canOpenMap,
                     identifier: "maptalk.post.location-map") {
                         isSearchFocused = false
                         isChoosingOnMap = true
@@ -121,51 +94,21 @@ struct MapTalkPostLocationPicker: View {
         .accessibilityIdentifier("maptalk.post.location-picker")
     }
 
-    private func choiceSection(_ title: String, choices: [MapTalkPostLocationChoice],
-                               showsRange: Bool = true) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PublishLocationSectionHeader(title: title, detail: showsRange ? "Within 5 km" : nil)
-            PublishLocationDivider()
-
-            ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
-                if index > 0 { PublishLocationDivider() }
-                choiceRow(choice)
-            }
-        }
-    }
-
     private func choiceRow(_ choice: MapTalkPostLocationChoice) -> some View {
         let selected = isSelected(choice)
         return Button {
             isSearchFocused = false
             onSelect(choice.selection)
         } label: {
-            PublishLocationChoiceLabel(title: previousPostSnippet(choice) ?? choice.selection.title,
-                subtitle: choice.locationSubtitle,
-                symbol: choice.category?.symbolName ?? "text.alignleft", isSelected: selected,
-                badge: choice.historyBadge, thumbnailURL: choice.thumbnailURL,
-                detail: choice.historyDetail)
+            PublishLocationChoiceLabel(title: Self.displayTitle(for: choice),
+                subtitle: postCountText(choice), symbol: "mappin", isSelected: selected,
+                thumbnailURL: choice.thumbnailURL)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(choice.selection.title)
-        .accessibilityValue([choice.historyDetail, choice.locationSubtitle,
-                             selected ? "selected" : nil].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityLabel(Self.displayTitle(for: choice))
+        .accessibilityValue([postCountText(choice), selected ? "selected" : nil]
+            .compactMap { $0 }.joined(separator: ", "))
         .accessibilityIdentifier("maptalk.post.location-option.\(choice.id)")
-    }
-
-    private var refreshIssue: some View {
-        HStack(spacing: 12) {
-            Text("Places couldn't refresh.")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
-            Button("Try again", action: onRetry)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.black)
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("maptalk.post.location-retry")
-        }
-        .frame(minHeight: 56)
     }
 
     private func emptyState(symbol: String, title: String, detail: String) -> some View {
@@ -187,15 +130,24 @@ struct MapTalkPostLocationPicker: View {
 
     private func isSelected(_ choice: MapTalkPostLocationChoice) -> Bool {
         guard let selection else { return false }
-        return selection.title == choice.selection.title
+        return selection.locationID == choice.selection.locationID
+            && selection.title == choice.selection.title
             && selection.coordinate.latitude == choice.selection.coordinate.latitude
             && selection.coordinate.longitude == choice.selection.coordinate.longitude
     }
 
-    private func previousPostSnippet(_ choice: MapTalkPostLocationChoice) -> String? {
-        guard choice.selection.title == "Previous post location",
+    private func postCountText(_ choice: MapTalkPostLocationChoice) -> String {
+        "\(choice.postCount) \(choice.postCount == 1 ? "post" : "posts")"
+    }
+
+    static func displayTitle(for choice: MapTalkPostLocationChoice) -> String {
+        guard choice.selection.locationName == nil,
+              choice.selection.title == "Previous post location",
               let text = choice.previousPosts.first?.message?
-                .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+                .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return choice.selection.title
+        }
+        // Display-only fallback. Reuse always keeps the original nil name.
         return text.replacingOccurrences(of: "\n", with: " ")
     }
 

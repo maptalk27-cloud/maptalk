@@ -22,6 +22,9 @@ struct JourneyPost: Identifiable {
     let pois: [RatedPOI]
     let likes: [UUID]
     let comments: [Comment]
+    /// A published Bubble is a frozen parent-authorized snapshot, not a live
+    /// folder. Keep this identity even if its parent is later withdrawn.
+    let isPublishedSnapshot: Bool
 
     init(
         id: UUID,
@@ -34,7 +37,8 @@ struct JourneyPost: Identifiable {
         reels: [RealPost],
         pois: [RatedPOI],
         likes: [UUID],
-        comments: [Comment]
+        comments: [Comment],
+        isPublishedSnapshot: Bool = false
     ) {
         self.id = id
         self.userId = userId
@@ -47,6 +51,7 @@ struct JourneyPost: Identifiable {
         self.pois = pois
         self.likes = likes
         self.comments = comments
+        self.isPublishedSnapshot = isPublishedSnapshot
     }
 
     var displayLabel: String {

@@ -1,5 +1,6 @@
 import MapKit
 import SwiftUI
+import Combine
 import UIKit
 
 /// A single record collection rendered as either a chronological list or a map.
@@ -96,6 +97,45 @@ struct UserMapRecord: Identifiable {
         }
         return (reelRecords + poiRecords)
             .sorted { $0.timestamp > $1.timestamp }
+    }
+}
+
+/// Presentation rows built only after the caller applies date/search filters.
+/// POIs and private collections keep their existing identity and behavior.
+@MainActor
+struct UserMapRecordPlaceGroup: Identifiable {
+    let id: String
+    let records: [UserMapRecord]
+
+    var representative: UserMapRecord { records[0] }
+
+    static func make(_ records: [UserMapRecord], aggregatePosts: Bool = true) -> [Self] {
+        var firstRecords: [UUID: UserMapRecord] = [:]
+        for record in records where firstRecords[record.id] == nil {
+            firstRecords[record.id] = record
+        }
+        let postGroups = aggregatePosts ? PostPlaceGrouping.groups(records.compactMap { record in
+            if case let .reel(post) = record.kind { return post }
+            return nil
+        }, mode: .aggregate) : []
+        var groupForPost: [UUID: PostPlaceGroup] = [:]
+        for group in postGroups {
+            for post in group.posts { groupForPost[post.id] = group }
+        }
+
+        var result: [Self] = []
+        var seen = Set<String>()
+        for record in records {
+            if case .reel = record.kind, let group = groupForPost[record.id] {
+                guard seen.insert(group.id).inserted else { continue }
+                result.append(Self(id: group.id, records: group.posts.compactMap { firstRecords[$0.id] }))
+            } else {
+                let id = "record:\(record.id.uuidString)"
+                guard seen.insert(id).inserted else { continue }
+                result.append(Self(id: id, records: [record]))
+            }
+        }
+        return result
     }
 }
 
@@ -241,6 +281,191 @@ private struct MapMemoryHitCluster: Identifiable {
         // annotations in their existing order, so a first interaction still
         // feels like touching the visible marker.
         records.last!
+    }
+}
+
+/// The parent owns this reference without observing it. Only the map canvas
+/// observes camera-position writes; its continuously sampled region remains
+/// available to navigation/return actions without invalidating the archive.
+@MainActor
+private final class MyMapCameraState: ObservableObject {
+    @Published var position: MapCameraPosition
+    var region: MKCoordinateRegion
+
+    init(region: MKCoordinateRegion) {
+        position = .region(region)
+        self.region = region
+    }
+
+    var binding: Binding<MapCameraPosition> {
+        Binding(get: { self.position }, set: { self.position = $0 })
+    }
+}
+
+/// Built by the parent only when its data/selection changes, never in response
+/// to a camera tick. The map and hit overlay share this same grouped snapshot.
+private struct MapMemoryCanvasData {
+    let revision = UUID()
+    let markerRecords: [UserMapRecord]
+    let renderingRecords: [UserMapRecord]
+    let postGroupsByID: [UUID: PostPlaceGroup]
+}
+
+@MainActor
+private final class MyMapHitUpdates: ObservableObject {
+    @Published private(set) var revision = 0
+    private var layout = MyMapHitLayout()
+    private var dataRevision: UUID?
+    private var size: CGSize = .zero
+
+    func refresh(final: Bool = false) {
+        if final { layout.invalidate() }
+        revision &+= 1
+    }
+
+    func groups(_ markers: [MyMapHitLayout.Marker], dataRevision: UUID,
+                size: CGSize, exact: Bool) -> [[UUID]] {
+        if self.dataRevision != dataRevision || self.size != size {
+            layout.invalidate()
+            self.dataRevision = dataRevision
+            self.size = size
+        }
+        return layout.groups(for: markers, at: ProcessInfo.processInfo.systemUptime, exact: exact)
+    }
+}
+
+private struct MapMemoryHitTarget {
+    let cluster: MapMemoryHitCluster
+    /// A tap can arrive between overlap samples during a pinch. Resolve its
+    /// current stack before selection rather than acting on cached membership.
+    let resolve: () -> MapMemoryHitCluster?
+}
+
+@MainActor
+private struct MyMapMemoryHitLayer<Target: View>: View {
+    let data: MapMemoryCanvasData
+    let mapProxy: MapProxy
+    let size: CGSize
+    let safeAreaBottom: CGFloat
+    let isActive: Bool
+    let isOrganizing: Bool
+    @ObservedObject var updates: MyMapHitUpdates
+    let target: (MapMemoryHitTarget, CGSize, CGFloat) -> Target
+
+    var body: some View {
+        // Only this small overlay subscribes to continuous camera samples.
+        let _ = updates.revision
+        if isActive {
+            let projected = projectMarkers()
+            let groups = updates.groups(projected.map(\.marker), dataRevision: data.revision,
+                size: size, exact: isOrganizing)
+            ForEach(clusters(groups, projected: projected)) { cluster in
+                target(MapMemoryHitTarget(cluster: cluster, resolve: {
+                    let live = projectMarkers()
+                    return clusters(MyMapHitLayout.group(live.map(\.marker)), projected: live)
+                        .first { $0.records.contains { $0.id == cluster.defaultRecord.id } }
+                }), size, safeAreaBottom)
+                .position(cluster.point)
+                .zIndex(100)
+            }
+        }
+    }
+
+    private struct Projection {
+        let record: UserMapRecord
+        let marker: MyMapHitLayout.Marker
+    }
+
+    private func projectMarkers() -> [Projection] {
+        data.markerRecords.compactMap { record in
+            guard let point = mapProxy.convert(record.coordinate, to: .local),
+                  point.x >= -36, point.x <= size.width + 36,
+                  point.y >= -36, point.y <= size.height + 36 else { return nil }
+            return Projection(record: record, marker: .init(id: record.id, point: point))
+        }
+    }
+
+    private func clusters(_ groups: [[UUID]], projected: [Projection]) -> [MapMemoryHitCluster] {
+        let byID = Dictionary(uniqueKeysWithValues: projected.map { ($0.record.id, $0) })
+        return groups.compactMap { ids in
+            let members = ids.compactMap { byID[$0] }
+            guard members.isEmpty == false else { return nil }
+            let point = members.reduce(CGPoint.zero) { result, member in
+                CGPoint(x: result.x + member.marker.point.x / CGFloat(members.count),
+                    y: result.y + member.marker.point.y / CGFloat(members.count))
+            }
+            return MapMemoryHitCluster(records: members.map(\.record), point: point)
+        }
+    }
+}
+
+@MainActor
+private struct MyMapMemoryCanvas<Marker: View, Target: View>: View {
+    @ObservedObject var camera: MyMapCameraState
+    let data: MapMemoryCanvasData
+    let isPresented: Bool
+    let isOrganizing: Bool
+    let freezesInteraction: Bool
+    let accessibilityValue: String
+    let onUserNavigation: () -> Void
+    let onGeometryChange: (CGSize, CGFloat) -> Void
+    let marker: (UserMapRecord, PostPlaceGroup?) -> Marker
+    let target: (MapMemoryHitTarget, CGSize, CGFloat) -> Target
+    // Ownership without observation: camera ticks invalidate the hit layer,
+    // not the annotation canvas or its parent archive.
+    @State private var hitUpdates = MyMapHitUpdates()
+    @State private var isVisible = false
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var isActive: Bool { isPresented && isVisible && scenePhase == .active }
+
+    var body: some View {
+        MapReader { mapProxy in
+            GeometryReader { geometry in
+                Map(position: camera.binding, interactionModes: freezesInteraction ? [] : .all) {
+                    // Keep the native camera alive beneath List, but not its
+                    // invisible annotation views and thumbnail-loading tasks.
+                    ForEach(isPresented ? data.renderingRecords : []) { record in
+                        Annotation("", coordinate: record.coordinate) {
+                            marker(record, data.postGroupsByID[record.id])
+                                .allowsHitTesting(false)
+                        }
+                    }
+                }
+                .accessibilityIdentifier("mymap.map-canvas")
+                .accessibilityLabel("MyMap map")
+                .accessibilityValue(accessibilityValue)
+                .overlay {
+                    MyMapMemoryHitLayer(data: data, mapProxy: mapProxy,
+                        size: geometry.size, safeAreaBottom: geometry.safeAreaInsets.bottom,
+                        isActive: isActive, isOrganizing: isOrganizing,
+                        updates: hitUpdates, target: target)
+                }
+                .ignoresSafeArea(edges: .bottom)
+                .onMapCameraChange(frequency: .continuous) { context in
+                    camera.region = context.region
+                    if isActive { hitUpdates.refresh() }
+                }
+                .onMapCameraChange(frequency: .onEnd) { context in
+                    camera.region = context.region
+                    if isActive { hitUpdates.refresh(final: true) }
+                }
+                .onAppear {
+                    onGeometryChange(geometry.size, geometry.safeAreaInsets.bottom)
+                }
+                .onChangeCompat(of: geometry.size) { size in
+                    onGeometryChange(size, geometry.safeAreaInsets.bottom)
+                }
+            }
+        }
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
+        .onChangeCompat(of: isActive) { active in
+            if active { hitUpdates.refresh(final: true) }
+        }
+        .onChangeCompat(of: camera.position.positionedByUser) { positionedByUser in
+            if positionedByUser { onUserNavigation() }
+        }
     }
 }
 
@@ -527,6 +752,8 @@ struct UserMapHomeView: View {
     let onMapUserNavigation: () -> Void
     let userProvider: (UUID) -> User?
 
+    @Environment(\.appEnv) private var environment
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var display: Display = .list
@@ -545,17 +772,16 @@ struct UserMapHomeView: View {
     /// clear, local way back to the archive.
     @State private var listFocusRecordID: UUID?
     @State private var listReturnRecordID: UUID?
+    @State private var archiveSelectedPostIDs: [String: UUID] = [:]
     @State private var mapFocusedJourney: JourneyPost?
     @State private var mapJourneyStack: [JourneyPost] = []
     @State private var mapJourneyEntryRecord: UserMapRecord?
     @State private var mapJourneyEntryRegion: MKCoordinateRegion?
     @StateObject private var mapCapsulePresentation: MapExperiencePresentation
     @State private var mapFlightController = MyMapFlightController()
-    @State private var cameraPosition: MapCameraPosition
-    @State private var currentMapRegion: MKCoordinateRegion
+    @State private var mapCamera: MyMapCameraState
     @State private var mapSize: CGSize = .zero
     @State private var mapSafeAreaBottom: CGFloat = 0
-    @State private var mapOverlayRevision = 0
     @State private var mapReelAlignTrigger = 0
     @State private var isCollectionPickerPresented = false
     @State private var collectionMemorySelection: CollectionMemorySelectionContext?
@@ -634,11 +860,20 @@ struct UserMapHomeView: View {
         self.onRemoveFromMyMap = onRemoveFromMyMap
         self.onMapUserNavigation = onMapUserNavigation
         self.userProvider = userProvider
-        _cameraPosition = State(initialValue: .region(region))
-        _currentMapRegion = State(initialValue: region)
+        _mapCamera = State(initialValue: MyMapCameraState(region: region))
         _mapCapsulePresentation = StateObject(
             wrappedValue: MapExperiencePresentation(compactDetent: Self.mapCapsuleCompactDetent)
         )
+    }
+
+    private var cameraPosition: MapCameraPosition {
+        get { mapCamera.position }
+        nonmutating set { mapCamera.position = newValue }
+    }
+
+    private var currentMapRegion: MKCoordinateRegion {
+        get { mapCamera.region }
+        nonmutating set { mapCamera.region = newValue }
     }
 
     var body: some View {
@@ -947,7 +1182,10 @@ struct UserMapHomeView: View {
             }
         }
         .onPreferenceChange(JourneyOrganizerTargetFramePreferenceKey.self) { frames in
-            journeyOrganizerTargetFrames = frames
+            // Normal browsing never needs organizer geometry. In arrange mode
+            // retain live drop frames, without feeding identical values back.
+            let next = isOrganizingMapJourneys ? frames : [:]
+            if journeyOrganizerTargetFrames != next { journeyOrganizerTargetFrames = next }
         }
         .onPreferenceChange(JourneyFolderCoverFramePreferenceKey.self) { frames in
             journeyFolderCoverFrames = frames
@@ -967,11 +1205,6 @@ struct UserMapHomeView: View {
                   cameraPosition.positionedByUser == false else { return }
             cameraPosition = .region(region)
             currentMapRegion = region
-        }
-        .onChangeCompat(of: cameraPosition.positionedByUser) { positionedByUser in
-            guard positionedByUser else { return }
-            hasUserNavigatedMap = true
-            onMapUserNavigation()
         }
         .onChange(of: records.compactMap(\.journeyMemberReference)) { _, references in
             // Refresh and pending-upload reconciliation can replace records.
@@ -1041,12 +1274,16 @@ struct UserMapHomeView: View {
         }
     }
 
-    private var groupedRecords: [(String, [UserMapRecord])] {
-        Dictionary(grouping: filteredRecords, by: sectionTitle(for:))
+    private var archiveRecordGroups: [UserMapRecordPlaceGroup] {
+        UserMapRecordPlaceGroup.make(filteredRecords, aggregatePosts: !isSelectingCollectionMemories)
+    }
+
+    private var groupedRecords: [(String, [UserMapRecordPlaceGroup])] {
+        Dictionary(grouping: archiveRecordGroups, by: { sectionTitle(for: $0.representative) })
             .map { ($0.key, $0.value) }
             .sorted { lhs, rhs in
-                guard let left = lhs.1.first?.timestamp,
-                      let right = rhs.1.first?.timestamp else { return false }
+                guard let left = lhs.1.first?.representative.timestamp,
+                      let right = rhs.1.first?.representative.timestamp else { return false }
                 return left > right
             }
     }
@@ -2535,17 +2772,18 @@ struct UserMapHomeView: View {
         .padding(.top, 80)
     }
 
-    private func archiveSection(_ section: (String, [UserMapRecord])) -> some View {
+    private func archiveSection(_ section: (String, [UserMapRecordPlaceGroup])) -> some View {
         Section {
-            ForEach(section.1.indices, id: \.self) { index in
-                let record = section.1[index]
-                archiveRecordRow(record)
-                    .id(record.id)
+            // Give List the record identity directly. An index-based row
+            // with a second .id inside it loses its state when a newer memory
+            // is inserted, and obscures List's lazy row identity.
+            ForEach(section.1) { group in
+                archiveRecordGroupRow(group)
                     .listRowInsets(.init(top: 0, leading: 16, bottom: 0, trailing: 16))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                     .overlay(alignment: .bottom) {
-                        if index < section.1.count - 1 {
+                        if group.id != section.1.last?.id {
                             Divider()
                                 .padding(.leading, 76)
                         }
@@ -2557,13 +2795,36 @@ struct UserMapHomeView: View {
             // otherwise-transparent edges of List's pinned-header host.
             ArchiveDateHeader(
                 title: section.0,
-                count: section.1.count,
-                date: section.1.first?.timestamp ?? .now
+                count: section.1.reduce(0) { $0 + $1.records.count },
+                date: section.1.first?.representative.timestamp ?? .now
             )
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(.systemBackground))
+        }
+    }
+
+    @ViewBuilder
+    private func archiveRecordGroupRow(_ group: UserMapRecordPlaceGroup) -> some View {
+        if group.records.count > 1, !isSelectingCollectionMemories {
+            ArchivePostPlaceRow(
+                records: group.records,
+                selection: Binding(
+                    get: {
+                        if let selected = archiveSelectedPostIDs[group.id],
+                           group.records.contains(where: { $0.id == selected }) { return selected }
+                        return group.representative.id
+                    },
+                    set: { archiveSelectedPostIDs[group.id] = $0 }
+                ),
+                deletesPublishedPosts: deletesPublishedPosts,
+                onRemove: { recordPendingRemoval = $0 }
+            ) { record in
+                archiveBrowsingRow(record, allowsSwipeRemoval: false)
+            }
+        } else {
+            archiveRecordRow(group.representative)
         }
     }
 
@@ -2576,7 +2837,7 @@ struct UserMapHomeView: View {
         }
     }
 
-    private func archiveBrowsingRow(_ record: UserMapRecord) -> some View {
+    private func archiveBrowsingRow(_ record: UserMapRecord, allowsSwipeRemoval: Bool = true) -> some View {
         let publication = record.pendingPublication(in: pendingPublications)
         return HStack(spacing: 0) {
             Button {
@@ -2606,13 +2867,15 @@ struct UserMapHomeView: View {
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button {
-                recordPendingRemoval = record
-            } label: {
-                Label(deletesPublishedPosts ? "Delete" : "Remove", systemImage: "trash")
+            if allowsSwipeRemoval {
+                Button {
+                    recordPendingRemoval = record
+                } label: {
+                    Label(deletesPublishedPosts ? "Delete" : "Remove", systemImage: "trash")
+                }
+                .tint(.red)
+                .accessibilityLabel(deletesPublishedPosts ? "Delete from MyMap and feed" : "Remove from MyMap")
             }
-            .tint(.red)
-            .accessibilityLabel(deletesPublishedPosts ? "Delete from MyMap and feed" : "Remove from MyMap")
         }
     }
 
@@ -2649,96 +2912,47 @@ struct UserMapHomeView: View {
     }
 
     private var mapContent: some View {
-        MapReader { mapProxy in
-            GeometryReader { geometry in
-                let hitClusters = mapMemoryHitClusters(
-                    using: mapProxy,
-                    size: geometry.size
-                )
+        // Data-only grouping is retained by the child across camera samples.
+        // Refreshes still carry current models (their equality is ID-only),
+        // so captions/media and grouping changes cannot become stale.
+        let records = mapRecords
+        let markers = groupsPostsOnMap
+            ? UserMapRecordPlaceGroup.make(records).map(\.representative) : records
+        let data = MapMemoryCanvasData(markerRecords: markers,
+            renderingRecords: mapRecordsForRendering(markers),
+            postGroupsByID: Dictionary(uniqueKeysWithValues: mapPostPlaceGroups.flatMap { group in
+                group.posts.map { ($0.id, group) }
+            }))
 
-                Map(
-                    position: $cameraPosition,
-                    // Empty map space remains fully explorable in organize
-                    // mode. Once a memory is in a transaction, freeze the
-                    // canvas until it reaches its frozen destination.
-                    interactionModes: isJourneyOrganizerTransactionActive ? [] : .all
-                ) {
-                    ForEach(mapRecordsForRendering) { record in
-                        Annotation("", coordinate: record.coordinate) {
-                            // MapKit owns spatial rendering; interaction is a
-                            // stable overlay, so a long press never replaces
-                            // the annotation beneath the user's finger.
-                            mapMarkerVisual(for: record)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                }
-                // Keep canvas semantics on MapKit, not its interactive pin overlay.
-                // Applying these after overlay overwrites each memory button's label/ID.
-                .accessibilityIdentifier("mymap.map-canvas")
-                .accessibilityLabel("MyMap map")
-                .accessibilityValue(mapScopeAccessibilityValue)
-                .overlay {
-                    mapOrganizerHitLayer(
-                        clusters: hitClusters,
-                        size: geometry.size,
-                        safeAreaBottom: geometry.safeAreaInsets.bottom
-                    )
-                }
-                .ignoresSafeArea(edges: .bottom)
-                .onMapCameraChange(frequency: .continuous) { context in
-                    currentMapRegion = context.region
-                    mapOverlayRevision &+= 1
-                }
-                .onAppear {
-                    mapSize = geometry.size
-                    mapSafeAreaBottom = geometry.safeAreaInsets.bottom
-                }
-                .onChangeCompat(of: geometry.size) { newSize in
-                    mapSize = newSize
-                    mapSafeAreaBottom = geometry.safeAreaInsets.bottom
-                }
-            }
-        }
+        return MyMapMemoryCanvas(camera: mapCamera, data: data,
+            isPresented: display == .map, isOrganizing: isOrganizingMapJourneys,
+            freezesInteraction: isJourneyOrganizerTransactionActive,
+            accessibilityValue: mapScopeAccessibilityValue,
+            onUserNavigation: {
+                guard hasUserNavigatedMap == false else { return }
+                hasUserNavigatedMap = true
+                onMapUserNavigation()
+            },
+            onGeometryChange: { size, bottom in
+                if mapSize != size { mapSize = size }
+                if mapSafeAreaBottom != bottom { mapSafeAreaBottom = bottom }
+            },
+            marker: { record, group in mapMarkerVisual(for: record, postPlaceGroup: group) },
+            target: { target, size, bottom in
+                mapMemoryHitClusterTarget(target, size: size, safeAreaBottom: bottom)
+            })
     }
 
-    @ViewBuilder
-    private func mapOrganizerHitLayer(
-        clusters: [MapMemoryHitCluster],
-        size: CGSize,
-        safeAreaBottom: CGFloat
-    ) -> some View {
-        // Reading the revision keeps the hit layer aligned while the person
-        // pans the map. The layer has no full-screen hit shape, so blank map
-        // space continues straight through to MapKit.
-        let _ = mapOverlayRevision
-        ForEach(clusters) { cluster in
-            mapMemoryHitClusterTarget(
-                cluster,
-                size: size,
-                safeAreaBottom: safeAreaBottom
-            )
-            .position(cluster.point)
-            .zIndex(100)
-        }
-    }
-
-    private func isVisibleMapPoint(_ point: CGPoint, in size: CGSize) -> Bool {
-        let hitRadius: CGFloat = 36
-        return point.x >= -hitRadius && point.x <= size.width + hitRadius
-            && point.y >= -hitRadius && point.y <= size.height + hitRadius
-    }
-
-    private var mapRecordsForRendering: [UserMapRecord] {
+    private func mapRecordsForRendering(_ markers: [UserMapRecord]) -> [UserMapRecord] {
         guard isOrganizingMapJourneys,
               let selectedID = journeyOrganizerSelectedRecordID else {
-            return mapRecords
+            return markers
         }
 
         // Keep the chosen member at the same coordinate but render it above
         // the rest of its stack. Cycling therefore changes the visible marker
         // rather than fanning the map apart.
-        return mapRecords.enumerated()
+        return markers.enumerated()
             .sorted { lhs, rhs in
                 let leftIsSelected = lhs.element.id == selectedID
                 let rightIsSelected = rhs.element.id == selectedID
@@ -2750,56 +2964,13 @@ struct UserMapHomeView: View {
             .map(\.element)
     }
 
-    private func mapMemoryHitClusters(
-        using mapProxy: MapProxy,
-        size: CGSize
-    ) -> [MapMemoryHitCluster] {
-        let projected = mapRecords.compactMap { record -> (record: UserMapRecord, point: CGPoint)? in
-            guard let point = mapProxy.convert(record.coordinate, to: .local),
-                  isVisibleMapPoint(point, in: size) else {
-                return nil
-            }
-            return (record, point)
-        }
-
-        // Only build a stack when icons physically overlap. Nearby but still
-        // separately visible pins retain their individual one-tap targets.
-        let overlapRadius: CGFloat = 34
-        var clusters: [[(record: UserMapRecord, point: CGPoint)]] = []
-
-        for item in projected {
-            if let clusterIndex = clusters.indices.first(where: { index in
-                clusters[index].contains {
-                    distanceSquared(from: item.point, to: $0.point)
-                        <= overlapRadius * overlapRadius
-                }
-            }) {
-                clusters[clusterIndex].append(item)
-            } else {
-                clusters.append([item])
-            }
-        }
-
-        return clusters.map { cluster in
-            let anchor = cluster.reduce(CGPoint.zero) { partial, layout in
-                CGPoint(
-                    x: partial.x + layout.point.x / CGFloat(cluster.count),
-                    y: partial.y + layout.point.y / CGFloat(cluster.count)
-                )
-            }
-            return MapMemoryHitCluster(
-                records: cluster.map(\.record),
-                point: anchor
-            )
-        }
-    }
-
     @ViewBuilder
     private func mapMemoryHitClusterTarget(
-        _ cluster: MapMemoryHitCluster,
+        _ target: MapMemoryHitTarget,
         size: CGSize,
         safeAreaBottom: CGFloat
     ) -> some View {
+        let cluster = target.cluster
         let dragRecord = organizerRecord(in: cluster)
         let isStack = cluster.records.count > 1
 
@@ -2815,7 +2986,8 @@ struct UserMapHomeView: View {
                 // the front so the next hold picks up that one.
                 selectNextOrganizerRecord(in: cluster)
             } else {
-                let record = nextBrowsingRecord(in: cluster)
+                guard let liveCluster = target.resolve() else { return }
+                let record = nextBrowsingRecord(in: liveCluster)
                 selectOnMap(record, size: size, safeAreaBottom: safeAreaBottom)
             }
         } label: {
@@ -2855,7 +3027,11 @@ struct UserMapHomeView: View {
             }
         }
         .buttonStyle(.plain)
-        .background(mapMarkerClusterTargetFrame(for: cluster))
+        .background {
+            if isOrganizingMapJourneys {
+                mapMarkerClusterTargetFrame(for: cluster)
+            }
+        }
         .accessibilityLabel(isStack ? "Overlapping memories" : dragRecord.title)
         .accessibilityValue(isStack ? dragRecord.title : "")
         .accessibilityHint(
@@ -2875,11 +3051,45 @@ struct UserMapHomeView: View {
     }
 
     private func nextBrowsingRecord(in cluster: MapMemoryHitCluster) -> UserMapRecord {
-        guard let currentID = mapSelectedRecord?.id,
-              let currentIndex = cluster.records.firstIndex(where: { $0.id == currentID }) else {
-            return cluster.defaultRecord
+        // A place marker represents the selected original Post, even when
+        // that Post is an older member rather than the marker's cover.
+        guard groupsPostsOnMap else {
+            guard let currentID = mapSelectedRecord?.id,
+                  let currentIndex = cluster.records.firstIndex(where: { $0.id == currentID }) else {
+                return cluster.defaultRecord
+            }
+            return cluster.records[(currentIndex + 1) % cluster.records.count]
         }
-        return cluster.records[(currentIndex + 1) % cluster.records.count]
+        let currentID = mapSelectedRecord.flatMap { selected in
+            mapRecordGroups.first(where: { $0.records.contains(where: { $0.id == selected.id }) })?.representative.id
+        }
+        guard let currentID,
+              let currentIndex = cluster.records.firstIndex(where: { $0.id == currentID }) else {
+            return preferredBrowsingRecord(for: cluster.defaultRecord)
+        }
+        return preferredBrowsingRecord(for: cluster.records[(currentIndex + 1) % cluster.records.count])
+    }
+
+    private func preferredBrowsingRecord(for representative: UserMapRecord) -> UserMapRecord {
+        guard groupsPostsOnMap,
+              let group = mapRecordGroups.first(where: { $0.representative.id == representative.id }) else {
+            return representative
+        }
+        if let selected = mapSelectedRecord,
+           let member = group.records.first(where: { $0.id == selected.id }) {
+            return member
+        }
+        if let selectedID = archiveSelectedPostIDs[group.id],
+           let member = group.records.first(where: { $0.id == selectedID }) {
+            return member
+        }
+        return representative
+    }
+
+    private func rememberMapPostSelection(_ record: UserMapRecord) {
+        guard groupsPostsOnMap, case .reel = record.kind,
+              let group = mapRecordGroups.first(where: { $0.records.contains(where: { $0.id == record.id }) }) else { return }
+        archiveSelectedPostIDs[group.id] = record.id
     }
 
     private func organizerRecord(in cluster: MapMemoryHitCluster) -> UserMapRecord {
@@ -2911,7 +3121,7 @@ struct UserMapHomeView: View {
         }
     }
 
-    private func mapMarkerVisual(for record: UserMapRecord) -> some View {
+    private func mapMarkerVisual(for record: UserMapRecord, postPlaceGroup: PostPlaceGroup?) -> some View {
         let recordTarget = JourneyOrganizerTarget.record(record.id)
         let isDropTarget = journeyOrganizerHoveredTarget == recordTarget
             || journeyOrganizerCompletedTarget == recordTarget
@@ -2922,7 +3132,7 @@ struct UserMapHomeView: View {
         let isWiggling = isOrganizingMapJourneys && reduceMotion == false
 
         return ZStack {
-            mapMarker(for: record)
+            mapMarker(for: record, postPlaceGroup: postPlaceGroup)
                 .opacity(isDropTarget ? 0 : 1)
 
             if isDropTarget, mergeOwnsReceiver == false {
@@ -3048,10 +3258,12 @@ struct UserMapHomeView: View {
     }
 
     private func restoreListPosition(using proxy: ScrollViewProxy) {
-        guard let recordID = listReturnRecordID else { return }
+        guard let recordID = listReturnRecordID,
+              let group = archiveRecordGroups.first(where: { $0.records.contains(where: { $0.id == recordID }) }) else { return }
+        archiveSelectedPostIDs[group.id] = recordID
 
         DispatchQueue.main.async {
-            proxy.scrollTo(recordID, anchor: .center)
+            proxy.scrollTo(group.id, anchor: .center)
             listReturnRecordID = nil
         }
     }
@@ -3392,6 +3604,7 @@ struct UserMapHomeView: View {
             mapOverviewPOIID = nil
         }
         mapSelectedRecord = record
+        rememberMapPostSelection(record)
         mapCapsulePresentation.presentNewContent()
     }
 
@@ -3680,6 +3893,22 @@ struct UserMapHomeView: View {
         return storyRecords(for: journey)
     }
 
+    private var groupsPostsOnMap: Bool {
+        mapFocusedJourney == nil && !isOrganizingMapJourneys && !isSelectingCollectionMemories
+    }
+
+    private var mapRecordGroups: [UserMapRecordPlaceGroup] {
+        UserMapRecordPlaceGroup.make(mapRecords, aggregatePosts: groupsPostsOnMap)
+    }
+
+    private var mapPostPlaceGroups: [PostPlaceGroup] {
+        guard groupsPostsOnMap else { return [] }
+        return PostPlaceGrouping.groups(mapCapsuleRecords.compactMap { record in
+            if case let .reel(post) = record.kind { return post }
+            return nil
+        }, mode: .aggregate)
+    }
+
     @ViewBuilder
     private var mapCapsule: some View {
         if mapSequenceItems.isEmpty {
@@ -3694,9 +3923,27 @@ struct UserMapHomeView: View {
                 onCollapsedTap: mapCapsulePresentation.expand,
                 journeyProvider: privateJourney(for:),
                 userProvider: userProvider,
-                onJourneyAvatarStackTap: openAttachedJourney
+                onJourneyAvatarStackTap: openAttachedJourney,
+                postPlaceGroups: mapPostPlaceGroups
             )
+            .environment(\.experienceLiveMediaHydrationEnabled,
+                         mapFocusedJourney?.isPublishedSnapshot != true)
+            .task(id: publishedMapBubbleID) {
+                guard let id = publishedMapBubbleID, let backend = environment.backend else { return }
+                do {
+                    try await backend.ensureMedia(for: [id])
+                    guard !Task.isCancelled, mapFocusedJourney?.id == id,
+                          let refreshed = backend.journey(for: id) else { return }
+                    mapFocusedJourney = refreshed
+                } catch { }
+            }
         }
+    }
+
+    private var publishedMapBubbleID: UUID? {
+        guard scenePhase == .active, let journey = mapFocusedJourney,
+              journey.isPublishedSnapshot else { return nil }
+        return journey.id
     }
 
     /// The map has the same browsing contract as MapTalk: Reel and POI are
@@ -3714,7 +3961,8 @@ struct UserMapHomeView: View {
             candidates.insert(selected, at: 0)
         }
 
-        return candidates
+        guard groupsPostsOnMap else { return candidates }
+        return UserMapRecordPlaceGroup.make(candidates).flatMap(\.records)
     }
 
     private var mapSequenceItems: [ExperienceDetailView.SequencePager.Item] {
@@ -3752,9 +4000,20 @@ struct UserMapHomeView: View {
 
     private func selectFromMapCapsulePager(_ record: UserMapRecord) {
         guard record.id != mapSelectedRecord?.id else { return }
+        let staysAtSamePlace: Bool = {
+            guard groupsPostsOnMap,
+                  let previousRecord = mapSelectedRecord,
+                  case let .reel(previous) = previousRecord.kind,
+                  case let .reel(next) = record.kind,
+                  previous.userId == next.userId,
+                  let previousKey = PostPlaceGrouping.placeKey(for: previous) else { return false }
+            return previousKey == PostPlaceGrouping.placeKey(for: next)
+        }()
         mapOverviewPOIID = nil
         mapSelectedRecord = record
+        rememberMapPostSelection(record)
         mapReelAlignTrigger &+= 1
+        guard !staysAtSamePlace else { return }
         let targetRegion = storyRegion(for: record)
 
         if mapCapsulePresentation.isExpanded {
@@ -3783,7 +4042,7 @@ struct UserMapHomeView: View {
             targetRegion: storyRegion(for: record),
             cause: mapFlightCause(for: record),
             viewport: mapStoryViewport,
-            cameraPosition: $cameraPosition
+            cameraPosition: mapCamera.binding
         ) { region in
             currentMapRegion = region
         }
@@ -3923,7 +4182,7 @@ struct UserMapHomeView: View {
     }
 
     @ViewBuilder
-    private func mapMarker(for record: UserMapRecord) -> some View {
+    private func mapMarker(for record: UserMapRecord, postPlaceGroup: PostPlaceGroup? = nil) -> some View {
         let isSelected = record.id == mapSelectedRecord?.id && (
             mapCapsulePresentation.isPresented || mapFocusedJourney != nil
         )
@@ -3934,12 +4193,21 @@ struct UserMapHomeView: View {
                 .scaleEffect(isSelected ? 1.22 : 1)
                 .shadow(color: isSelected ? Color.black.opacity(0.28) : .clear, radius: 7, y: 3)
         case let .reel(reel):
-            RealMapThumbnail(
-                real: reel,
-                user: userProvider(reel.userId),
-                size: isSelected ? 46 : 38,
-                isSelected: isSelected
-            )
+            if let group = postPlaceGroup {
+                PostPlaceMapMarker(
+                    post: group.latestPost,
+                    count: group.count,
+                    isSelected: mapCapsulePresentation.isPresented
+                        && group.posts.contains(where: { $0.id == mapSelectedRecord?.id })
+                )
+            } else {
+                RealMapThumbnail(
+                    real: reel,
+                    user: userProvider(reel.userId),
+                    size: isSelected ? 46 : 38,
+                    isSelected: isSelected
+                )
+            }
         case .journey:
             ZStack {
                 MemoryThumbnail(record: record, size: 42, cornerRadius: 12)
@@ -4823,6 +5091,93 @@ private struct UserMapFilterSheet: View {
     }
 }
 
+private struct ArchivePostPlaceRow<Page: View>: View {
+    let records: [UserMapRecord]
+    @Binding var selection: UUID
+    let deletesPublishedPosts: Bool
+    let onRemove: (UserMapRecord) -> Void
+    let page: (UserMapRecord) -> Page
+    @ScaledMetric(relativeTo: .subheadline) private var pageHeight = 100.0
+
+    init(
+        records: [UserMapRecord],
+        selection: Binding<UUID>,
+        deletesPublishedPosts: Bool,
+        onRemove: @escaping (UserMapRecord) -> Void,
+        @ViewBuilder page: @escaping (UserMapRecord) -> Page
+    ) {
+        self.records = records
+        self._selection = selection
+        self.deletesPublishedPosts = deletesPublishedPosts
+        self.onRemove = onRemove
+        self.page = page
+    }
+
+    private var selectedIndex: Int {
+        records.firstIndex(where: { $0.id == selection }) ?? 0
+    }
+
+    private var visibleDotIndices: Range<Int> {
+        let start = max(0, min(selectedIndex - 3, records.count - 7))
+        return start..<min(start + 7, records.count)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TabView(selection: $selection) {
+                ForEach(records) { record in
+                    page(record)
+                        .tag(record.id)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .frame(height: max(100, pageHeight))
+
+            HStack(spacing: 7) {
+                ForEach(visibleDotIndices, id: \.self) { index in
+                    Circle()
+                        .fill(index == selectedIndex ? Color.primary : Color.secondary.opacity(0.3))
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Posts at this place")
+            .accessibilityValue("\(selectedIndex + 1) of \(records.count)")
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: selection = records[min(selectedIndex + 1, records.count - 1)].id
+                case .decrement: selection = records[max(selectedIndex - 1, 0)].id
+                @unknown default: break
+                }
+            }
+            .overlay(alignment: .leading) {
+                Text("\(selectedIndex + 1)/\(records.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .overlay(alignment: .trailing) {
+                // Horizontal swipes page members. Keep the existing removal
+                // confirmation available without competing with that gesture.
+                Menu {
+                    Button(deletesPublishedPosts ? "Delete post" : "Remove from MyMap", systemImage: "trash", role: .destructive) {
+                        onRemove(records[selectedIndex])
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Actions for selected Post")
+            }
+            .frame(height: 28)
+            .padding(.bottom, 5)
+        }
+    }
+}
+
 struct UserMapRecordCard: View {
     let record: UserMapRecord
 
@@ -4912,7 +5267,7 @@ struct MemoryThumbnail: View {
         switch record.kind {
         case let .poi(rated):
             if let url = poiPreviewURL(for: rated) {
-                MemoryRemoteImage(url: url)
+                MemoryRemoteImage(url: url, size: size)
             } else {
                 Image(systemName: rated.poi.category.symbolName)
                     .font(.system(size: size * 0.3, weight: .semibold))
@@ -4922,7 +5277,7 @@ struct MemoryThumbnail: View {
             }
         case let .reel(reel):
             if let url = reelPreviewURL(for: reel) {
-                MemoryRemoteImage(url: url)
+                MemoryRemoteImage(url: url, size: size)
             } else {
                 Image(systemName: "play.fill")
                     .font(.system(size: size * 0.26, weight: .semibold))
@@ -4936,12 +5291,12 @@ struct MemoryThumbnail: View {
     }
 
     private func poiPreviewURL(for rated: RatedPOI) -> URL? {
-        rated.media.compactMap { media in
+        rated.media.lazy.compactMap { media in
             switch media.kind {
             case let .photo(url): return url
             case let .video(_, poster): return poster
             }
-        }.first ?? rated.checkIns.flatMap(\.media).compactMap { media in
+        }.first ?? rated.checkIns.lazy.flatMap(\.media).compactMap { media in
             switch media.kind {
             case let .photo(url): return url
             case let .video(_, poster): return poster
@@ -4950,7 +5305,7 @@ struct MemoryThumbnail: View {
     }
 
     private func reelPreviewURL(for reel: RealPost) -> URL? {
-        reel.attachments.compactMap { attachment in
+        reel.attachments.lazy.compactMap { attachment in
             switch attachment.kind {
             case let .photo(url): return url
             case let .video(_, poster): return poster
@@ -4962,9 +5317,10 @@ struct MemoryThumbnail: View {
 
 private struct MemoryRemoteImage: View {
     let url: URL
+    let size: CGFloat
 
     var body: some View {
-        MapImage(url: url) { phase in
+        MapImage(url: url, thumbnailSize: CGSize(width: size, height: size)) { phase in
             switch phase {
             case let .success(image):
                 image.resizable().scaledToFill()
@@ -4992,7 +5348,7 @@ struct JourneyMemoryThumbnail: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black)
         } else if imageURLs.count == 1, let imageURL = imageURLs.first {
-            MemoryRemoteImage(url: imageURL)
+            MemoryRemoteImage(url: imageURL, size: size)
         } else {
             LazyVGrid(
                 columns: [GridItem(.flexible(), spacing: 1), GridItem(.flexible(), spacing: 1)],
@@ -5000,7 +5356,7 @@ struct JourneyMemoryThumbnail: View {
             ) {
                 ForEach(0..<4, id: \.self) { index in
                     if let imageURL = imageURLs[safe: index] {
-                        MemoryRemoteImage(url: imageURL)
+                        MemoryRemoteImage(url: imageURL, size: size)
                     } else {
                         Color(.tertiarySystemFill)
                     }

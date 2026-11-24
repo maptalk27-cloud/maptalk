@@ -122,11 +122,10 @@ final class MapFlightController: ObservableObject {
         let id: UUID
         let transitionID: UUID
         let cruiseCamera: MapCamera
-        let departure: CLLocationCoordinate2D
         let centerTolerance: CLLocationDistance
         let earliestStart: CFTimeInterval
         let observationRevision: UInt64
-        let begin: (_ recoveringFromAdjustedOverview: Bool) -> Void
+        let begin: () -> Void
         var isScheduled = false
         var nativeEnded = false
     }
@@ -146,7 +145,9 @@ final class MapFlightController: ObservableObject {
             if let previous = visibleCamera,
                abs(previous.centerCoordinate.latitude - camera.centerCoordinate.latitude) > 0.000_000_1
                 || abs(previous.centerCoordinate.longitude - camera.centerCoordinate.longitude) > 0.000_000_1
-                || abs(previous.distance - camera.distance) > 1 {
+                || abs(previous.distance - camera.distance) > 1
+                || abs(previous.pitch - camera.pitch) > 0.001
+                || abs(previous.heading - camera.heading) > 0.001 {
                 pendingDive?.nativeEnded = false
             }
             visibleCamera = camera
@@ -453,7 +454,6 @@ final class MapFlightController: ObservableObject {
                 after: durations.travel,
                 id: id,
                 cruiseCamera: cruiseCamera,
-                departure: current.center,
                 target: landing,
                 durations: durations,
                 viewport: viewport,
@@ -470,7 +470,6 @@ final class MapFlightController: ObservableObject {
         after cruiseDuration: Double,
         id: UUID,
         cruiseCamera: MapCamera,
-        departure: CLLocationCoordinate2D,
         target: MKCoordinateRegion,
         durations: (zoomOut: Double, travel: Double, prefetchHold: Double, zoomIn: Double),
         viewport: MapCameraViewport?,
@@ -484,15 +483,14 @@ final class MapFlightController: ObservableObject {
         // cruise actually arrives interrupts it with a visible teleport.
         pendingDive = PendingDive(id: gateID, transitionID: id,
             cruiseCamera: cruiseCamera,
-            departure: departure,
             centerTolerance: max(20, min(target.dominantSpanMeters * 0.1, 500)),
             earliestStart: CACurrentMediaTime() + cruiseDuration,
             observationRevision: cameraObservationRevision,
-            begin: { [weak self] isRecovery in
+            begin: { [weak self] in
                 guard let self, self.activeTransitionID == id else { return }
                 self.completeDive(
                     to: target,
-                    with: isRecovery ? max(durations.zoomIn, 0.55) : durations.zoomIn,
+                    with: durations.zoomIn,
                     transitionID: id,
                     viewport: viewport,
                     cameraPosition: cameraPosition,
@@ -503,54 +501,40 @@ final class MapFlightController: ObservableObject {
             guard let self, self.pendingDive?.id == gateID else { return }
             self.beginDiveIfReady()
         }
-        // Globe views can settle at a renderer-adjusted height without ever
-        // satisfying the exact cruise/whole-route gate (the departure can be
-        // on the other side of Earth). Finish an owned, settled arrival rather
-        // than abandoning the user at continental zoom. Missing observations
-        // or a map that never reached the destination still release ownership.
+        // Only release abandoned flights when observations never arrive.
+        // Normal arrivals descend immediately through the camera observation;
+        // this watchdog must never issue a delayed landing command.
         DispatchQueue.main.asyncAfter(deadline: .now() + cruiseDuration + 3) { [weak self] in
             guard let self, self.activeTransitionID == id,
                   let gate = self.pendingDive, gate.id == gateID,
                   !gate.isScheduled else { return }
-            if self.canRecoverSettledDive(gate) {
-                self.queueDive(gate, recoveringFromAdjustedOverview: true)
-                return
-            }
             self.cancelActiveTransition()
         }
     }
 
     private func beginDiveIfReady() {
         guard let gate = pendingDive, !gate.isScheduled,
-              activeTransitionID == gate.transitionID,
+              isReadyForDive(gate) else { return }
+        queueDive(gate)
+    }
+
+    private func isReadyForDive(_ gate: PendingDive) -> Bool {
+        guard activeTransitionID == gate.transitionID,
               CACurrentMediaTime() >= gate.earliestStart,
               cameraObservationRevision != gate.observationRevision,
               let camera = visibleCamera,
               camera.centerCoordinate.distance(to: gate.cruiseCamera.centerCoordinate) <= gate.centerTolerance
-        else { return }
+        else { return false }
         let reachedDistance = abs(camera.distance - gate.cruiseCamera.distance)
             <= max(20, gate.cruiseCamera.distance * 0.02)
-        // At globe scale MapKit can clamp distance for the destination's
-        // latitude/viewport. Accept its settled, adjusted overview only when
-        // the whole route already fits on screen. A stray onEnd during an
-        // unfinished close-up is not enough to permit the landing.
-        let reachedNativeOverview = gate.nativeEnded
-            && visibleRegion?.contains(gate.departure, insetFraction: 0.92) == true
-            && visibleRegion?.contains(gate.cruiseCamera.centerCoordinate, insetFraction: 0.92) == true
-        guard reachedDistance || reachedNativeOverview else { return }
-        queueDive(gate, recoveringFromAdjustedOverview: false)
+        // Preserve the exact-arrival handoff. MapKit may instead finish at a
+        // renderer-adjusted height: a fresh, settled camera centered on this
+        // destination is enough. Neither the departure's visibility nor an
+        // exact globe height should hold an already-arrived flight in the air.
+        return reachedDistance || gate.nativeEnded
     }
 
-    private func canRecoverSettledDive(_ gate: PendingDive) -> Bool {
-        // An old onEnd, a missing map, or an intermediate moving sample is not
-        // authority to land. User gestures and newer selections also revoke the
-        // flight before this path can run, through activeTransitionID.
-        gate.nativeEnded
-            && cameraObservationRevision != gate.observationRevision
-            && visibleRegion?.contains(gate.cruiseCamera.centerCoordinate, insetFraction: 0.92) == true
-    }
-
-    private func queueDive(_ pending: PendingDive, recoveringFromAdjustedOverview: Bool) {
+    private func queueDive(_ pending: PendingDive) {
         var gate = pending
         gate.isScheduled = true
         pendingDive = gate
@@ -558,9 +542,16 @@ final class MapFlightController: ObservableObject {
         // A replacement/user gesture can still cancel this queued handoff.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.activeTransitionID == gate.transitionID,
-                  self.pendingDive?.id == gate.id else { return }
+                  let current = self.pendingDive, current.id == gate.id else { return }
+            // A newer camera sample can resume movement before this handoff,
+            // even without a new selection. Recheck the live gate, not the
+            // captured nativeEnded value; identical samples remain harmless.
+            guard self.isReadyForDive(current) else {
+                self.pendingDive?.isScheduled = false
+                return
+            }
             self.pendingDive = nil
-            gate.begin(recoveringFromAdjustedOverview)
+            current.begin()
         }
     }
 

@@ -10,6 +10,28 @@ struct FriendStoryFeedTests {
     private let bob = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
 
     @Test
+    func seattleMockMediaMatrixAppearsAsOnePublicPostFeedRun() throws {
+        let groups = FriendStoryFeed.postGroups(reals: PreviewData.sampleReals,
+            userProvider: PreviewData.user(for:))
+        let posts = groups.flatMap(\.pages).sorted(by: FriendStoryPage.newestPostFirst).compactMap { page -> RealPost? in
+            if case let .reel(post) = page.content { return post }
+            return nil
+        }
+        let ownSeattle = posts.filter {
+            $0.userId == PreviewData.currentUser.id && $0.locationName == "Seattle Waterfront"
+        }
+        #expect(ownSeattle.count == 25, "All public photo/video/text samples must reach the Home Post feed")
+        let ownIDs = Set(ownSeattle.map(\.id))
+        let runs = PostPlaceGrouping.groups(posts, mode: .consecutive).filter { run in
+            run.posts.contains { ownIDs.contains($0.id) }
+        }
+        #expect(runs.count == 1, "A friend mock must not split the requested Seattle preview matrix")
+        #expect(runs.first?.count == 25)
+        #expect(Set(ownSeattle.compactMap(\.locationID)).count == 1)
+        #expect(posts.allSatisfy { $0.visibility == .publicAll }, "Private samples must remain private")
+    }
+
+    @Test
     func consecutiveVisitsAtOnePlaceShareOneMomentWithoutLosingOriginalPages() throws {
         let first = visit(id: 101, author: alice, ago: 100, media: [media(700), media(701)])
         let second = visit(id: 102, author: alice, ago: 50, media: [media(702)])
@@ -309,6 +331,31 @@ struct FriendStoryFeedTests {
         #expect(page.publishedAt == metadata.publishedAt)
         #expect(page.expiresAt == metadata.publishedAt!.addingTimeInterval(StoryReadKeys.freshWindow))
         #expect(real.id == cached.id)
+    }
+
+    @Test
+    func backendPostPagesKeepStablePlaceIdentityBeforeAndAfterMediaHydration() throws {
+        let locationID = UUID()
+        var first = record(id: 241, author: alice, kind: "reel", ago: 30)
+        first.locationId = locationID
+        first.locationName = "Waterfront"
+        var second = record(id: 242, author: alice, kind: "reel", ago: 20)
+        second.locationId = locationID
+        second.locationName = "Seattle Waterfront"
+        var stale = reel(id: 241, author: alice, ago: 30)
+        stale.locationID = UUID()
+
+        for cached in [[RealPost](), [stale]] {
+            let pages = groups(reals: cached, records: [first, second]).flatMap(\.pages)
+            let posts = pages.compactMap { page -> RealPost? in
+                if case let .reel(post) = page.content { return post }
+                return nil
+            }
+            #expect(posts.count == 2)
+            #expect(posts.allSatisfy { $0.locationID == locationID })
+            #expect(Set(pages.compactMap(\.locationKey)).count == 1)
+            #expect(PostPlaceGrouping.groups(posts, mode: .consecutive).map(\.count) == [2])
+        }
     }
 
     @Test

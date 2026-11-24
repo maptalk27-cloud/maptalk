@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 struct UserMapView: View {
@@ -46,6 +47,7 @@ struct UserMapView: View {
             )
             .refreshable { await viewModel.refreshFromBackend() }
         }
+        .onAppear { viewModel.requestInitialEmptyMapLocationIfNeeded() }
         .task { await viewModel.refreshFromBackend(force: false) }
         .alert("MyMap", isPresented: Binding(
             get: { viewModel.issue != nil },
@@ -87,12 +89,62 @@ private struct BackendPostActions: ViewModifier {
     }
 }
 
+/// Only state used by row menus. Observing BackendStore itself also redraws
+/// every visible archive row on each upload-progress callback.
+@MainActor
+final class BackendPostActionState: ObservableObject {
+    @Published private(set) var memories: [BackendMemory] = []
+    @Published private(set) var publishingIDs: Set<UUID> = []
+    @Published private(set) var mutatingIDs: Set<UUID> = []
+    private var subscriptions = Set<AnyCancellable>()
+
+    init(store: BackendStore, reference: JourneyFolder.MemberReference) {
+        bind(store: store, reference: reference)
+    }
+
+    func bind(store: BackendStore, reference: JourneyFolder.MemberReference) {
+        subscriptions.removeAll()
+        store.manageableMemoriesPublisher(for: reference)
+            .sink { [weak self] memories in
+                guard let self else { return }
+                self.memories = memories
+                updateAvailability(publishing: Set(store.pendingPublications.keys), mutating: store.pendingMemoryMutations)
+            }
+            .store(in: &subscriptions)
+        store.$pendingPublications.map { Set($0.keys) }.removeDuplicates()
+            .sink { [weak self] in
+                self?.updateAvailability(publishing: $0, mutating: store.pendingMemoryMutations)
+            }
+            .store(in: &subscriptions)
+        store.$pendingMemoryMutations.removeDuplicates()
+            .sink { [weak self] in
+                self?.updateAvailability(publishing: Set(store.pendingPublications.keys), mutating: $0)
+            }
+            .store(in: &subscriptions)
+    }
+
+    private func updateAvailability(publishing: Set<UUID>, mutating: Set<UUID>) {
+        let ids = Set(memories.map(\.id))
+        let publishing = publishing.intersection(ids)
+        let mutating = mutating.intersection(ids)
+        if publishingIDs != publishing { publishingIDs = publishing }
+        if mutatingIDs != mutating { mutatingIDs = mutating }
+    }
+}
+
 private struct ConnectedPostActions: ViewModifier {
-    @ObservedObject var store: BackendStore
+    let store: BackendStore
     let reference: JourneyFolder.MemberReference
+    @StateObject private var actionState: BackendPostActionState
     @State private var pendingAction: PostAction?
     @State private var errorMessage: String?
     @State private var editingMemory: BackendMemory?
+
+    init(store: BackendStore, reference: JourneyFolder.MemberReference) {
+        self.store = store
+        self.reference = reference
+        _actionState = StateObject(wrappedValue: BackendPostActionState(store: store, reference: reference))
+    }
 
     private struct PostAction {
         let memory: BackendMemory
@@ -107,10 +159,13 @@ private struct ConnectedPostActions: ViewModifier {
         }
     }
 
-    private var memories: [BackendMemory] { store.manageableMemories(for: reference) }
+    private var memories: [BackendMemory] { actionState.memories }
 
     func body(content: Content) -> some View {
         content
+            .onChangeCompat(of: reference) { newReference in
+                actionState.bind(store: store, reference: newReference)
+            }
             .contextMenu {
                 if memories.count == 1, let memory = memories.first {
                     actions(for: memory)
@@ -125,6 +180,20 @@ private struct ConnectedPostActions: ViewModifier {
                     }
                 }
             }
+            .background {
+                // Closed row actions must not add sheet/dialog preference
+                // hosts to every cell that List measures while scrolling.
+                // Keep the row itself stable; only mount the presentation host
+                // after a menu action actually needs it.
+                if editingMemory != nil || pendingAction != nil || errorMessage != nil {
+                    presentationHost
+                }
+            }
+    }
+
+    private var presentationHost: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
             .sheet(isPresented: Binding(get: { editingMemory != nil }, set: { if !$0 { editingMemory = nil } })) {
                 if let memory = editingMemory {
                     BackendCaptionEditor(store: store, memory: memory, onSaved: { _ in })
@@ -160,7 +229,7 @@ private struct ConnectedPostActions: ViewModifier {
     private func actions(for memory: BackendMemory) -> some View {
         if memory.kind == "reel" {
             Button("Edit caption", systemImage: "pencil") { editingMemory = memory }
-                .disabled(store.pendingPublications[memory.id] != nil || store.pendingMemoryMutations.contains(memory.id))
+                .disabled(actionState.publishingIDs.contains(memory.id) || actionState.mutatingIDs.contains(memory.id))
         }
         if memory.moderationStatus == "pending" {
             Text("Pending review")
@@ -171,11 +240,11 @@ private struct ConnectedPostActions: ViewModifier {
             Button("Make private", systemImage: "lock") {
                 pendingAction = PostAction(memory: memory, deletes: false)
             }
-            .disabled(store.pendingMemoryMutations.contains(memory.id))
+            .disabled(actionState.mutatingIDs.contains(memory.id))
         }
         Button("Delete post", systemImage: "trash", role: .destructive) {
             pendingAction = PostAction(memory: memory, deletes: true)
         }
-        .disabled(store.pendingMemoryMutations.contains(memory.id))
+        .disabled(actionState.mutatingIDs.contains(memory.id))
     }
 }

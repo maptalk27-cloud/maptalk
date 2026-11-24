@@ -4,6 +4,10 @@ import SwiftUI
 
 extension ExperienceDetailView {
     var currentMode: Mode {
+        mediaResolvedMode(sourceMode)
+    }
+
+    var sourceMode: Mode {
         if let standaloneMode {
             return standaloneMode
         } else if let context = sequenceContext {
@@ -19,6 +23,52 @@ extension ExperienceDetailView {
         }
 
         fatalError("ExperienceDetailView invoked without mode context.")
+    }
+
+    func mediaResolvedMode(_ mode: Mode) -> Mode {
+        guard liveMediaHydrationEnabled else { return mode }
+        switch mode {
+        case let .real(post, user):
+            return .real(Self.mergingMedia(into: post, from: hydratedPosts[post.id]), user)
+        case let .poi(place):
+            return .poi(Self.mergingMedia(into: place, from: hydratedPlaces[place.id]))
+        case .journey:
+            return mode
+        }
+    }
+
+    /// A media download is not a new data source for a card. Preserve its
+    /// author, visibility, text, time, counters and existing visit membership.
+    static func mergingMedia(into post: RealPost, from hydrated: RealPost?) -> RealPost {
+        guard let hydrated, hydrated.id == post.id, hydrated.userId == post.userId else { return post }
+        var result = post
+        let incomingIDs = Set(hydrated.attachments.map(\.id))
+        result.attachments = hydrated.attachments + post.attachments.filter { !incomingIDs.contains($0.id) }
+        return result
+    }
+
+    static func mergingMedia(into place: RatedPOI, from hydrated: RatedPOI?) -> RatedPOI {
+        guard let hydrated, hydrated.id == place.id else { return place }
+        var result = place
+        var newlyAvailableMedia: [RatedPOI.Media] = []
+        result.checkIns = place.checkIns.map { visit in
+            guard let incoming = hydrated.checkIns.first(where: { $0.id == visit.id && $0.userId == visit.userId })
+            else { return visit }
+            var updated = visit
+            let incomingIDs = Set(incoming.media.map(\.id))
+            let existingIDs = Set(visit.media.map(\.id))
+            newlyAvailableMedia += incoming.media.filter { !existingIDs.contains($0.id) }
+            updated.media = incoming.media + visit.media.filter { !incomingIDs.contains($0.id) }
+            return updated
+        }
+        let allowedMedia = result.checkIns.flatMap(\.media)
+        var seen = Set<UUID>()
+        result.media = place.media.map { existing in
+            seen.insert(existing.id)
+            return allowedMedia.first { $0.id == existing.id } ?? existing
+        }
+        result.media += newlyAvailableMedia.filter { seen.insert($0.id).inserted }
+        return result
     }
 
     func expandedContent(using data: ContentData) -> some View {
@@ -44,6 +94,8 @@ extension ExperienceDetailView {
                             commentTarget: item.mode.commentTarget,
                             featuredPOIMedia: browsingPOIMedia(for: item.mode)
                         )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .postPlaceChromePage(postID: item.id)
                         .background(ExperiencePagerVerticalBounceGuard())
                         .tag(item.id)
                     }
@@ -86,6 +138,7 @@ extension ExperienceDetailView {
                                 .collapsedPreviewTap(onCollapsedTap)
                                 .tag(item.id)
                                 .frame(width: size.width, height: size.height, alignment: .top)
+                                .postPlaceChromePage(postID: item.id)
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: .never))
@@ -103,7 +156,9 @@ extension ExperienceDetailView {
                         .frame(width: size.width, height: size.height, alignment: .top)
                 }
             }
-            .padding(.horizontal, usesNeutralPreviewBackground || isClassicPOIMediaPreview
+            // This preview already uses the full measured width. The custom
+            // place overview must not inherit the legacy leftward sheet offset.
+            .padding(.horizontal, usesNeutralPreviewBackground || isClassicPOIMediaPreview || poiVisitorSummary != nil
                 ? 0 : -ExperienceSheetLayout.horizontalInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -130,7 +185,7 @@ extension ExperienceDetailView {
 
     @ViewBuilder
     private func collapsedPreviewContent(for mode: Mode, isPlaybackActive: Bool, viewportHeight: CGFloat) -> some View {
-        if case let .poi(place) = mode,
+        if case let .poi(place) = mediaResolvedMode(mode),
            let media = browsingPOISelection(for: place)?.media {
             FriendStoryPOIPreview(place: place, media: media, isPlaybackActive: isPlaybackActive)
         } else {

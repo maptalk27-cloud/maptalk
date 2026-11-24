@@ -50,7 +50,21 @@ struct BackendCaptionEditingTests {
         let (store, session, directory) = makeStore(fixture)
         defer { finish(store, session) }
         try await store.refresh()
+        let environment = AppEnvironment.connected(to: store)
+        let myMap = UserMapViewModel(environment: environment, dataScope: .privateArchive)
+        let profile = UserProfileViewModel(environment: environment, context: .me)
+        #expect(profile.postActivities.first?.title == "Original caption")
+        var archiveRefreshes = 0
+        var profileRefreshes = 0
+        let archiveSubscription = myMap.$summary.dropFirst().sink { _ in archiveRefreshes += 1 }
+        let profileSubscription = profile.$postActivities.dropFirst().sink { _ in profileRefreshes += 1 }
+        defer { archiveSubscription.cancel(); profileSubscription.cancel() }
         let original = try #require(store.ownedMemories[fixture.record.id])
+        let rowActions = BackendPostActionState(store: store, reference: .reel(original.id))
+        var mutationStates: [Set<UUID>] = []
+        let mutationSubscription = rowActions.$mutatingIDs.sink { mutationStates.append($0) }
+        defer { mutationSubscription.cancel() }
+        #expect(rowActions.memories.first?.caption == "Original caption")
         let saved = try await store.updateCaption(memoryID: original.id, caption: "  New caption  ")
         #expect(saved.caption == "New caption")
         #expect(saved.createdAt == original.createdAt)
@@ -60,7 +74,19 @@ struct BackendCaptionEditingTests {
         #expect(store.feedReels.value.first?.message == "New caption")
         #expect(store.feedRecords.value.first?.caption == "New caption")
         #expect(store.ownPublicReels.first?.message == "New caption")
+        #expect(myMap.reels.first?.message == "New caption")
+        #expect(profile.postActivities.first?.title == "New caption")
+        #expect(archiveRefreshes == 1)
+        #expect(profileRefreshes == 1, "A same-ID caption edit must update cached activities exactly once")
         #expect(store.pendingMemoryMutations.isEmpty)
+        #expect(rowActions.memories.first?.caption == "New caption",
+                "Narrow row observation must retain same-ID caption edits")
+        #expect(mutationStates == [[], [original.id], []],
+                "Edit/delete actions must disable during a mutation and recover afterward")
+        rowActions.bind(store: store, reference: .reel(UUID()))
+        #expect(rowActions.memories.isEmpty, "A reused row must not keep the previous post's actions")
+        rowActions.bind(store: store, reference: .reel(original.id))
+        #expect(rowActions.memories.first?.caption == "New caption")
         #expect(fixture.patchBody == ["caption": "New caption"])
         #expect(fixture.publishCount == 0)
 

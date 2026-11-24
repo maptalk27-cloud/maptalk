@@ -14,8 +14,7 @@ final class ApplePOIRepository: POIRepository {
     private var cache = AppleNearbyPlaceCache()
 
     init(
-        // Keep a small buffer beyond the visible picker radius so the UI can
-        // fill a sparse list without searching an entire neighborhood.
+        // Unsolicited suggestions stay close; explicit search has its own radius.
         searchRadius: CLLocationDistance = POISelectionPolicy.nearbyRadius,
         maximumResults: Int = 30
     ) {
@@ -29,17 +28,12 @@ final class ApplePOIRepository: POIRepository {
 
     func nearResult(_ coordinate: CLLocationCoordinate2D) -> AnyPublisher<POISearchResult, Never> {
         Deferred { [self] in
-            // An airport's directory point can be far from its gates. Only
-            // this explicit category gets the wider query; ordinary shops do not.
-            Publishers.Zip(
-                fetch(.nearby, near: coordinate),
-                fetch(.airports, near: coordinate)
-            )
-            .map { nearby, airports in
+            fetch(near: coordinate)
+            .map { nearby in
                 POISearchResult(
-                    places: Self.candidates(nearby.places + airports.places, near: coordinate,
+                    places: Self.candidates(nearby.places, near: coordinate,
                         nearbyRadius: self.searchRadius, maximumResults: self.maximumResults),
-                    issue: nearby.issue ?? airports.issue)
+                    issue: nearby.issue)
             }
         }
         .eraseToAnyPublisher()
@@ -53,11 +47,21 @@ final class ApplePOIRepository: POIRepository {
     }
 
     func searchResult(_ query: String, near coordinate: CLLocationCoordinate2D) -> AnyPublisher<POISearchResult, Never> {
-        guard let request = Self.namedSearchRequest(query, near: coordinate,
-            radius: max(searchRadius, POISelectionPolicy.airportRadius)) else {
+        let lookupRadius = Self.explicitSearchRadius(configuredRadius: searchRadius)
+        guard let request = Self.namedSearchRequest(query, near: coordinate, radius: lookupRadius) else {
             return Just(POISearchResult(places: [])).eraseToAnyPublisher()
         }
-        return Deferred { [self] in
+        return fetchNamed(request)
+            .map { [self] result in
+                POISearchResult(places: Self.searchCandidates(result.places,
+                    near: coordinate, configuredRadius: searchRadius,
+                    maximumResults: maximumResults, query: query), issue: result.issue)
+            }
+            .eraseToAnyPublisher()
+    }
+
+    private func fetchNamed(_ request: MKLocalSearch.Request) -> AnyPublisher<POISearchResult, Never> {
+        Deferred {
             let search = MKLocalSearch(request: request)
             return Future<POISearchResult, Never> { promise in
                 search.start { response, error in
@@ -65,18 +69,13 @@ final class ApplePOIRepository: POIRepository {
                 }
             }
             .receive(on: DispatchQueue.main)
-            .map { result in
-                POISearchResult(places: Self.candidates(result.places, near: coordinate,
-                    nearbyRadius: self.searchRadius, maximumResults: self.maximumResults,
-                    reservesOneAirport: false), issue: result.issue)
-            }
             .handleEvents(receiveCancel: search.cancel)
         }
         .eraseToAnyPublisher()
     }
 
     static func namedSearchRequest(_ query: String, near coordinate: CLLocationCoordinate2D,
-                                   radius: CLLocationDistance = POISelectionPolicy.airportRadius) -> MKLocalSearch.Request? {
+                                   radius: CLLocationDistance = POISelectionPolicy.searchRadius) -> MKLocalSearch.Request? {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, CLLocationCoordinate2DIsValid(coordinate) else { return nil }
         let request = MKLocalSearch.Request()
@@ -84,38 +83,84 @@ final class ApplePOIRepository: POIRepository {
         request.resultTypes = .pointOfInterest
         request.pointOfInterestFilter = .includingAll
         request.regionPriority = .required
-        // This is only the lookup region. Results still pass through the
-        // same per-place distance policy as nearby suggestions, so a match
-        // never moves the user's GPS or silently allows a remote check-in.
+        // Only a lookup rectangle. The composer supplies current GPS;
+        // exact distance still bounds results independently of the map viewport.
         request.region = MKCoordinateRegion(center: coordinate,
             latitudinalMeters: radius * 2,
             longitudinalMeters: radius * 2)
         return request
     }
 
-    private func fetch(_ kind: AppleNearbyPlaceCache.Query, near coordinate: CLLocationCoordinate2D)
+    static func explicitSearchRadius(configuredRadius: CLLocationDistance) -> CLLocationDistance {
+        max(configuredRadius, POISelectionPolicy.searchRadius)
+    }
+
+    /// POI name search is 500 m around the supplied search origin. Post keeps its
+    /// separately configured 5 km directory scope.
+    static func searchCandidates(_ places: [RatedPOI], near coordinate: CLLocationCoordinate2D,
+                                 configuredRadius: CLLocationDistance = POISelectionPolicy.nearbyRadius,
+                                 maximumResults: Int = 30, query: String = "") -> [RatedPOI] {
+        rankedCandidates(places, near: coordinate,
+            radius: explicitSearchRadius(configuredRadius: configuredRadius),
+            maximumResults: maximumResults, query: query)
+    }
+
+    private func fetch(near coordinate: CLLocationCoordinate2D)
         -> AnyPublisher<POISearchResult, Never> {
-        let radius = kind == .airports ? POISelectionPolicy.airportRadius : searchRadius
+        // A crowded broad response can omit the venue itself. One focused
+        // request gives destinations another chance without widening the GPS
+        // radius or requesting every category separately. Publish one merged
+        // snapshot, not two lists that reshuffle as requests finish.
+        let broad = Self.nearbyRequest(near: coordinate, radius: searchRadius, destinationsOnly: false)
+        let destinations = Self.nearbyRequest(near: coordinate, radius: searchRadius, destinationsOnly: true)
+        return Publishers.Zip(
+            fetchNearby(broad, cacheKey: .nearby, near: coordinate),
+            fetchNearby(destinations, cacheKey: .destinations, near: coordinate)
+        )
+        .map { Self.mergedNearbyResults($0, $1) }
+        .eraseToAnyPublisher()
+    }
+
+    static func nearbyRequest(near coordinate: CLLocationCoordinate2D,
+                              radius: CLLocationDistance, destinationsOnly: Bool) -> MKLocalPointsOfInterestRequest {
         let request = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
-        request.pointOfInterestFilter = kind == .airports
-            ? MKPointOfInterestFilter(including: [.airport]) : .includingAll
-        let search = MKLocalSearch(request: request)
-        return Future<POISearchResult, Never> { promise in
-            search.start { response, error in
-                let result = Self.searchResult(mapItems: response?.mapItems, error: error)
-                let places = result.places
-                    .filter { kind != .airports || $0.poi.directoryKind == .airport }
-                promise(.success(POISearchResult(places: places, issue: result.issue)))
+        request.pointOfInterestFilter = destinationsOnly
+            ? MKPointOfInterestFilter(including: [.hotel, .airport, .landmark])
+            : .includingAll
+        return request
+    }
+
+    static func mergedNearbyResults(_ broad: POISearchResult, _ destinations: POISearchResult) -> POISearchResult {
+        var seen = Set<UUID>()
+        let places = (broad.places + destinations.places).filter { seen.insert($0.id).inserted }
+        return POISearchResult(places: places, issue: broad.issue ?? destinations.issue)
+    }
+
+    private func fetchNearby(_ request: MKLocalPointsOfInterestRequest,
+                             cacheKey: AppleNearbyPlaceCache.Query,
+                             near coordinate: CLLocationCoordinate2D) -> AnyPublisher<POISearchResult, Never> {
+        // Reuse the supplementary lookup across small GPS adjustments. The
+        // merged candidates still undergo an exact current-distance check.
+        if cacheKey == .destinations,
+           let places = cache.freshPlaces(for: cacheKey, near: coordinate, at: .now) {
+            return Just(POISearchResult(places: places)).eraseToAnyPublisher()
+        }
+        return Deferred {
+            let search = MKLocalSearch(request: request)
+            return Future<POISearchResult, Never> { promise in
+                search.start { response, error in
+                    promise(.success(Self.searchResult(mapItems: response?.mapItems, error: error)))
+                }
             }
+            .handleEvents(receiveCancel: search.cancel)
         }
         .receive(on: DispatchQueue.main)
         .map { [weak self] result -> POISearchResult in
             guard let self else { return result }
             let places = cache.resolve(result.issue == nil ? result.places : nil,
-                for: kind, near: coordinate, at: .now)
+                for: cacheKey, near: coordinate, at: .now)
             return POISearchResult(places: places, issue: result.issue)
         }
-        .handleEvents(receiveCancel: search.cancel)
         .eraseToAnyPublisher()
     }
 
@@ -138,31 +183,34 @@ final class ApplePOIRepository: POIRepository {
     /// device's live GPS as the publication anchor, not this directory location.
     static func candidates(_ places: [RatedPOI], near coordinate: CLLocationCoordinate2D,
                            nearbyRadius: CLLocationDistance = POISelectionPolicy.nearbyRadius,
-                           maximumResults: Int = 30,
-                           reservesOneAirport: Bool = true) -> [RatedPOI] {
-        let origin = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                           maximumResults: Int = 30) -> [RatedPOI] {
+        rankedCandidates(places, near: coordinate, radius: nearbyRadius,
+            maximumResults: maximumResults, query: "")
+    }
+
+    private static func rankedCandidates(_ places: [RatedPOI], near coordinate: CLLocationCoordinate2D,
+                                         radius: CLLocationDistance, maximumResults: Int,
+                                         query: String) -> [RatedPOI] {
+        guard CLLocationCoordinate2DIsValid(coordinate) else { return [] }
         var seenIDs = Set<UUID>()
-        let sorted = places.compactMap { place -> (RatedPOI, CLLocationDistance)? in
-            guard seenIDs.insert(place.id).inserted else { return nil }
-            let distance = CLLocation(latitude: place.poi.coordinate.latitude,
-                longitude: place.poi.coordinate.longitude).distance(from: origin)
-            let limit = place.poi.directoryKind == .airport
-                ? max(POISelectionPolicy.airportRadius, nearbyRadius) : nearbyRadius
-            guard distance.isFinite, distance <= limit else { return nil }
-            return (place, distance)
+        let sorted = places.compactMap { place -> (place: RatedPOI, match: Int, score: Int, band: Int)? in
+            guard CLLocationCoordinate2DIsValid(place.poi.coordinate),
+                  !POIRecommendationPolicy.isSupportingFacility(name: place.poi.name,
+                      category: place.poi.category) else { return nil }
+            let distance = POISelectionPolicy.distance(from: coordinate, to: place.poi.coordinate)
+            guard distance.isFinite, distance <= radius,
+                  seenIDs.insert(place.id).inserted else { return nil }
+            return (place,
+                POIRecommendationPolicy.nameMatch(place.poi.name, query: query),
+                POIRecommendationPolicy.score(category: place.poi.category, distanceMeters: distance),
+                POIRecommendationPolicy.distanceBand(distance))
         }.sorted {
-            if $0.1 != $1.1 { return $0.1 < $1.1 }
-            return $0.0.id.uuidString < $1.0.id.uuidString
+            if $0.match != $1.match { return $0.match > $1.match }
+            if $0.score != $1.score { return $0.score > $1.score }
+            if $0.band != $1.band { return $0.band < $1.band }
+            return $0.place.id.uuidString < $1.place.id.uuidString
         }
-        // Name search must retain all matching places. The single airport
-        // slot is only a curation rule for the unsolicited nearby shortlist.
-        guard reservesOneAirport else {
-            return Array(sorted.prefix(max(0, maximumResults))).map(\.0)
-        }
-        let airport = sorted.first { $0.0.poi.directoryKind == .airport }?.0
-        let capacity = max(0, maximumResults - (airport == nil ? 0 : 1))
-        let ordinary = sorted.filter { $0.0.poi.directoryKind != .airport }.prefix(capacity).map(\.0)
-        return maximumResults > 0 ? ordinary + (airport.map { [$0] } ?? []) : []
+        return Array(sorted.prefix(max(0, maximumResults))).map(\.place)
     }
 
     nonisolated static func makeRatedPOI(from mapItem: MKMapItem) -> RatedPOI? {
@@ -260,13 +308,20 @@ final class ApplePOIRepository: POIRepository {
 /// standing still. Never borrow a different location's results or keep them
 /// indefinitely, and treat a successful empty response as authoritative.
 struct AppleNearbyPlaceCache {
-    enum Query: Hashable { case nearby, airports }
+    enum Query: Hashable { case nearby, airports, destinations }
     private struct Entry {
         let coordinate: CLLocationCoordinate2D
         let date: Date
         let places: [RatedPOI]
     }
     private var entries: [Query: Entry] = [:]
+
+    func freshPlaces(for query: Query, near coordinate: CLLocationCoordinate2D, at date: Date) -> [RatedPOI]? {
+        guard let entry = entries[query],
+              (0...60).contains(date.timeIntervalSince(entry.date)),
+              POISelectionPolicy.distance(from: coordinate, to: entry.coordinate) <= 25 else { return nil }
+        return entry.places
+    }
 
     mutating func resolve(_ response: [RatedPOI]?, for query: Query,
                           near coordinate: CLLocationCoordinate2D, at date: Date) -> [RatedPOI] {

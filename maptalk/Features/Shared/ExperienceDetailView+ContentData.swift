@@ -10,7 +10,7 @@ extension RealPost {
 
 extension ExperienceDetailView {
     func contentData(for mode: Mode) -> ContentData {
-        switch mode {
+        switch mediaResolvedMode(mode) {
         case let .real(source, user):
             var real = source
             if let caption = editedCaptions[real.id] { real.message = PostCaption.visibleText(caption) }
@@ -133,7 +133,8 @@ extension ExperienceDetailView {
                     category: rated.poi.category,
                     endorsementBadges: endorsementBadges,
                     directionsDestination: MapDirectionsDestination(name: rated.poi.name,
-                                                                     coordinate: rated.poi.coordinate)
+                                                                     coordinate: rated.poi.coordinate),
+                    placeID: rated.id
                 ),
                 poiStats: POIStatsModel(
                     checkIns: rated.checkInPersonCount,
@@ -221,6 +222,8 @@ extension ExperienceDetailView {
     }
 
     func browsingPOISelection(for ratedPOI: RatedPOI) -> POIStorySelection? {
+        let ratedPOI = liveMediaHydrationEnabled
+            ? Self.mergingMedia(into: ratedPOI, from: hydratedPlaces[ratedPOI.id]) : ratedPOI
         guard ratedPOI.id != poiOverviewID,
               let ownerID = poiBrowsingUserID,
               let visit = ratedPOI.checkInPeople().first(where: { $0.userID == ownerID })?.latest else {
@@ -346,7 +349,7 @@ extension ExperienceDetailView {
                 userId: checkIn.userId,
                 kind: kind,
                 user: userProvider(checkIn.userId),
-                message: endorsementMessage(for: endorsement),
+                message: checkIn.comment ?? endorsementMessage(for: endorsement),
                 badge: nil,
                 timestamp: checkIn.activityDate,
                 replies: [],
@@ -356,7 +359,23 @@ extension ExperienceDetailView {
     }
 
     func poiCommentEngagements(for ratedPOI: RatedPOI) -> [FriendEngagement] {
-        ratedPOI.comments.map { comment in
+        // Authored feedback stays attached to its visible visit. Reuse the
+        // existing notes display without creating an unrelated place comment.
+        let visitNotes: [FriendEngagement] = poiStoryCheckIns(for: ratedPOI).compactMap { visit in
+            guard let text = visit.comment, !text.isEmpty else { return nil }
+            return FriendEngagement(
+                id: visit.id,
+                userId: visit.userId,
+                kind: .comment,
+                user: userProvider(visit.userId),
+                message: text,
+                badge: nil,
+                timestamp: visit.activityDate,
+                replies: [],
+                endorsement: visit.endorsement
+            )
+        }
+        return visitNotes + ratedPOI.comments.map { comment in
             FriendEngagement(
                 id: comment.id,
                 userId: comment.userId,
@@ -388,11 +407,11 @@ extension ExperienceDetailView {
         case .hype:
             return "Loved this spot"
         case .solid:
-            return "Solid vibes"
+            return "Liked this spot"
         case .meh:
-            return "Said it's meh"
+            return "Thought it was okay"
         case .questionable:
-            return "Questioned this place"
+            return "Not for them"
         }
     }
 

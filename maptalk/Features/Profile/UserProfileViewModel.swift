@@ -46,6 +46,7 @@ final class UserProfileViewModel: ObservableObject {
     @Published private(set) var persona: UserMapViewModel.Persona
     @Published private(set) var footprints: [UserMapViewModel.Footprint]
     @Published private(set) var reels: [RealPost]
+    @Published private(set) var postActivities: [HistoryActivity] = []
     @Published private(set) var isRefreshing = false
     @Published private(set) var hasLoadFailure = false
     @Published var issue: String?
@@ -106,17 +107,20 @@ final class UserProfileViewModel: ObservableObject {
         snapshot.mapPins
     }
 
+    func historyActivity(for post: RealPost) -> HistoryActivity {
+        HistoryActivity(
+            id: post.id,
+            kind: .reel(post),
+            title: post.message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "Reel",
+            subtitle: post.locationName?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+                ?? locationLabel(for: post.id, coordinate: post.center),
+            timestamp: post.activityDate,
+            preview: preview(for: post)
+        )
+    }
+
     var historyActivities: [HistoryActivity] {
-        let reelActivities = reels.map { real in
-            HistoryActivity(
-                id: real.id,
-                kind: .reel(real),
-                title: real.message?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "Reel",
-                subtitle: locationLabel(for: real.id, coordinate: real.center),
-                timestamp: real.activityDate,
-                preview: preview(for: real)
-            )
-        }
+        let reelActivities = reels.map { historyActivity(for: $0) }
 
         let poiActivities = footprints.map { footprint in
             HistoryActivity(
@@ -195,7 +199,18 @@ final class UserProfileViewModel: ObservableObject {
         snapshot.$summary.assign(to: &$summary)
         snapshot.$persona.assign(to: &$persona)
         snapshot.$footprints.assign(to: &$footprints)
-        snapshot.$reels.assign(to: &$reels)
+        snapshot.$reels
+            .sink { [weak self] reels in
+                guard let self else { return }
+                self.reels = reels
+                // RealPost equality is identity-only: caption and hydrated
+                // media updates must rebuild these rows even for the same IDs.
+                postActivities = reels.sorted {
+                    if $0.activityDate != $1.activityDate { return $0.activityDate > $1.activityDate }
+                    return $0.id.uuidString < $1.id.uuidString
+                }.map { self.historyActivity(for: $0) }
+            }
+            .store(in: &snapshotCancellables)
         snapshot.$isRefreshing.assign(to: &$isRefreshing)
         snapshot.$hasLoadFailure.assign(to: &$hasLoadFailure)
         snapshot.$issue

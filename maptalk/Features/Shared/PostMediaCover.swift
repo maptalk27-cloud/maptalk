@@ -79,7 +79,7 @@ struct PostMediaCover: View {
         return ZStack {
             Color(.secondarySystemBackground)
             if let url {
-                MapImage(url: url) { phase in
+                MapImage(url: url, thumbnailSize: CGSize(width: width, height: height)) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

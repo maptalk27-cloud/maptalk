@@ -123,11 +123,13 @@ private struct MapTalkActivityCapsule: View {
     let isPOIContributorUnseen: ([String]) -> Bool
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appEnv) private var environment
+    @Environment(\.scenePhase) private var scenePhase
     @State private var scrolledCommentID: UUID?
     @State private var journeyStack: [JourneySelection] = []
 
     private struct JourneySelection {
-        let scope: MapJourneyScope
+        var scope: MapJourneyScope
         var selectedID: UUID?
     }
 
@@ -161,6 +163,18 @@ private struct MapTalkActivityCapsule: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(route.identifier)
+        .task(id: scenePhase == .active ? journeyStack.last?.scope.journey.id : nil) {
+            guard scenePhase == .active, let selectedJourney = journeyStack.last?.scope.journey,
+                  selectedJourney.isPublishedSnapshot, let backend = environment.backend else { return }
+            let id = selectedJourney.id
+            do {
+                try await backend.ensureMedia(for: [id])
+                guard !Task.isCancelled, journeyStack.last?.scope.journey.id == id,
+                      let refreshed = backend.journey(for: id) else { return }
+                journeyStack[journeyStack.count - 1].scope = MapJourneyScope(journey: refreshed,
+                                                                           userProvider: userProvider)
+            } catch { }
+        }
     }
 
     private var postCapsule: some View {
@@ -205,6 +219,7 @@ private struct MapTalkActivityCapsule: View {
                 isPOIContributorUnseen: isPOIContributorUnseen
             )
             .id(journey.scope.journey.id)
+            .environment(\.experienceLiveMediaHydrationEnabled, false)
         } else {
             MapJourneyEmptyCapsule()
         }

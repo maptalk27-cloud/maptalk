@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 import Testing
 @testable import maptalk
 
@@ -6,6 +7,78 @@ import Testing
 struct MapTalkPostEntryDragTests {
     private let canvas = CGSize(width: 390, height: 760)
     private let controls = CGRect(x: 316, y: 480, width: 54, height: 196)
+
+    @Test
+    func idleFloatSettlesAfterTwoCyclesWithoutASnap() {
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        var motion = MapTalkPostEntryFloat(at: start)
+        motion.setRunning(true, at: start)
+
+        #expect(motion.offset(at: start) == 0)
+        #expect(abs(motion.offset(at: start.addingTimeInterval(1.2)) - 2.5) < 0.0001)
+        #expect(abs(motion.offset(at: start.addingTimeInterval(3.6)) + 2.5) < 0.0001)
+        let end = start.addingTimeInterval(MapTalkPostEntryFloat.duration)
+        #expect(abs(motion.offset(at: end.addingTimeInterval(-0.01))) < 0.00001)
+        #expect(motion.offset(at: end) == 0)
+        #expect(motion.isComplete(at: end))
+
+        motion.settle()
+        motion.setRunning(false, at: end)
+        motion.setRunning(true, at: end.addingTimeInterval(60))
+        #expect(motion.isSettled)
+        #expect(motion.offset(at: end.addingTimeInterval(61)) == 0)
+    }
+
+    @Test
+    func pressDragAndBackgroundPauseKeepTheExactFloatPhase() {
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        var motion = MapTalkPostEntryFloat(at: start)
+        motion.setRunning(true, at: start)
+        let pause = start.addingTimeInterval(1.2)
+        let before = motion.offset(at: pause)
+        motion.setRunning(false, at: pause)
+        let resume = pause.addingTimeInterval(3_600)
+
+        #expect(motion.offset(at: resume) == before)
+        #expect(!motion.isComplete(at: resume))
+        motion.setRunning(true, at: resume)
+        #expect(abs(motion.offset(at: resume) - before) < 0.0001)
+        #expect(abs(motion.offset(at: resume.addingTimeInterval(1.2))) < 0.0001)
+    }
+
+    @Test
+    func openingCapturesTheVisibleOffsetAndResetDoesNotMoveTheReturnTarget() {
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let tap = start.addingTimeInterval(1.2)
+        var motion = MapTalkPostEntryFloat(at: start)
+        motion.setRunning(true, at: start)
+        let remembered = CGPoint(x: 210, y: 480)
+        let visible = CGPoint(x: remembered.x, y: remembered.y + motion.offset(at: tap))
+
+        // Match the real button: commit the visible position, then reset the
+        // offset while UIKit opens/returns to that live map source.
+        let saved = visible
+        motion = MapTalkPostEntryFloat(at: tap)
+        #expect(motion.offset(at: tap.addingTimeInterval(20)) == 0)
+        #expect(CGPoint(x: saved.x, y: saved.y + motion.offset(at: tap)) == visible)
+        motion.setRunning(true, at: tap.addingTimeInterval(20))
+        #expect(motion.offset(at: tap.addingTimeInterval(20)) == 0)
+        #expect(!motion.isComplete(at: tap.addingTimeInterval(20)))
+    }
+
+    @Test
+    func floatingHeaderGeometryOnlyChangesWhenTheNativeCardMoves() {
+        let frame = CGRect(x: 10, y: 430, width: 370, height: 400)
+        let first = FriendStoryAccessoryGeometry(cardFrame: frame, cardWidth: 370, containerBottom: 844)
+        let idle = FriendStoryAccessoryGeometry(cardFrame: frame, cardWidth: 370, containerBottom: 844)
+        let dragged = FriendStoryAccessoryGeometry(cardFrame: frame.offsetBy(dx: 0, dy: 1),
+                                                   cardWidth: 370, containerBottom: 844)
+        #expect(first == idle)
+        #expect(dragged != first)
+        #expect(dragged.center.y - first.center.y == 1)
+        #expect(dragged.bounds == first.bounds)
+        #expect(dragged.scale == first.scale)
+    }
 
     @Test
     func temporaryPOIClearanceRestoresDefaultAndDraggedPositions() {

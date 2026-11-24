@@ -6,10 +6,21 @@ private struct BackendSafetyMenuTrailingInsetKey: EnvironmentKey {
     static let defaultValue: CGFloat = 16
 }
 
+private struct ExperienceLiveMediaHydrationEnabledKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
 extension EnvironmentValues {
     var backendSafetyMenuTrailingInset: CGFloat {
         get { self[BackendSafetyMenuTrailingInsetKey.self] }
         set { self[BackendSafetyMenuTrailingInsetKey.self] = newValue }
+    }
+
+    /// Published Bubble children are frozen snapshots, even when a live
+    /// memory happens to have the same ID. Their parent hydrates their bytes.
+    var experienceLiveMediaHydrationEnabled: Bool {
+        get { self[ExperienceLiveMediaHydrationEnabledKey.self] }
+        set { self[ExperienceLiveMediaHydrationEnabledKey.self] = newValue }
     }
 }
 
@@ -96,6 +107,7 @@ struct ExperienceDetailView: View {
         let category: POICategory
         let endorsementBadges: [EndorsementBadge]
         var directionsDestination: MapDirectionsDestination? = nil
+        var placeID: UUID? = nil
     }
 
     struct POIStatsModel {
@@ -169,6 +181,9 @@ struct ExperienceDetailView: View {
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
     @Environment(\.appEnv) private var environment
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.experienceLiveMediaHydrationEnabled) var liveMediaHydrationEnabled
+    @Environment(\.experiencePOIVisitorSummary) var poiVisitorSummary
     @Environment(\.friendStoryPlaybackEnabled) private var parentPlaybackEnabled
     @Environment(\.friendStoryExpectedMedia) var storyExpectedMedia
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
@@ -187,6 +202,8 @@ struct ExperienceDetailView: View {
     @State private var compactPostCardSizes: [PostMediaLayoutReference.Key: CGSize] = [:]
     @State private var measuredCompactPostCardSizes: [PostMediaLayoutReference.Key: CGSize] = [:]
     @State private var postEngagementRequest: PostEngagementRequest?
+    @State var hydratedPosts: [UUID: RealPost] = [:]
+    @State var hydratedPlaces: [UUID: RatedPOI] = [:]
 
     init(
         mode: Mode,
@@ -291,10 +308,58 @@ struct ExperienceDetailView: View {
     }
 
     var body: some View {
-        if usesClassicPostPreview, let context = sequenceContext {
-            classicSequenceContent(context)
-        } else {
-            experienceContent
+        Group {
+            if usesClassicPostPreview, let context = sequenceContext {
+                classicSequenceContent(context)
+            } else {
+                experienceContent
+            }
+        }
+        .task(id: requestedMediaIDs) {
+            let ids = requestedMediaIDs
+            guard !ids.isEmpty, let backend = environment.backend else { return }
+            adoptHydratedMedia(backend.cachedSnapshot(for: ids))
+            do {
+                let snapshot = try await backend.ensureMedia(for: ids)
+                guard !Task.isCancelled else { return }
+                adoptHydratedMedia(snapshot)
+            } catch {
+                // Keep the local card usable offline. Entering the card again
+                // retries its exact media scope; never preload pager neighbors.
+            }
+        }
+    }
+
+    private var requestedMediaIDs: [UUID] {
+        guard liveMediaHydrationEnabled, scenePhase == .active, isMediaPlaybackActive,
+              !(usesClassicPostPreview && sequenceContext != nil) else { return [] }
+        switch sourceMode {
+        case let .real(post, _):
+            return [post.id]
+        case let .poi(place):
+            if let poiStorySelection { return [poiStorySelection.checkIn.id] }
+            if let selection = browsingPOISelection(for: place) { return [selection.checkIn.id] }
+            // An explicitly opened place overview owns only the visits already
+            // passed to it. This must never widen into all backend history.
+            return place.checkIns.map(\.id)
+        case .journey:
+            return []
+        }
+    }
+
+    private func adoptHydratedMedia(_ snapshot: BackendStore.Snapshot) {
+        for post in snapshot.reels { hydratedPosts[post.id] = post }
+        for place in snapshot.pois {
+            if let previous = hydratedPlaces[place.id] {
+                // Different viewed visits of the same place can finish at
+                // different times. Cache media, not an authoritative POI model.
+                var merged = place
+                let incomingIDs = Set(place.checkIns.map(\.id))
+                merged.checkIns += previous.checkIns.filter { !incomingIDs.contains($0.id) }
+                hydratedPlaces[place.id] = merged
+            } else {
+                hydratedPlaces[place.id] = place
+            }
         }
     }
 
@@ -391,6 +456,7 @@ struct ExperienceDetailView: View {
             .environment(\.friendStoryOnMediaReady, nil)
             .environment(\.friendStoryPlaybackEnabled, true)
             .environment(\.friendStoryChildPresentationChanged, nil)
+            .environment(\.postPlaceChromeIDs, [])
         }
         .fullScreenCover(item: $selectedProfileContext) { context in
             NavigationStack {
@@ -403,6 +469,7 @@ struct ExperienceDetailView: View {
             .environment(\.friendStoryOnMediaReady, nil)
             .environment(\.friendStoryPlaybackEnabled, true)
             .environment(\.friendStoryChildPresentationChanged, nil)
+            .environment(\.postPlaceChromeIDs, [])
         }
     }
 
@@ -426,6 +493,8 @@ struct ExperienceDetailView: View {
                 TabView(selection: context.selection) {
                     ForEach(context.pager.items) { item in
                         classicSequencePage(item, context: context)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .postPlaceChromePage(postID: item.id)
                             .tag(item.id)
                     }
                 }

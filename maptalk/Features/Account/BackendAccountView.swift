@@ -448,6 +448,8 @@ final class BackendAccountController: ObservableObject {
             self.environment?.backend?.clearLocalMedia()
             self.pendingStore?.clearLocalMedia()
             self.pendingStore = nil
+            self.environment?.location.stop()
+            LocationServiceImpl.stopBackgroundVisits()
             self.environment = nil
             self.betaAccess = BackendBetaAccess(required: true, status: status)
             self.restoreFailed = false
@@ -718,6 +720,7 @@ final class BackendAccountController: ObservableObject {
         do {
             guard let saved = try sessions.load() else {
                 api.token = nil
+                LocationServiceImpl.stopBackgroundVisits()
                 return
             }
             guard saved.expiresAt > Date() else { throw BackendClientError.unauthorized }
@@ -803,6 +806,7 @@ final class BackendAccountController: ObservableObject {
             self.cancelRecovery()
             self.resume()
         }
+        environment?.location.stop()
         environment = AppEnvironment.connected(to: store)
         pendingStore = nil
         restoreFailed = false
@@ -822,6 +826,8 @@ final class BackendAccountController: ObservableObject {
                     guard operationID == operation, store.isActive else { return }
                     if !access.isActive {
                         store.clearLocalMedia()
+                        environment?.location.stop()
+                        LocationServiceImpl.stopBackgroundVisits()
                         environment = nil
                         betaAccess = access
                         restoreFailed = false
@@ -830,7 +836,9 @@ final class BackendAccountController: ObservableObject {
                 }
                 try sessions.save(.init(user: verifiedUser, token: saved.token, expiresAt: saved.expiresAt))
                 store.resumeVerifiedConnection()
-                try await store.refresh()
+                // Authentication is still checked on every resume. A brief
+                // app switch need not download the same archive again.
+                try await store.refreshIfNeeded()
                 guard operationID == operation, store.isActive else { return }
                 cancelRecovery()
             } catch BackendClientError.unauthorized {
@@ -928,7 +936,7 @@ final class BackendAccountController: ObservableObject {
 
     func signOut(sessionAlreadyRevoked: Bool = false) {
         if !sessionAlreadyRevoked,
-           environment?.backend?.hasPendingSyncWork == true || pendingStore?.hasPendingSyncWork == true {
+           environment?.backend?.hasPendingPublicationSyncWork == true || pendingStore?.hasPendingPublicationSyncWork == true {
             let store = environment?.backend ?? pendingStore
             signOutIssue = store?.pendingPublications.isEmpty == true
                 ? "A deletion is waiting to sync. Connect to the internet before signing out."
@@ -955,8 +963,10 @@ final class BackendAccountController: ObservableObject {
         appleOperation = nil
         let previousAPI = api
         social.signOut()
-        environment?.backend?.clearLocalMedia()
-        pendingStore?.clearLocalMedia()
+        environment?.location.stop()
+        LocationServiceImpl.stopBackgroundVisits()
+        environment?.backend?.clearLocalMedia(preservePendingPOIFeedback: !sessionAlreadyRevoked)
+        pendingStore?.clearLocalMedia(preservePendingPOIFeedback: !sessionAlreadyRevoked)
         pendingStore = nil
         environment = nil
         betaAccess = nil
@@ -989,6 +999,8 @@ final class BackendAccountController: ObservableObject {
         connectionRetryRequested = false
         cancelRecovery()
         environment?.backend?.clearLocalMedia(preservePendingPublications: true)
+        environment?.location.stop()
+        LocationServiceImpl.stopBackgroundVisits()
         environment = nil
         api.token = nil
         betaAccess = nil

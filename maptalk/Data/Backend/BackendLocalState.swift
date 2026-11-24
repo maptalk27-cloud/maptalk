@@ -68,6 +68,19 @@ nonisolated struct BackendLocalState: Codable, Sendable {
     // Server-scoped capability: after one confirmed upgrade, named posts can
     // still enter the durable outbox while offline. Older caches decode safely.
     var supportsPostLocationNames: Bool? = nil
+    var supportsPostLocationIdentity: Bool? = nil
+    var poiCheckInRadiusMeters: Double? = nil
+    // Independent, owner/server-scoped edits; never mutate queued publication inputs.
+    var poiFeedbackQueue: [QueuedPOIFeedback]? = nil
+    var supportsPOIFeedback: Bool? = nil
+}
+
+nonisolated struct QueuedPOIFeedback: Codable, Sendable, Identifiable {
+    let id: UUID
+    let ownerID: UUID
+    let revision: UUID
+    let feedback: BackendPOIFeedback
+    var failure: String? = nil
 }
 
 /// Account- and server-scoped durable metadata. No tokens are stored here.
@@ -170,7 +183,7 @@ nonisolated final class BackendLocalStateDisk: @unchecked Sendable {
     func invalidate(preserving state: BackendLocalState? = nil) {
         lock.withLock {
             active = false
-            if let state, !state.queued.isEmpty {
+            if let state, !state.queued.isEmpty || !(state.poiFeedbackQueue ?? []).isEmpty {
                 if let data = try? JSONEncoder().encode(state) {
                     try? data.write(to: directory.appendingPathComponent("state.json"),
                                     options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])

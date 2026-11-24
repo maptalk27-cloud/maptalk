@@ -82,6 +82,7 @@ struct HomeBubbleContentView: View {
         .fixedPOIChrome(pages: chromePages, selectedID: chromeSelection,
                        showsPageDots: true)
         .ignoresSafeArea(.container, edges: .bottom)
+        .environment(\.experienceLiveMediaHydrationEnabled, false)
         .environment(\.friendStoryPlaybackEnabled,
                      isActive && scenePhase == .active && activeChildPresentations.isEmpty)
         .environment(\.friendStoryChildPresentationChanged, { id, presented in

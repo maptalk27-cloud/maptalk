@@ -94,6 +94,7 @@ struct RatedPOI: Identifiable, Hashable {
         var media: [Media]
         var tag: VisitTag?
         var publishedAt: Date?
+        var comment: String?
         var activityDate: Date { publishedAt ?? createdAt }
 
         init(
@@ -103,7 +104,8 @@ struct RatedPOI: Identifiable, Hashable {
             endorsement: Endorsement? = nil,
             media: [Media] = [],
             tag: VisitTag? = nil,
-            publishedAt: Date? = nil
+            publishedAt: Date? = nil,
+            comment: String? = nil
         ) {
             self.id = id
             self.userId = userId
@@ -112,6 +114,7 @@ struct RatedPOI: Identifiable, Hashable {
             self.media = media
             self.tag = tag
             self.publishedAt = publishedAt
+            self.comment = comment
         }
     }
 
@@ -161,4 +164,22 @@ struct RatedPOI: Identifiable, Hashable {
     var favoritesCount: Int
 
     var id: UUID { poi.id }
+
+    /// An unrated visit does not invent a vote or erase an earlier real rating.
+    /// Count only each person's latest rated visit to this place.
+    mutating func refreshEndorsementSummary() {
+        var seen = Set<UUID>()
+        var summary = EndorsementSummary(hype: 0, solid: 0, meh: 0, questionable: 0)
+        for visit in checkIns.sorted(by: { $0.activityDate == $1.activityDate
+            ? $0.id.uuidString < $1.id.uuidString : $0.activityDate > $1.activityDate }) {
+            guard let endorsement = visit.endorsement, seen.insert(visit.userId).inserted else { continue }
+            switch endorsement {
+            case .hype: summary.hype += 1
+            case .solid: summary.solid += 1
+            case .meh: summary.meh += 1
+            case .questionable: summary.questionable += 1
+            }
+        }
+        endorsements = summary
+    }
 }

@@ -48,6 +48,7 @@ struct CompactRealCard: View {
     @Environment(\.openPostEngagement) private var openPostEngagement
     @Environment(\.postSheetDesign) private var postSheetDesign
     @Environment(\.postCardPalette) private var postCardPalette
+    @Environment(\.postPlaceChromeIDs) private var postPlaceChromeIDs
     @ScaledMetric(relativeTo: .body) private var editorialCaptionLineHeight: CGFloat = 23
     @State private var childPresentationID = UUID()
 
@@ -104,6 +105,7 @@ struct CompactRealCard: View {
                 regularCardContent
             }
         }
+        .postPlaceChromeCard(postID: real.id)
         .onChangeCompat(of: isLightboxPresented) { presented in
             childPresentationChanged?(childPresentationID, presented)
         }
@@ -150,6 +152,7 @@ struct CompactRealCard: View {
                     }
                     postTimestamp.padding(.trailing, 24)
                 }
+                .postStationaryChrome(.header, postID: real.id)
                 .postEditorialRole(.author)
             }
             if !suppressContent {
@@ -167,7 +170,9 @@ struct CompactRealCard: View {
                 }
                 if shouldShowMedia { notebookPostPhotos.postEditorialRole(.photos) }
             }
-            editorialPostActions.postEditorialRole(.actions)
+            editorialPostActions
+                .postStationaryChrome(.footer, postID: real.id)
+                .postEditorialRole(.actions)
         }
         .padding(.horizontal, 24)
         .padding(.top, 18)
@@ -245,6 +250,7 @@ struct CompactRealCard: View {
                     .padding(.trailing, 32)
                     .contentShape(Rectangle())
                 }
+                .postStationaryChrome(.header, postID: real.id)
                 .postEditorialRole(.author)
             }
             if !suppressContent {
@@ -264,7 +270,9 @@ struct CompactRealCard: View {
                     editorialPostPhotos.postEditorialRole(.photos)
                 }
             }
-            editorialPostActions.postEditorialRole(.actions)
+            editorialPostActions
+                .postStationaryChrome(.footer, postID: real.id)
+                .postEditorialRole(.actions)
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
@@ -361,6 +369,7 @@ struct CompactRealCard: View {
                         // quiet corner; leave it free in both states.
                         .padding(.trailing, 36)
                         .frame(minHeight: isPhotoOnly ? avatarSize : nil, alignment: .top)
+                        .postStationaryChrome(.header, postID: real.id)
                         .postContentRole(.header)
                 }
                 if !suppressContent {
@@ -384,20 +393,28 @@ struct CompactRealCard: View {
                         postBubble(capsule)
                     }
                     .frame(height: 44)
+                    .postStationaryChrome(.capsule, postID: real.id)
                     .postContentRole(.capsule)
                 }
 
                 postFooterRow
+                    .postStationaryChrome(.footer, postID: real.id)
                     .postContentRole(.footer)
         }
         return Group {
             if isRefined {
                 readingColumn.overlay(alignment: .topLeading) {
-                    if showHeader { profileButton { avatarView } }
+                    if showHeader {
+                        profileButton { avatarView }
+                            .postStationaryChrome(.avatar, postID: real.id)
+                    }
                 }
             } else {
                 HStack(alignment: .top, spacing: 10) {
-                    if showHeader { profileButton { avatarView } }
+                    if showHeader {
+                        profileButton { avatarView }
+                            .postStationaryChrome(.avatar, postID: real.id)
+                    }
                     readingColumn
                 }
             }
@@ -433,7 +450,7 @@ struct CompactRealCard: View {
     private var postTimestamp: some View {
         Text(real.cardDisplayDate.formatted(.relative(presentation: .named)))
             .font(.caption2)
-            .foregroundStyle(postCardPalette.secondary)
+            .foregroundStyle(usesFixedVideoPostChrome ? .white.opacity(0.7) : postCardPalette.secondary)
             .lineLimit(1)
             .accessibilityIdentifier("experience.real.timestamp.\(real.id.uuidString)")
     }
@@ -462,7 +479,7 @@ struct CompactRealCard: View {
                 .font(.system(size: 13, weight: .medium))
                 .monospacedDigit()
             }
-            .foregroundStyle(postCardPalette.primary.opacity(0.75))
+            .foregroundStyle((usesFixedVideoPostChrome ? Color.white : postCardPalette.primary).opacity(0.75))
             .padding(.horizontal, 10)
             .frame(minWidth: 60, minHeight: 44)
             .contentShape(Rectangle())
@@ -653,6 +670,7 @@ struct CompactRealCard: View {
                 profileButton {
                     avatarView
                 }
+                    .postStationaryChrome(.avatar, postID: real.id)
                     .alignmentGuide(.top) { $0[.top] }
                     .padding(.trailing, 10)
             }
@@ -660,6 +678,7 @@ struct CompactRealCard: View {
             VStack(alignment: .leading, spacing: style == .collapsed ? (usesNeutralAppearance ? 8 : 6) : 12) {
                 if showHeader && isSingleVideoDetail == false {
                     userNameRow
+                        .postStationaryChrome(.header, postID: real.id)
                 }
 
                 if suppressContent == false {
@@ -685,6 +704,7 @@ struct CompactRealCard: View {
                         // attachment surface aligns with the photo, not the footer.
                         .padding(.leading, usesInlineNeutralCapsule ? 8 : 0)
                         .frame(maxWidth: style == .standard ? 280 : nil, alignment: .leading)
+                        .postStationaryChrome(.capsule, postID: real.id)
                     }
                 }
 
@@ -704,12 +724,18 @@ struct CompactRealCard: View {
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 6)
+                    .postStationaryChrome(.capsule, postID: real.id)
                 }
                 if isSingleVideoDetail == false {
-                    if shouldOverlayCapsuleOnSinglePhoto {
+                    if usesFixedVideoPostChrome {
+                        postFooterRow
+                            .postStationaryChrome(.footer, postID: real.id, isOverMedia: true)
+                    } else if shouldOverlayCapsuleOnSinglePhoto {
                         footerRowWithCapsuleOverlay
+                            .postStationaryChrome(.footer, postID: real.id)
                     } else {
                         footerRow
+                            .postStationaryChrome(.footer, postID: real.id)
                     }
                 }
             }
@@ -754,7 +780,8 @@ struct CompactRealCard: View {
     }
 
     private var avatarSize: CGFloat {
-        usesNeutralAppearance ? 36 : (style == .collapsed ? 34 : 40)
+        if postPlaceChromeIDs.contains(real.id) { return 36 }
+        return usesNeutralAppearance ? 36 : (style == .collapsed ? 34 : 40)
     }
 
     private var mediaHeight: CGFloat {
@@ -833,6 +860,10 @@ struct CompactRealCard: View {
 
     private var isSingleVideoDetail: Bool {
         style == .standard && isSingleVideo
+    }
+
+    private var usesFixedVideoPostChrome: Bool {
+        isSingleVideo && postPlaceChromeIDs.contains(real.id)
     }
 
     private var isSingleVideoCollapsed: Bool {
@@ -1098,6 +1129,7 @@ struct CompactRealCard: View {
             HStack(alignment: .top, spacing: 10) {
                 if showHeader {
                     avatarView
+                        .postStationaryChrome(.avatar, postID: real.id, isOverMedia: true)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -1105,6 +1137,7 @@ struct CompactRealCard: View {
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(.white)
                         .accessibilityIdentifier("experience.real.author.\(real.id.uuidString)")
+                        .postStationaryChrome(.header, postID: real.id, isOverMedia: true)
                     if suppressContent == false {
                         contentText
                     }
@@ -1112,12 +1145,21 @@ struct CompactRealCard: View {
             }
 
             Spacer(minLength: 0)
-            footerRow
+            if usesFixedVideoPostChrome {
+                // Grouped videos share the Post action positions and retain
+                // real per-Post engagement actions, rather than a second set
+                // of visual-only video metric pills.
+                postFooterRow
+                    .postStationaryChrome(.footer, postID: real.id, isOverMedia: true)
+            } else {
+                footerRow
+                    .postStationaryChrome(.footer, postID: real.id, isOverMedia: true)
+            }
         }
-        .padding(.top, 12)
+        .padding(.top, usesFixedVideoPostChrome ? 16 : 12)
         .padding(.bottom, 12 + fullBleedVideoBottomPadding)
-        .padding(.leading, singleVideoLeadingInset)
-        .padding(.trailing, singleVideoTrailingInset)
+        .padding(.leading, usesFixedVideoPostChrome ? 18 : singleVideoLeadingInset)
+        .padding(.trailing, usesFixedVideoPostChrome ? 18 : singleVideoTrailingInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .allowsHitTesting(false)
     }
@@ -1135,6 +1177,7 @@ struct CompactRealCard: View {
                 maxVisibleCount: 3,
                 onTap: onCapsuleTap
             )
+            .postStationaryChrome(.capsule, postID: real.id, isOverMedia: true)
             .padding(.leading, singleVideoLeadingInset)
             .padding(.trailing, singleVideoTrailingInset)
             .padding(.bottom, 42 + fullBleedVideoBottomPadding)

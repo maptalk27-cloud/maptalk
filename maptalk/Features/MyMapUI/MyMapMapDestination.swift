@@ -10,6 +10,8 @@ import SwiftUI
 /// time from the shared Journey header.
 struct MyMapMapDestination: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appEnv) private var environment
+    @Environment(\.scenePhase) private var scenePhase
 
     let records: [UserMapRecord]
     let selectedRecord: UserMapRecord
@@ -53,11 +55,12 @@ struct MyMapMapDestination: View {
     var body: some View {
         GeometryReader { geometry in
             Map(position: $cameraPosition, interactionModes: .all) {
-                ForEach(mapRecords) { record in
+                ForEach(mapRecordGroups) { group in
+                    let record = group.representative
                     Annotation("", coordinate: record.coordinate) {
                         Button {
                             selectOnMap(
-                                record,
+                                group.records.first { $0.id == focusedRecord.id } ?? record,
                                 size: geometry.size,
                                 safeAreaBottom: geometry.safeAreaInsets.bottom
                             )
@@ -84,6 +87,7 @@ struct MyMapMapDestination: View {
                 _ = capsulePresentation.didDismiss()
             }) {
                 experienceCapsule
+                    .task(id: publishedBubbleID) { await hydratePublishedBubble() }
                     // Pager selection is intentionally excluded: changing page
                     // must not rebuild the whole capsule mid-swipe.
                     .id(capsulePresentation.contentRevision)
@@ -207,12 +211,13 @@ struct MyMapMapDestination: View {
                 .scaleEffect(isFocused ? 1.28 : 1)
                 .shadow(color: isFocused ? Color.black.opacity(0.3) : .clear, radius: 7, y: 3)
         case let .reel(reel):
-            RealMapThumbnail(
-                real: reel,
-                user: userProvider(reel.userId),
-                size: isFocused ? 46 : 38,
-                isSelected: isFocused
-            )
+            if let group = postPlaceGroups.first(where: { $0.posts.contains { $0.id == reel.id } }) {
+                PostPlaceMapMarker(post: group.latestPost, count: group.count,
+                    isSelected: group.posts.contains { $0.id == focusedRecord.id })
+            } else {
+                RealMapThumbnail(real: reel, user: userProvider(reel.userId),
+                    size: isFocused ? 46 : 38, isSelected: isFocused)
+            }
         case .journey:
             ZStack {
                 MemoryThumbnail(record: record, size: isFocused ? 46 : 40, cornerRadius: 12)
@@ -400,9 +405,28 @@ struct MyMapMapDestination: View {
                 onCollapsedTap: capsulePresentation.expand,
                 journeyProvider: privateJourney(for:),
                 userProvider: userProvider,
-                onJourneyAvatarStackTap: openAttachedJourney
+                onJourneyAvatarStackTap: openAttachedJourney,
+                postPlaceGroups: postPlaceGroups
             )
+            .environment(\.experienceLiveMediaHydrationEnabled,
+                         focusedJourney?.isPublishedSnapshot != true)
         }
+    }
+
+    private var publishedBubbleID: UUID? {
+        guard scenePhase == .active, let journey = focusedJourney,
+              journey.isPublishedSnapshot else { return nil }
+        return journey.id
+    }
+
+    private func hydratePublishedBubble() async {
+        guard let id = publishedBubbleID, let backend = environment.backend else { return }
+        do {
+            try await backend.ensureMedia(for: [id])
+            guard !Task.isCancelled, focusedJourney?.id == id,
+                  let refreshed = backend.journey(for: id) else { return }
+            focusedJourney = refreshed
+        } catch { }
     }
 
     private func openAttachedJourney(_ journey: JourneyPost) {
@@ -450,12 +474,24 @@ struct MyMapMapDestination: View {
         return storyRecords(for: focusedJourney)
     }
 
+    private var mapRecordGroups: [UserMapRecordPlaceGroup] {
+        UserMapRecordPlaceGroup.make(mapRecords, aggregatePosts: focusedJourney == nil)
+    }
+
+    private var postPlaceGroups: [PostPlaceGroup] {
+        guard focusedJourney == nil else { return [] }
+        return PostPlaceGrouping.groups(mapRecords.compactMap {
+            if case let .reel(post) = $0.kind { return post }
+            return nil
+        }, mode: .aggregate)
+    }
+
     private var sequenceItems: [ExperienceDetailView.SequencePager.Item] {
         if let focusedJourney {
             return scope(for: focusedJourney).sequenceItems
         }
 
-        return mapRecords.compactMap { record in
+        return mapRecordGroups.flatMap(\.records).compactMap { record in
             switch record.kind {
             case let .reel(reel):
                 return .init(id: record.id, mode: .real(reel, userProvider(reel.userId)))
@@ -483,8 +519,16 @@ struct MyMapMapDestination: View {
     }
 
     private func selectFromCapsulePager(_ record: UserMapRecord) {
+        let samePlace: Bool = {
+            guard focusedJourney == nil,
+                  case let .reel(previous) = focusedRecord.kind,
+                  case let .reel(next) = record.kind else { return false }
+            return previous.userId == next.userId && PostPlaceGrouping.placeKey(for: previous) != nil
+                && PostPlaceGrouping.placeKey(for: previous) == PostPlaceGrouping.placeKey(for: next)
+        }()
         focusedRecord = record
         reelAlignTrigger &+= 1
+        guard !samePlace else { return }
         let targetRegion = storyRegion(for: record)
 
         if capsulePresentation.isExpanded {

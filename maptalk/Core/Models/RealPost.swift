@@ -98,6 +98,8 @@ struct RealPost: Identifiable, Hashable {
     var expiresAt: Date
     var publishedAt: Date? = nil
     var locationName: String? = nil
+    /// Reusable Post subject identity; never a POI check-in foreign key.
+    var locationID: UUID? = nil
 
     var activityDate: Date { publishedAt ?? createdAt }
 

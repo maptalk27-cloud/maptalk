@@ -99,6 +99,12 @@ enum PreviewData {
 
     private static var locationLabels: [UUID: String] = [:]
 
+    // Seattle Post previews share one landmark, including photo/video/text
+    // variants. Keep the original Post identities, dates and visibility.
+    private static let seattlePostLocationID = uuid(43_500)
+    private static let seattlePostLocationName = "Seattle Waterfront"
+    private static let seattlePostCoordinate = CLLocationCoordinate2D(latitude: 47.6084, longitude: -122.3426)
+
     struct ChengsiMock {
         let user: User
         let pois: [RatedPOI]
@@ -793,10 +799,7 @@ enum PreviewData {
             let post = RealPost(
                 id: uuid(seed),
                 userId: currentUser.id,
-                center: .init(
-                    latitude: 47.608 + Double(index / 5) * 0.001,
-                    longitude: -122.337 + Double(index % 5) * 0.001
-                ),
+                center: seattlePostCoordinate,
                 radiusMeters: 120,
                 message: "[Mock · \(label)]\n西雅图散步，把日常的光影留在这里。",
                 attachments: attachments,
@@ -804,7 +807,8 @@ enum PreviewData {
                 comments: [],
                 visibility: .publicAll,
                 createdAt: createdAt,
-                expiresAt: createdAt.addingTimeInterval(24 * 3600)
+                expiresAt: createdAt.addingTimeInterval(24 * 3600),
+                locationName: seattlePostLocationName, locationID: seattlePostLocationID
             )
             registerLocationLabel("Seattle, Washington, USA", for: post.id)
             posts.append(post)
@@ -837,6 +841,41 @@ enum PreviewData {
         ])
         append(41_021, label: "纯文字", attachments: [])
         append(41_022, label: "1 个视频 · 横屏", attachments: [video(41_022, 0, portrait: false)])
+
+        // Recent visits and a private visit share the landmark of the media
+        // matrix above. Keep the friend's sample after this whole run. Profile
+        // aggregates public visits; MyMap alone also includes the private one.
+        for index in 0..<5 {
+            let createdAt = referenceDate.addingTimeInterval(
+                index == 4 ? -6 * 86_400 : -TimeInterval(index + 1) * 60
+            )
+            let attachments: [RealPost.Attachment] = switch index {
+            case 0: [.init(id: uuid(43_510), kind: .photo(photos[0]))]
+            case 1: [.init(id: uuid(43_511), kind: .video(
+                url: bundledPortraitURL ?? landscapeURL, poster: photos[8]),
+                videoMetadata: portraitMetadata)]
+            case 2: []
+            default: [.init(id: uuid(43_510 + index), kind: .photo(photos[3]))]
+            }
+            let captions = [
+                "[Mock · 同地点 1] 今天的海边，想多停一会儿。",
+                "[Mock · 同地点 2] 把风和声音也留下来。",
+                "[Mock · 同地点 3] 没拍照片，也值得记住的一刻。",
+                "[Mock · 较早的一次] 同一个地方，不同的心情。",
+                "[Mock · 仅自己] 这一条只留在 MyMap。"
+            ]
+            let post = RealPost(
+                id: uuid(43_501 + index), userId: currentUser.id,
+                center: seattlePostCoordinate,
+                radiusMeters: 120, message: captions[index], attachments: attachments,
+                likes: Array(sampleFriends.prefix(index % 3)).map(\.id), comments: [],
+                visibility: index == 4 ? .privateOnly : .publicAll,
+                createdAt: createdAt, expiresAt: referenceDate.addingTimeInterval(86_400),
+                locationName: seattlePostLocationName, locationID: seattlePostLocationID
+            )
+            registerLocationLabel("Seattle, Washington, USA", for: post.id)
+            posts.append(post)
+        }
         return posts
     }
 
@@ -1630,7 +1669,7 @@ enum PreviewData {
             .init(
                 id: uuid(150),
                 userId: currentUser.id,
-                center: .init(latitude: 47.608, longitude: -122.337),
+                center: seattlePostCoordinate,
                 radiusMeters: 520,
                 message: "Capsule test drop near Pike Place neon.",
                 attachments: [
@@ -1642,7 +1681,8 @@ enum PreviewData {
                 comments: [],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-1_800),
-                expiresAt: now.addingTimeInterval(20 * 3600)
+                expiresAt: now.addingTimeInterval(20 * 3600),
+                locationName: seattlePostLocationName, locationID: seattlePostLocationID
             ),
             .init(
                 id: uuid(101),
@@ -2188,6 +2228,17 @@ enum PreviewData {
         let chengsiIds = Set(chengsiPublishedProfile.reels.map(\.id))
         reals.removeAll { chengsiIds.contains($0.id) }
         reals.insert(contentsOf: chengsiPublishedProfile.reels, at: 0)
+        reals.append(.init(
+            id: uuid(43_520), userId: aurora.id,
+            center: seattlePostCoordinate, radiusMeters: 120,
+            message: "[Mock · 朋友同地点] 同一片海，各自的故事。",
+            attachments: [.init(id: uuid(43_521), kind: .photo(URL(string:
+                "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=900&q=60")!))],
+            likes: [], comments: [], visibility: .publicAll,
+            createdAt: now.addingTimeInterval(-30 * 60),
+            expiresAt: now.addingTimeInterval(86_400),
+            locationName: seattlePostLocationName, locationID: seattlePostLocationID
+        ))
         return reals
     }()
 
@@ -3067,7 +3118,7 @@ enum PreviewData {
             .init(
                 id: uuid(4221),
                 userId: chengsi.id,
-                center: .init(latitude: 47.6080, longitude: -122.3370),
+                center: seattlePostCoordinate,
                 radiusMeters: 240,
                 message: "Pike Place neon drift with street jazz.",
                 attachments: [
@@ -3077,12 +3128,13 @@ enum PreviewData {
                 comments: [],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-5_200),
-                expiresAt: now.addingTimeInterval(20 * 3600)
+                expiresAt: now.addingTimeInterval(20 * 3600),
+                locationName: seattlePostLocationName, locationID: seattlePostLocationID
             ),
             .init(
                 id: uuid(4223),
                 userId: chengsi.id,
-                center: .init(latitude: 47.6038, longitude: -122.3301),
+                center: seattlePostCoordinate,
                 radiusMeters: 220,
                 message: "Waterfront glow with ferry horns.",
                 attachments: [
@@ -3092,7 +3144,8 @@ enum PreviewData {
                 comments: [],
                 visibility: .friendsOnly,
                 createdAt: now.addingTimeInterval(-4_900),
-                expiresAt: now.addingTimeInterval(20 * 3600)
+                expiresAt: now.addingTimeInterval(20 * 3600),
+                locationName: seattlePostLocationName, locationID: seattlePostLocationID
             )
         ]
 

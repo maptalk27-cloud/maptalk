@@ -535,7 +535,7 @@ struct RealMapThumbnail: View {
                     }
 
                 if let url = mediaURL {
-                    MapImage(url: url) { phase in
+                    MapImage(url: url, thumbnailSize: CGSize(width: contentSize, height: contentSize)) { phase in
                         switch phase {
                         case let .success(image):
                             image.resizable().scaledToFill()
@@ -567,7 +567,7 @@ struct RealMapThumbnail: View {
     @ViewBuilder
     private var avatarImage: some View {
         if let avatar = user?.avatarURL {
-            MapImage(url: avatar) { phase in
+            MapImage(url: avatar, thumbnailSize: CGSize(width: contentSize, height: contentSize)) { phase in
                 switch phase {
                 case let .success(image):
                     image.resizable().scaledToFill()

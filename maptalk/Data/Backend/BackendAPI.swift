@@ -115,6 +115,8 @@ nonisolated struct BackendMemory: Codable, Sendable {
     // Optional for pre-cluster server responses and durable offline caches.
     var cluster: BackendCluster? = nil
     var locationName: String? = nil
+    var locationId: UUID? = nil
+    var feedback: BackendPOIFeedback? = nil
 
     /// One clock for archive, feed and history; transport completion is not a publication.
     var activityDate: Date { publishedAt ?? createdAt }
@@ -123,6 +125,23 @@ nonisolated struct BackendMemory: Codable, Sendable {
     /// memories. Only their media participates in the parent's hydration.
     var attachedMedia: [BackendMedia] {
         media + (cluster?.members.flatMap(\.media) ?? [])
+    }
+}
+
+/// Separate from publication input: feedback never changes a publish retry hash.
+nonisolated struct BackendPOIFeedback: Codable, Sendable, Equatable {
+    let endorsement: String?
+    let comment: String
+
+    var isEmpty: Bool { endorsement == nil && comment.isEmpty }
+
+    enum CodingKeys: String, CodingKey { case endorsement, comment }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        // Explicit null permits comment-only feedback and clearing a rating.
+        try values.encode(endorsement, forKey: .endorsement)
+        try values.encode(comment, forKey: .comment)
     }
 }
 
@@ -163,6 +182,24 @@ nonisolated struct BackendMemoryInput: Codable, Sendable {
     var capturedAt: String? = nil
     var cluster: BackendClusterInput? = nil
     var locationName: String? = nil
+    var locationId: UUID? = nil
+    // Decode/resend legacy outbox payloads unchanged. New check-ins never set these.
+    var placeVisit: BackendPlaceVisitInput? = nil
+    var photoVisit: BackendPhotoVisitInput? = nil
+    var videoVisit: BackendPhotoVisitInput? = nil
+}
+
+/// Legacy outbox shape only; not used to authorize new check-ins.
+nonisolated struct BackendPhotoVisitInput: Codable, Sendable {
+    let location: BackendCoordinate
+    let capturedAt: String
+}
+
+/// Legacy outbox shape only; preserve pending retry bytes rather than rewriting them.
+nonisolated struct BackendPlaceVisitInput: Codable, Sendable {
+    let location: BackendCoordinate
+    let recordedAt: String
+    let horizontalAccuracy: Double
 }
 
 nonisolated enum BackendCommentTarget: Hashable, Sendable {
@@ -244,10 +281,16 @@ final class BackendAPI {
         try await json("/v1/auth/providers")
     }
 
-    func supportsPostLocationNames() async throws -> Bool {
-        nonisolated struct Health: Decodable, Sendable { let supportsPostLocationNames: Bool? }
-        let health: Health = try await json("/health")
-        return health.supportsPostLocationNames == true
+    nonisolated struct PostLocationCapabilities: Decodable, Sendable {
+        struct Features: Decodable, Sendable { let poiFeedback: Bool? }
+        let supportsPostLocationNames: Bool?
+        let supportsPostLocationIdentity: Bool?
+        var poiCheckInRadiusMeters: Double? = nil
+        var features: Features? = nil
+    }
+
+    func postLocationCapabilities() async throws -> PostLocationCapabilities {
+        try await json("/health")
     }
 
     func socialChallenge(provider: String) async throws -> BackendSocialChallenge {
@@ -498,6 +541,11 @@ final class BackendAPI {
                               body: JSONEncoder().encode(Input(caption: caption)))
     }
 
+    func updatePOIFeedback(id: UUID, feedback: BackendPOIFeedback) async throws -> BackendMemory {
+        try await json("/v1/memories/\(id.uuidString)/feedback", method: "PUT",
+                       body: JSONEncoder().encode(feedback))
+    }
+
     func comments(for target: BackendCommentTarget) async throws -> [BackendComment] {
         nonisolated struct Page: Decodable, Sendable {
             let items: [BackendComment]
@@ -539,7 +587,9 @@ final class BackendAPI {
     private func request(_ path: String, method: String = "GET", body: Data? = nil,
                          contentType: String = "application/json", idempotencyKey: UUID? = nil,
                          timeout: TimeInterval = 30, additionalHeaders: [String: String] = [:]) async throws -> Data {
-        guard path.hasPrefix("/v1/"), !path.hasPrefix("//"),
+        // Capability discovery is the single non-versioned endpoint. Keep the
+        // exception exact and read-only, with all same-origin checks intact.
+        guard (path.hasPrefix("/v1/") || (path == "/health" && method == "GET")), !path.hasPrefix("//"),
               let url = URL(string: path, relativeTo: baseURL)?.absoluteURL,
               url.host == baseURL.host, url.port == baseURL.port, url.scheme == baseURL.scheme else {
             throw BackendClientError.message("Invalid server address.")

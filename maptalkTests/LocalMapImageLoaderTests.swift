@@ -7,6 +7,57 @@ import UniformTypeIdentifiers
 
 @MainActor
 struct LocalMapImageLoaderTests {
+    #if DEBUG
+    @Test
+    func warmThumbnailRequestsSkipImageSourceAndHeaderReadsAcrossViews() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("warm-landscape.png")
+        try writeImage(width: 4_096, height: 1_024, to: url)
+        let loader = LocalMapImageLoader()
+        let first = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 40, height: 40), displayScale: 3)
+        #expect(await loader.sourceOpenCount == 1)
+
+        for size in [40, 42, 40, 42] {
+            let reused = try await loader.image(at: url,
+                thumbnailSize: CGSize(width: CGFloat(size), height: CGFloat(size)), displayScale: 3)
+            #expect(reused === first)
+        }
+        #expect(await loader.sourceOpenCount == 1,
+            "Warm thumbnails in the same output tier must not reopen ImageIO or reread source metadata")
+
+        let detail = try await loader.image(at: url)
+        #expect(detail.image.width == 2_048)
+        #expect(await loader.sourceOpenCount == 2, "A larger uncached tier still needs its own decode")
+        _ = try await loader.image(at: url)
+        _ = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 40, height: 40), displayScale: 3)
+        #expect(await loader.sourceOpenCount == 2)
+    }
+    #endif
+
+    @Test
+    func changedSourceDimensionsInvalidateCachedThumbnailSizing() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("changing-dimensions.png")
+        try writeImage(width: 2_048, height: 1_024, to: url)
+        let loader = LocalMapImageLoader()
+        let target = CGSize(width: 40, height: 80)
+        let first = try await loader.image(at: url, thumbnailSize: target, displayScale: 3)
+        #expect(first.image.width == 512)
+        #expect(first.image.height == 256)
+
+        try writeImage(width: 1_024, height: 2_048, to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_000)],
+                                              ofItemAtPath: url.path)
+        let replacement = try await loader.image(at: url, thumbnailSize: target, displayScale: 3)
+        #expect(replacement !== first)
+        #expect(replacement.image.width == 128)
+        #expect(replacement.image.height == 256, "Replaced files must not retain the previous source aspect ratio")
+    }
+
     @Test
     func largePhotosAreDecodedAtScreenQualityAndReusedAcrossViews() async throws {
         let directory = try temporaryDirectory()
@@ -18,7 +69,87 @@ struct LocalMapImageLoaderTests {
         #expect(first.image.width == 2_048)
         #expect(first.image.height == 512)
         let second = try await loader.image(at: url)
-        #expect(first === second, "Map, list and story should reuse the same decoded pixels")
+        #expect(first === second, "Repeated detail requests should reuse the same decoded pixels")
+    }
+
+    @Test
+    func thumbnailTiersRetainCropQualityWithoutDowngradingDetail() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("landscape.png")
+        try writeImage(width: 4_096, height: 1_024, to: url)
+        let loader = LocalMapImageLoader()
+        let thumbnail = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 40, height: 40), displayScale: 3)
+        #expect(thumbnail.image.width == 512)
+        #expect(thumbnail.image.height == 128, "A square 3x crop needs at least 120px on the short edge")
+
+        let nearbySize = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 42, height: 42), displayScale: 3)
+        #expect(thumbnail === nearbySize, "Similar marker sizes should share a sufficient output tier")
+        let detail = try await loader.image(at: url)
+        #expect(detail !== thumbnail)
+        #expect(detail.image.width == 2_048)
+        #expect(detail.image.height == 512)
+        #expect(thumbnail.image.bytesPerRow * thumbnail.image.height
+            < detail.image.bytesPerRow * detail.image.height / 8)
+        let afterOpeningDetail = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 40, height: 40), displayScale: 3)
+        #expect(afterOpeningDetail === thumbnail, "Opening detail must not replace the small cache tier")
+    }
+
+    @Test
+    func thumbnailSizingUsesDisplayScaleAndRectangularAspectFill() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("portrait.png")
+        try writeImage(width: 1_024, height: 2_048, to: url)
+        let loader = LocalMapImageLoader()
+        let oneX = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 40, height: 80), displayScale: 1)
+        let threeX = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 40, height: 80), displayScale: 3)
+        #expect(oneX.image.width == 64)
+        #expect(oneX.image.height == 128)
+        #expect(threeX.image.width == 128)
+        #expect(threeX.image.height == 256)
+        #expect(threeX !== oneX)
+
+        let wideTile = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 80, height: 40), displayScale: 3)
+        #expect(wideTile.image.width == 256)
+        #expect(wideTile.image.height == 512, "A wide tile must retain 240px across the portrait's short edge")
+    }
+
+    @Test
+    func rotatedThumbnailKeepsItsOrientationAndEnoughPixelsForTheCrop() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("rotated.jpg")
+        try writeImage(width: 2_048, height: 1_024, to: url, orientation: 6)
+        let loader = LocalMapImageLoader()
+        let thumbnail = try await loader.image(at: url,
+            thumbnailSize: CGSize(width: 40, height: 80), displayScale: 3)
+        #expect(thumbnail.image.width == 128)
+        #expect(thumbnail.image.height == 256)
+    }
+
+    @Test
+    func differentURLsNeverReuseOneAnothersPixels() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstURL = directory.appendingPathComponent("first.png")
+        let secondURL = directory.appendingPathComponent("second.png")
+        try writeImage(width: 512, height: 256, to: firstURL)
+        try writeImage(width: 256, height: 512, to: secondURL)
+        let loader = LocalMapImageLoader()
+        let first = try await loader.image(at: firstURL, thumbnailSize: CGSize(width: 32, height: 32))
+        let second = try await loader.image(at: secondURL, thumbnailSize: CGSize(width: 32, height: 32))
+        #expect(first !== second)
+        #expect(first.image.width == 64)
+        #expect(first.image.height == 32)
+        #expect(second.image.width == 32)
+        #expect(second.image.height == 64)
     }
 
     @Test
@@ -29,6 +160,7 @@ struct LocalMapImageLoaderTests {
         try writeImage(width: 40, height: 20, to: url)
         let loader = LocalMapImageLoader()
         let first = try await loader.image(at: url)
+        let firstThumbnail = try await loader.image(at: url, thumbnailSize: CGSize(width: 10, height: 10))
         try writeImage(width: 20, height: 40, to: url)
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_000)],
                                               ofItemAtPath: url.path)
@@ -36,6 +168,10 @@ struct LocalMapImageLoaderTests {
         #expect(first !== replacement)
         #expect(replacement.image.width == 20)
         #expect(replacement.image.height == 40)
+        let replacementThumbnail = try await loader.image(at: url, thumbnailSize: CGSize(width: 10, height: 10))
+        #expect(firstThumbnail !== replacementThumbnail)
+        #expect(replacementThumbnail.image.width == 20)
+        #expect(replacementThumbnail.image.height == 40)
         try FileManager.default.removeItem(at: url)
         do {
             _ = try await loader.image(at: url)
@@ -43,6 +179,32 @@ struct LocalMapImageLoaderTests {
         } catch {
             #expect(error is CocoaError)
         }
+        do {
+            _ = try await loader.image(at: url, thumbnailSize: CGSize(width: 10, height: 10))
+            Issue.record("Sign-out deletion must also invalidate all thumbnail tiers")
+        } catch {
+            #expect(error is CocoaError)
+        }
+    }
+
+    @Test
+    func replacingAFileWithPreservedDateAndSizeInvalidatesCachedThumbnails() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("same-path.png")
+        let replacementURL = directory.appendingPathComponent("replacement.png")
+        try writeImage(width: 512, height: 256, to: url)
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let modified = try #require(attributes[.modificationDate] as? Date)
+        let loader = LocalMapImageLoader()
+        let first = try await loader.image(at: url, thumbnailSize: CGSize(width: 32, height: 32))
+
+        try FileManager.default.copyItem(at: url, to: replacementURL)
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: replacementURL.path)
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: replacementURL, to: url)
+        let second = try await loader.image(at: url, thumbnailSize: CGSize(width: 32, height: 32))
+        #expect(first !== second, "An atomic replacement has a new file identity even if date and size match")
     }
 
     @Test
@@ -83,15 +245,16 @@ struct LocalMapImageLoaderTests {
         return directory
     }
 
-    private func writeImage(width: Int, height: Int, to url: URL) throws {
+    private func writeImage(width: Int, height: Int, to url: URL, orientation: Int = 1) throws {
         let context = try #require(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
             bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.setFillColor(CGColor(red: 0.2, green: 0.6, blue: 0.8, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
         let image = try #require(context.makeImage())
-        let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
-        CGImageDestinationAddImage(destination, image, nil)
+        let type = url.pathExtension == "jpg" ? UTType.jpeg : UTType.png
+        let destination = try #require(CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, [kCGImagePropertyOrientation: orientation] as CFDictionary)
         #expect(CGImageDestinationFinalize(destination))
     }
 }

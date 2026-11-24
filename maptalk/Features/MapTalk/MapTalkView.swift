@@ -59,6 +59,8 @@ struct MapTalkView: View {
     @State private var pendingViewedStoryKey: String?
     @State private var publishDestination: MapTalkPublishDestination?
     @State private var queuedPublishDestination: MapTalkPublishDestination?
+    @State private var queuedPlaceFeedback: SavedPlaceFeedback?
+    @State private var savedPlaceFeedback: SavedPlaceFeedback?
     @State private var publishAcknowledgement: String?
     @State private var publishAcknowledgementID = UUID()
     @State private var isActivityPresented = false
@@ -75,6 +77,12 @@ struct MapTalkView: View {
     private let isTabActive: Bool
     private let profileBrowsingMode: ProfileMapBrowsingMode
 
+    private struct SavedPlaceFeedback {
+        let memoryID: UUID
+        let placeName: String
+        let audience: MapPublishAudience
+    }
+
     private var mapWorkEnabled: Bool { isTabActive && scenePhase == .active }
 
     init(viewModel: @autoclosure @escaping () -> MapTalkViewModel,
@@ -87,6 +95,42 @@ struct MapTalkView: View {
     }
 
     var body: some View {
+        ZStack {
+            mapContent
+                // Typing in the floating prompt must not resize/refocus the map.
+                .ignoresSafeArea(.keyboard)
+                .accessibilityHidden(savedPlaceFeedback != nil)
+            feedbackOverlay
+        }
+    }
+
+    @ViewBuilder
+    private var feedbackOverlay: some View {
+        ZStack {
+            if let feedback = savedPlaceFeedback {
+                MapTalkPOIFeedbackOverlay(
+                    placeName: feedback.placeName,
+                    audience: feedback.audience,
+                    onSkip: { savedPlaceFeedback = nil },
+                    onSave: { endorsement, comment in
+                        if let backend = environment.backend {
+                            try await backend.savePOIFeedback(memoryID: feedback.memoryID,
+                                endorsement: endorsement, comment: comment)
+                        } else if !environment.myMapArchive.updatePOIFeedback(
+                            checkInID: feedback.memoryID, endorsement: endorsement, comment: comment) {
+                            throw BackendClientError.message("This check-in is no longer available.")
+                        }
+                        savedPlaceFeedback = nil
+                    }
+                )
+                .id(feedback.memoryID)
+                .transition(.opacity)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: savedPlaceFeedback?.memoryID)
+    }
+
+    private var mapContent: some View {
         GeometryReader { geometry in
             let journeyNamespace = focusedJourneyHeader != nil ? heroNamespace : nil
             let journeyStoryItems: (JourneyPost) -> [RealStoriesRow.StoryItem] = { journey in
@@ -129,16 +173,35 @@ struct MapTalkView: View {
             let renderedJourney = focusedJourneyHeader ?? nestedStoryJourney
 
             let storyItems = focusedJourneyHeader == nil ? baseStoryItems : focusedStoryItems
+            let profilePlaceGroups = viewModel.isUserScope && focusedJourneyHeader == nil
+                ? PostPlaceGrouping.groups(storyItems.compactMap {
+                    if case let .real(post) = $0.source { return post }
+                    return nil
+                }, mode: .aggregate) : []
+            let railItems = profileRailItems(storyItems, groups: profilePlaceGroups)
+            let railSelection = profilePlaceGroups.first { group in
+                group.posts.contains { $0.id == selectedStoryId }
+            }?.posts.first?.id ?? selectedStoryId
+            let currentPostPlaceGroup: PostPlaceGroup? = {
+                guard isBrowsingPostPreview, friendStoryNavigation.routes.isEmpty,
+                      let session = friendStoryNavigation.session else { return nil }
+                return PostPlaceGrouping.groups(session.pagesInPostOrder.compactMap {
+                    if case let .reel(post) = $0.content { return post }
+                    return nil
+                }, mode: .consecutive).first { group in
+                    group.posts.contains { $0.id == session.currentPage?.memoryID }
+                }
+            }()
             let mapRatedPOIs = viewModel.mapRenderPOIs(
                 retaining: selectedStoryId,
                 selectedMapPOI: selectedStandalonePOI
             )
-            // Home Posts have their own feed entry, not a second set of map
-            // markers. Profile maps and an explicitly opened Bubble keep theirs.
+            // Home shows only the currently browsed Post stop. It never adds
+            // the whole historical Posts feed to the map.
             let mapReels = viewModel.isUserScope ? viewModel.mapRenderReels(
                 retaining: selectedStoryId,
                 selectedMapReel: selectedStandaloneReel
-            ) : []
+            ) : currentPostPlaceGroup?.posts ?? []
             let friendFootprintTopExclusion = MapTalkTopChromeLayout.height(
                 safeAreaTop: geometry.safeAreaInsets.top,
                 showsStories: usesFriendStories && focusedJourneyHeader == nil
@@ -353,6 +416,14 @@ struct MapTalkView: View {
                 switch item.source {
                 case let .real(real):
                     let previousSelection = selectedRealId
+                    let previousPost = storyItems.compactMap { item -> RealPost? in
+                        if case let .real(post) = item.source, post.id == previousSelection { return post }
+                        return nil
+                    }.first
+                    let samePlace = focusedJourneyHeader == nil && (previousPost.map {
+                        $0.userId == real.userId && PostPlaceGrouping.placeKey(for: $0) != nil
+                            && PostPlaceGrouping.placeKey(for: $0) == PostPlaceGrouping.placeKey(for: real)
+                    } ?? false)
                     selectedRealId = real.id
                     if let overrideCause {
                         pendingRegionCause = overrideCause
@@ -363,7 +434,7 @@ struct MapTalkView: View {
                     } else {
                         pendingRegionCause = .real
                     }
-                    if shouldFocus {
+                    if shouldFocus && !samePlace {
                         viewModel.focus(on: real)
                     }
                 case let .poi(group):
@@ -602,8 +673,12 @@ struct MapTalkView: View {
                                         if shouldAnimateSelection {
                                             selectStoryItem(item, false, true, nil)
                                         } else {
+                                            let staysAtSamePlace = profilePlaceGroups.contains { group in
+                                                group.posts.contains { $0.id == selectedStoryId }
+                                                    && group.posts.contains { $0.id == newValue }
+                                            }
                                             selectStoryItem(item, false, false, .other)
-                                            if let region = region(for: item) {
+                                            if !staysAtSamePlace, let region = region(for: item) {
                                                 currentRegion = region
                                                 cameraPosition = .region(region)
                                             }
@@ -628,7 +703,8 @@ struct MapTalkView: View {
                                         handleJourneyTap(journey, true, focusedJourneyHeader)
                                     },
                                     onPOIContributorViewed: markStoryReadKeysViewed,
-                                    isPOIContributorUnseen: isPOIContributorUnseen
+                                    isPOIContributorUnseen: isPOIContributorUnseen,
+                                    postPlaceGroups: profilePlaceGroups
                                 )
                                 .id(nonce)
                             )
@@ -693,6 +769,7 @@ struct MapTalkView: View {
                     .id(contentIdentity)
                     .environment(\.canControlCardMotion, isCurrent)
                     .environment(\.friendStoryPlaybackEnabled, mapWorkEnabled)
+                    .environment(\.experienceLiveMediaHydrationEnabled, focusedJourneyHeader == nil)
                     .environment(\.backendSafetyMenuTrailingInset, profilePlacePreview == nil ? 16 : 66)
                     .modifier(MapTalkScopedSheetChrome(isProfile: viewModel.isUserScope,
                                                      profileMotion: profileCardMotion,
@@ -833,6 +910,11 @@ struct MapTalkView: View {
                             isRealUnseen: isRealUnseen,
                             isPOIUnseen: isPOIUnseen,
                             onTapReal: { real in
+                                if !viewModel.isUserScope, let currentPostPlaceGroup,
+                                   currentPostPlaceGroup.posts.contains(where: { $0.id == real.id }) {
+                                    experiencePresentation.collapseToCompact()
+                                    return
+                                }
                                 cardPresentation.perform(in: .personStory) {
                                     if isProfilePostBrowsing, focusedJourneyHeader == nil {
                                         profilePlacePreview = nil
@@ -893,7 +975,11 @@ struct MapTalkView: View {
                                 }
                             },
                             showsSelectedReelRangeOnly: usesFriendStories && focusedJourneyHeader == nil,
-                            poiTransitionNamespace: cardEntryTransitionNamespace
+                            poiTransitionNamespace: cardEntryTransitionNamespace,
+                            postPlaceGroups: renderedJourney == nil
+                                ? (viewModel.isUserScope
+                                    ? PostPlaceGrouping.groups(mapReels, mode: .aggregate)
+                                    : currentPostPlaceGroup.map { [$0] }) : nil
                         )
                     }
                     .mapStyle(mapLayer.mapStyle)
@@ -1073,8 +1159,8 @@ struct MapTalkView: View {
                         }
                     } else if storyItems.isEmpty == false {
                         RealStoriesRow(
-                            items: storyItems,
-                            selectedId: selectedStoryId,
+                            items: railItems,
+                            selectedId: railSelection,
                             onSelectReal: { real in
                                 guard let item = storyItemForReal(real) else { return }
                                 cardPresentation.perform(in: .personStory) {
@@ -1139,6 +1225,7 @@ struct MapTalkView: View {
                 if hasPostPreviewEntry {
                     MapTalkPostCoverEntry(post: previewPost,
                         isResuming: postPreviewResumePageID != nil,
+                        isVisible: showsPostPreviewEntry,
                         isActive: postSurfaceMounted,
                         isReturning: postSurfaceReturning,
                         needsCardClearance: cardPresentation.mountedFlow == .personStory
@@ -1159,6 +1246,7 @@ struct MapTalkView: View {
                     }
                     // Keep its placement/float state and zoom anchor alive when
                     // covered by an expanded POI, a publisher or another modal.
+                    // Visibility also pauses its timeline without unmounting it.
                     .opacity(showsPostPreviewEntry || postSurfaceMounted ? 1 : 0)
                     .allowsHitTesting(showsPostPreviewEntry)
                     .accessibilityHidden(!showsPostPreviewEntry)
@@ -1231,7 +1319,7 @@ struct MapTalkView: View {
                 sheetContent: experienceSheet(cardPresentation.activeFlow, cardPresentation.current),
                 onDismiss: { finishExperienceSheet(cardPresentation.activeFlow) }))
             .overlay(alignment: .top) {
-                if let publishAcknowledgement {
+                if let publishAcknowledgement, savedPlaceFeedback == nil {
                     Label(publishAcknowledgement, systemImage: "checkmark.circle.fill")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.white)
@@ -1248,17 +1336,21 @@ struct MapTalkView: View {
                 do { try await Task.sleep(for: .seconds(4)) } catch { return }
                 publishAcknowledgement = nil
             }
-            .sheet(item: $publishDestination) { destination in
+            .sheet(item: $publishDestination, onDismiss: {
+                viewModel.setPublishingLocationActive(false)
+                // Finish closing the composer, then fade in the small glass
+                // prompt. It is not another sheet or a changing sheet detent.
+                savedPlaceFeedback = queuedPlaceFeedback
+                queuedPlaceFeedback = nil
+            }) { destination in
                 MapTalkPublishComposer(
                     destination: destination,
-                    nearbyPlaces: viewModel.publishableLiveLocation.map {
+                    nearbyPlaces: destination == .place ? viewModel.publishableLiveLocation.map {
                         viewModel.nearbyPlaceOptions(near: $0)
-                    } ?? [],
+                    } ?? [] : [],
                     isLoadingNearbyPlaces: viewModel.isLoadingNearbyPlaces,
                     nearbyPlaceIssue: viewModel.nearbyPlaceIssue,
-                    postLocationChoices: viewModel.publishableLiveLocation.map {
-                        viewModel.postLocationChoices(near: $0)
-                    } ?? [],
+                    postLocationLibrary: viewModel.postLocationLibrary,
                     liveLocationKey: viewModel.publishableLiveLocation.map {
                         String(format: "%.3f,%.3f", $0.coordinate.latitude, $0.coordinate.longitude)
                     } ?? "unavailable",
@@ -1281,8 +1373,7 @@ struct MapTalkView: View {
                         )
                     },
                     onSearchNearbyPlaces: searchNearbyPlaces,
-                    onRetryNearbyPlaces: { viewModel.refreshNearbyPlaces() },
-                    onSearchPostLocations: viewModel.searchPostLocations
+                    onRetryNearbyPlaces: { viewModel.refreshNearbyPlaces() }
                 )
                 .presentationDetents([.fraction(0.84)])
                 .presentationDragIndicator(.hidden)
@@ -1390,7 +1481,14 @@ struct MapTalkView: View {
                     reconcileFriendStories(geometry: geometry)
                 }
             }
-            .onDisappear { friendFootprintLayoutScheduler.cancel() }
+            .onChangeCompat(of: publishDestination) { destination in
+                viewModel.setPublishingLocationActive(destination != nil)
+            }
+            .onDisappear {
+                friendFootprintLayoutScheduler.cancel()
+                viewModel.setPublishingLocationActive(false)
+                viewModel.setMapActivity(false)
+            }
             .onChangeCompat(of: isTabActive) { active in
                 updateMapActivity()
                 if active && scenePhase == .active {
@@ -1457,6 +1555,18 @@ struct MapTalkView: View {
                     return
                 }
                 dismissWithdrawnPreview()
+            }
+            .task(id: mapWorkEnabled ? focusedJourneyHeader?.id : nil) {
+                guard mapWorkEnabled, let id = focusedJourneyHeader?.id,
+                      let backend = environment.backend else { return }
+                do {
+                    // A published Bubble reads its authorized frozen parent,
+                    // never the current private versions of its child records.
+                    try await backend.ensureMedia(for: [id])
+                } catch { }
+                guard !Task.isCancelled, focusedJourneyHeader?.id == id,
+                      let journey = backend.journey(for: id, publicOnly: true) else { return }
+                focusedJourneyHeader = journey
             }
             .onChangeCompat(of: focusedJourneyHeader?.id) { identifier in
                 if identifier != nil {
@@ -1565,11 +1675,31 @@ private extension MapTalkView {
     /// View Map explores all public memories; a Post row stays in Post history.
     /// The rail, pager and compact-card height resolve from the same scope.
     var rootStoryItems: [RealStoriesRow.StoryItem] {
-        guard isProfilePostBrowsing else { return viewModel.activeFeedItems }
-        return viewModel.activeFeedItems.filter {
+        let items = viewModel.activeFeedItems.filter {
+            if !isProfilePostBrowsing { return true }
             if case .real = $0.source { return true }
             return false
         }
+        guard viewModel.isUserScope else { return items }
+        let groups = PostPlaceGrouping.groups(items.compactMap {
+            if case let .real(post) = $0.source { return post }
+            return nil
+        }, mode: .aggregate)
+        let byPost = Dictionary(groups.flatMap { group in group.posts.map { ($0.id, group) } },
+                                uniquingKeysWith: { first, _ in first })
+        let byID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var emitted = Set<String>()
+        return items.flatMap { item -> [RealStoriesRow.StoryItem] in
+            guard case .real = item.source, let group = byPost[item.id] else { return [item] }
+            guard emitted.insert(group.id).inserted else { return [] }
+            return group.posts.compactMap { byID[$0.id] }
+        }
+    }
+
+    func profileRailItems(_ items: [RealStoriesRow.StoryItem], groups: [PostPlaceGroup]) -> [RealStoriesRow.StoryItem] {
+        guard !groups.isEmpty else { return items }
+        let hidden = Set(groups.flatMap { $0.posts.dropFirst().map(\.id) })
+        return items.filter { !hidden.contains($0.id) }
     }
 
     var profileShowsPostCard: Bool {
@@ -1621,6 +1751,7 @@ private extension MapTalkView {
 
     func updateMapActivity() {
         viewModel.setMapActivity(mapWorkEnabled)
+        viewModel.setPublishingLocationActive(mapWorkEnabled && publishDestination != nil)
         guard !mapWorkEnabled else { return }
         friendFootprintLayoutScheduler.cancel()
         // Finish at the selected post while offscreen, without animating or
@@ -2067,11 +2198,12 @@ private extension MapTalkView {
             }
             // GPS can change while Apple's request is in flight. Revalidate
             // every candidate against the current fix before displaying it.
-            let options = viewModel.nearbyPlaceOptions(near: currentLocation, matching: places)
+            let options = viewModel.nearbyPlaceOptions(near: currentLocation,
+                withinMeters: POISelectionPolicy.searchRadius, matching: places)
             let matchingOptions = options.filter { option in
-                matchingIDs.contains(option.id) || option.place.poi.name.localizedStandardContains(query)
+                query.isEmpty || matchingIDs.contains(option.id) || option.place.poi.name.localizedStandardContains(query)
             }
-            return .init(options: matchingOptions, issue: result.issue)
+            return .init(options: MapTalkNearbyPlaceOption.ranked(matchingOptions, query: query), issue: result.issue)
         }
         return .init(options: [], issue: .temporarilyUnavailable)
     }
@@ -2312,19 +2444,23 @@ private extension MapTalkView {
         destination: MapTalkPublishDestination,
         requestID: UUID
     ) async throws {
-        // POI stays anchored to current GPS. Only an explicit Post choice can
-        // replace that coordinate; browsing the map never chooses it for you.
-        guard let liveLocation = viewModel.publishLocation(for: destination) else {
-            environment.location.requestWhenInUse()
-            throw BackendClientError.message("Finding your current location. Try again in a moment.")
-        }
+        // POI is a live check-in. A Post can revisit an owned historical place
+        // or a visited area, without pretending the person is there right now.
         let location: CLLocation
-        if case let .reel(post) = draft, let selected = post.location {
-            guard let chosenLocation = PostLocationPolicy.location(for: selected, near: liveLocation) else {
-                throw BackendClientError.message("This location is now more than 5 km away. Choose a nearby location.")
+        switch draft {
+        case let .reel(post):
+            guard let selected = post.location else {
+                throw BackendClientError.message("Choose a place for this post.")
+            }
+            guard let chosenLocation = viewModel.postPublicationLocation(for: selected) else {
+                throw BackendClientError.message("Choose one of your post locations, or a point within 5 km of you or a place you've checked in.")
             }
             location = chosenLocation
-        } else {
+        case .place:
+            guard let liveLocation = viewModel.publishLocation(for: destination) else {
+                environment.location.requestWhenInUse()
+                throw BackendClientError.message("Finding your current location. Try again in a moment.")
+            }
             location = liveLocation
         }
 
@@ -2342,7 +2478,8 @@ private extension MapTalkView {
                 guard let place = viewModel.publishPlace(
                     placeDraft,
                     at: location,
-                    audience: audience
+                    audience: audience,
+                    checkInID: requestID
                 ) else {
                     throw BackendClientError.message("This place is no longer nearby. Choose a place at your current location.")
                 }
@@ -2389,6 +2526,13 @@ private extension MapTalkView {
         publishAcknowledgementID = UUID()
         pendingRegionCause = .other
         reelAlignTrigger += 1
+        if case let .poi(place) = result {
+            // The visit is already durable. Show the optional glass prompt
+            // only after the publishing sheet has actually dismissed.
+            publishAcknowledgement = nil
+            queuedPlaceFeedback = SavedPlaceFeedback(memoryID: requestID,
+                placeName: place.poi.name, audience: audience)
+        }
         publishDestination = nil
         if environment.backend != nil, visiblePublicly {
             viewModel.searchMap(in: currentRegion ?? viewModel.region)
@@ -2396,11 +2540,11 @@ private extension MapTalkView {
     }
 
     func requestPublish(_ destination: MapTalkPublishDestination) {
-        guard publishDestination == nil else { return }
+        guard publishDestination == nil, queuedPlaceFeedback == nil, savedPlaceFeedback == nil else { return }
         if !cardPresentation.isMounted { finishFriendStory(restoreMap: false) }
         flightController.cancelActiveTransition()
 
-        viewModel.refreshNearbyPlaces()
+        if destination == .place { viewModel.refreshNearbyPlaces() }
 
         if viewModel.publishLocation(for: destination) == nil {
             // Both publishers open immediately. Location and nearby POIs can
@@ -2438,10 +2582,10 @@ private extension MapTalkView {
         }
     }
 
-    /// Browsing can look anywhere, but the publishing surface always opens
-    /// over the one place it represents: the device's live location. This is
-    /// deliberately an immediate recenter rather than a cinematic map flight.
+    /// Only a live POI check-in needs to recenter on the current GPS. A Post's
+    /// subject can be a historical place and is chosen inside its own picker.
     func centerMapOnLivePublishLocation(for destination: MapTalkPublishDestination) {
+        guard destination == .place else { return }
         guard let coordinate = viewModel.publishLocation(for: destination)?.coordinate else { return }
         let region = MKCoordinateRegion(
             center: coordinate,
@@ -2460,7 +2604,7 @@ private extension MapTalkView {
     func presentQueuedPublisherIfNeeded() {
         guard let destination = queuedPublishDestination else { return }
         queuedPublishDestination = nil
-        viewModel.refreshNearbyPlaces()
+        if destination == .place { viewModel.refreshNearbyPlaces() }
 
         if viewModel.publishLocation(for: destination) == nil {
             environment.location.requestWhenInUse()

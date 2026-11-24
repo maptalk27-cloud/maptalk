@@ -10,6 +10,45 @@ import Testing
 struct BackendPublishRetryTests {
     private let originalLocation = CLLocation(latitude: 37.3688, longitude: -122.0363)
 
+    @Test(arguments: [false, true])
+    func postLocationIdentityIsSentOnlyAfterExplicitServerCapability(supported: Bool) async throws {
+        let fixture = PublishRetryFixture(outcomes: [.success], supportsLocationIdentity: supported)
+        let (store, session) = makeStore(fixture)
+        defer { finish(store, session) }
+        let locationID = UUID()
+        let selection = MapTalkPostLocationSelection(coordinate: originalLocation.coordinate,
+            title: "Chosen place", locationID: locationID)
+        let result = try await store.publish(.reel(.init(text: "A Post", attachments: [], bubbleSource: nil,
+            location: selection)), audience: .livePublic, location: originalLocation, requestID: UUID())
+        #expect(fixture.inputs.first?.locationId == (supported ? locationID : nil))
+        guard case let .reel(post) = result else { Issue.record("Expected a Post"); return }
+        #expect(post.locationID == (supported ? locationID : nil))
+    }
+
+    @Test
+    func learningLocationCapabilityDoesNotChangeAnUncertainLegacyRequest() async throws {
+        let fixture = PublishRetryFixture(outcomes: [.networkFailure, .success], supportsLocationIdentity: false)
+        let (store, session) = makeStore(fixture)
+        defer { finish(store, session) }
+        let selection = MapTalkPostLocationSelection(coordinate: originalLocation.coordinate,
+            title: "Chosen place", locationID: UUID())
+        let draft = MapTalkPublishDraft.reel(.init(text: "A Post", attachments: [], bubbleSource: nil,
+            location: selection))
+        let requestID = UUID()
+        do {
+            _ = try await store.publish(draft, audience: .livePublic, location: originalLocation, requestID: requestID)
+            Issue.record("Expected an uncertain result")
+        } catch let error as BackendClientError {
+            guard case .publishPending = error else { Issue.record("Expected a protected pending save"); return }
+        }
+        fixture.supportsLocationIdentity = true
+        await store.prepareNamedPostLocations()
+        _ = try await store.publish(draft, audience: .livePublic, location: originalLocation, requestID: requestID)
+        #expect(fixture.inputs.count == 2)
+        #expect(fixture.inputs.allSatisfy { $0.locationId == nil })
+        #expect(fixture.inputs.first?.capturedAt == fixture.inputs.last?.capturedAt)
+    }
+
     @Test(arguments: [422, 401, 403])
     func definitiveRejectionAllowsCorrectedDraftWithSameRequestID(status: Int) async throws {
         let fixture = PublishRetryFixture(outcomes: [.http(status), .success])
@@ -184,6 +223,7 @@ private struct PublishRetryInput: Decodable {
     let caption: String?
     let location: Coordinate
     let capturedAt: String?
+    let locationId: UUID?
 }
 
 private final class PublishRetryFixture: @unchecked Sendable {
@@ -193,14 +233,27 @@ private final class PublishRetryFixture: @unchecked Sendable {
     private var remaining: [Outcome]
     private var sent: [PublishRetryInput] = []
     private let moderationStatus: String?
+    private var locationIdentitySupported: Bool
+    var supportsLocationIdentity: Bool {
+        get { lock.withLock { locationIdentitySupported } }
+        set { lock.withLock { locationIdentitySupported = newValue } }
+    }
     var inputs: [PublishRetryInput] { lock.withLock { sent } }
 
-    init(outcomes: [Outcome], moderationStatus: String? = nil) {
+    init(outcomes: [Outcome], moderationStatus: String? = nil, supportsLocationIdentity: Bool = false) {
         remaining = outcomes
         self.moderationStatus = moderationStatus
+        locationIdentitySupported = supportsLocationIdentity
     }
 
     func handle(_ operation: PublishRetryURLProtocol) {
+        if operation.request.url?.path == "/health" {
+            let metadata = supportsLocationIdentity
+                ? "{\"supportsPostLocationNames\":true,\"supportsPostLocationIdentity\":true}"
+                : "{\"supportsPostLocationNames\":true}"
+            operation.respond(status: 200, data: Data(metadata.utf8))
+            return
+        }
         // Hold background refreshes open until the test cancels the session.
         guard operation.request.httpMethod == "POST" else { return }
         do {
@@ -215,7 +268,7 @@ private final class PublishRetryFixture: @unchecked Sendable {
             case .networkFailure:
                 operation.fail(URLError(.networkConnectionLost))
             case .success:
-                let output: [String: Any] = [
+                var output: [String: Any] = [
                     "id": input.id.uuidString,
                     "ownerId": userID.uuidString,
                     "owner": ["id": userID.uuidString, "handle": "retry_test"],
@@ -227,6 +280,7 @@ private final class PublishRetryFixture: @unchecked Sendable {
                     "expiresAt": "2026-10-18T12:00:00Z",
                     "moderationStatus": moderationStatus.map { $0 as Any } ?? NSNull()
                 ]
+                if let locationID = input.locationId { output["locationId"] = locationID.uuidString }
                 operation.respond(status: 201, data: try JSONSerialization.data(withJSONObject: output))
             }
         } catch {

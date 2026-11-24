@@ -180,6 +180,10 @@ struct POIStoryViewer: View {
     let onUserSelected: (User) -> Void
     let onPageViewed: (String) -> Void
     let onClose: () -> Void
+    var usesQuietChrome = false
+    var isInteractionPresented = false
+    var bottomActions: ((ExperienceDetailView.POIStoryContributor,
+                         ExperienceDetailView.POIStoryContributor.Item?) -> AnyView?)?
 
     @Environment(\.appEnv) private var environment
     @State private var contributorIndex: Int
@@ -200,6 +204,10 @@ struct POIStoryViewer: View {
         accentColor: Color,
         onUserSelected: @escaping (User) -> Void,
         onPageViewed: @escaping (String) -> Void = { _ in },
+        usesQuietChrome: Bool = false,
+        isInteractionPresented: Bool = false,
+        bottomActions: ((ExperienceDetailView.POIStoryContributor,
+                         ExperienceDetailView.POIStoryContributor.Item?) -> AnyView?)? = nil,
         onClose: @escaping () -> Void
     ) {
         self.contributors = contributors
@@ -208,6 +216,9 @@ struct POIStoryViewer: View {
         self.onUserSelected = onUserSelected
         self.onPageViewed = onPageViewed
         self.onClose = onClose
+        self.usesQuietChrome = usesQuietChrome
+        self.isInteractionPresented = isInteractionPresented
+        self.bottomActions = bottomActions
         _contributorIndex = State(initialValue: min(max(initialIndex, 0), max(contributors.count - 1, 0)))
     }
 
@@ -218,10 +229,7 @@ struct POIStoryViewer: View {
                 Color.black.ignoresSafeArea(.all)
 
                 if let contributor {
-            storyStage(width: geometry.size.width, contributor: contributor)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .transition(contributorTransition)
-                .gesture(contributorDragGesture(containerWidth: geometry.size.width))
+                    interactiveStory(width: geometry.size.width, contributor: contributor)
                 } else {
                     Color.black
                         .ignoresSafeArea(.all)
@@ -243,8 +251,44 @@ struct POIStoryViewer: View {
             resetPlaybackClock()
             markCurrentPageViewed()
         }
+        .onChangeCompat(of: isInteractionPresented) { presented in
+            setPlaybackPaused(presented)
+        }
+        .accessibilityAction(.escape, onClose)
+        .accessibilityHint(usesQuietChrome ? "Swipe down to return to the place" : "")
         .onReceive(playbackTimer) { now in
             updatePlayback(now: now)
+        }
+    }
+
+    @ViewBuilder
+    private func interactiveStory(width: CGFloat,
+                                  contributor: ExperienceDetailView.POIStoryContributor) -> some View {
+        let stage = storyStage(width: width, contributor: contributor)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .transition(contributorTransition)
+        if usesQuietChrome {
+            // Fail vertical pans before recognition; the native zoom transition
+            // owns the complete downward dismissal, including cancellation.
+            stage.gesture(POIStoryHorizontalGesture(
+                onChanged: { translation in
+                    guard dragCompletion == nil else { return }
+                    setPlaybackPaused(true)
+                    dragOffset = clampedDragOffset(translation, limit: width)
+                },
+                onEnded: { translation, predicted in
+                    guard dragCompletion == nil else { return }
+                    finishDrag(translation: clampedDragOffset(translation, limit: width),
+                               predicted: clampedDragOffset(predicted, limit: width), width: width)
+                },
+                onCancelled: {
+                    guard dragCompletion == nil else { return }
+                    withAnimation(.easeOut(duration: 0.18)) { dragOffset = 0 }
+                    setPlaybackPaused(false)
+                }
+            ))
+        } else {
+            stage.gesture(contributorDragGesture(containerWidth: width))
         }
     }
 
@@ -268,6 +312,7 @@ struct POIStoryViewer: View {
 
     private func updatePlayback(now: Date) {
         guard isPlaybackPaused == false,
+              !isInteractionPresented,
               activeDragDirection == .none,
               dragCompletion == nil,
               let contributor = currentContributor,
@@ -371,6 +416,14 @@ struct POIStoryViewer: View {
                 .padding(.top, 60)
                 .padding(.horizontal, 20)
         }
+        .overlay(alignment: .bottomTrailing) {
+            if usesQuietChrome, let bottomActions {
+                bottomActions(contributor, contributorItem(contributor, at: itemIndex))
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 8)
+                    .allowsHitTesting(dragOffset == 0 && dragCompletion == nil)
+            }
+        }
     }
 
     private func preloadContributors(
@@ -414,7 +467,8 @@ struct POIStoryViewer: View {
             for: contributor,
             itemIndex: activeIndex,
             isPlaybackActive: contributor.id == currentContributor?.id && direction == .none
-                && !isPlaybackPaused && activeDragDirection == .none && dragCompletion == nil
+                && !isPlaybackPaused && !isInteractionPresented
+                && activeDragDirection == .none && dragCompletion == nil
         )
             .overlay {
                 if direction == .none {
@@ -431,7 +485,7 @@ struct POIStoryViewer: View {
                     .padding(.horizontal, 20)
             }
             .overlay(alignment: .bottom) {
-                if environment.backend == nil {
+                if !usesQuietChrome && environment.backend == nil {
                     actionBar
                         .padding(.horizontal, 24)
                 }
@@ -488,11 +542,11 @@ struct POIStoryViewer: View {
             profileButton(for: contributor.user) {
                 HStack(spacing: 12) {
                     POIStoryAvatarView(contributor: contributor)
-                        .frame(width: 56, height: 56)
+                        .frame(width: usesQuietChrome ? 40 : 56, height: usesQuietChrome ? 40 : 56)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text(contributor.user?.handle ?? "Friend")
-                            .font(.headline.bold())
+                            .font(usesQuietChrome ? .system(size: 16, weight: .semibold) : .headline.bold())
                             .foregroundStyle(.white)
                         if let timestamp = activeItem?.timestamp {
                             Text(timestamp.formatted(.relative(presentation: .named)))
@@ -505,16 +559,20 @@ struct POIStoryViewer: View {
 
             Spacer()
 
-            Button {
-                onClose()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
+            if !usesQuietChrome {
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close place story")
+                .accessibilityIdentifier("experience.poi-story.close")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close place story")
-            .accessibilityIdentifier("experience.poi-story.close")
         }
     }
 
@@ -1108,7 +1166,7 @@ struct CommentThreadRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             profileButton(for: entry.user) {
-                AvatarSquare(user: entry.user)
+                AvatarSquare(user: entry.user, endorsement: entry.endorsement)
             }
 
             VStack(alignment: .leading, spacing: 6) {

@@ -203,11 +203,8 @@ struct UserProfileView: View {
     }
 
     private var historySection: some View {
-        // Build one snapshot, not the entire history again for each row's divider.
-        let activities = viewModel.historyActivities.filter { item in
-            if case .reel = item.kind { return true }
-            return false
-        }
+        // Each publication keeps its own row; place grouping belongs to the map.
+        let activities = viewModel.postActivities
         let lastActivityID = activities.last?.id
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -244,7 +241,7 @@ struct UserProfileView: View {
                                 HistoryActivityRow(item: item)
                             }
                             .buttonStyle(.plain)
-                            .backendPostActions(for: postReference(for: item), ownerID: viewModel.user.id)
+                            .backendPostActions(for: .reel(item.id), ownerID: viewModel.user.id)
 
                             if item.id != lastActivityID {
                                 Rectangle()
@@ -259,12 +256,6 @@ struct UserProfileView: View {
         }
     }
 
-    private func postReference(for item: UserProfileViewModel.HistoryActivity) -> JourneyFolder.MemberReference {
-        switch item.kind {
-        case let .reel(reel): return .reel(reel.id)
-        case let .poi(footprint): return .poi(footprint.id)
-        }
-    }
 }
 
 private struct PlainProfileAvatar: View {
@@ -274,7 +265,7 @@ private struct PlainProfileAvatar: View {
     var body: some View {
         ZStack {
             if let url = user.avatarURL {
-                MapImage(url: url) { phase in
+                MapImage(url: url, thumbnailSize: CGSize(width: size, height: size)) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()
@@ -414,7 +405,8 @@ private struct RecentPreview: View {
             case let .post(attachments):
                 PostMediaCover(attachments: attachments, side: ProfileHistoryLayout.coverSide)
             case let .image(url):
-                MapImage(url: url) { phase in
+                MapImage(url: url, thumbnailSize: CGSize(width: ProfileHistoryLayout.coverSide,
+                                                        height: ProfileHistoryLayout.coverSide)) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()
@@ -426,7 +418,8 @@ private struct RecentPreview: View {
                 }
             case let .video(poster):
                 if let poster {
-                    MapImage(url: poster) { phase in
+                    MapImage(url: poster, thumbnailSize: CGSize(width: ProfileHistoryLayout.coverSide,
+                                                               height: ProfileHistoryLayout.coverSide)) { phase in
                         switch phase {
                         case let .success(image):
                             image.resizable().scaledToFill()

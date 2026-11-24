@@ -4,10 +4,86 @@ private struct ExperienceNeutralAppearanceKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct ExperiencePOIRecentSharersVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+private struct ExperiencePOIHistoryVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+private struct ExperiencePOIPlaybackActionsKey: EnvironmentKey {
+    static let defaultValue: AnyView? = nil
+}
+
+private struct ExperiencePOIHeaderActionsKey: EnvironmentKey {
+    static let defaultValue: AnyView? = nil
+}
+
+private struct ExperiencePOIVisitorSummaryKey: EnvironmentKey {
+    static let defaultValue: AnyView? = nil
+}
+
+private struct ExperiencePOIFootprintsVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+private struct ExperiencePOIPlaceHeaderKey: EnvironmentKey {
+    static let defaultValue: ((UUID) -> AnyView?)? = nil
+}
+
+private struct ExperiencePOIPlaceTrailingActionKey: EnvironmentKey {
+    static let defaultValue: ((UUID) -> AnyView?)? = nil
+}
+
 extension EnvironmentValues {
     var experienceNeutralAppearance: Bool {
         get { self[ExperienceNeutralAppearanceKey.self] }
         set { self[ExperienceNeutralAppearanceKey.self] = newValue }
+    }
+
+    var experiencePOIRecentSharersVisible: Bool {
+        get { self[ExperiencePOIRecentSharersVisibleKey.self] }
+        set { self[ExperiencePOIRecentSharersVisibleKey.self] = newValue }
+    }
+
+    var experiencePOIHistoryVisible: Bool {
+        get { self[ExperiencePOIHistoryVisibleKey.self] }
+        set { self[ExperiencePOIHistoryVisibleKey.self] = newValue }
+    }
+
+    var experiencePOIPlaybackActionsVisible: Bool {
+        experiencePOIPlaybackActions != nil || experiencePOIHeaderActions != nil
+    }
+
+    var experiencePOIPlaybackActions: AnyView? {
+        get { self[ExperiencePOIPlaybackActionsKey.self] }
+        set { self[ExperiencePOIPlaybackActionsKey.self] = newValue }
+    }
+
+    var experiencePOIHeaderActions: AnyView? {
+        get { self[ExperiencePOIHeaderActionsKey.self] }
+        set { self[ExperiencePOIHeaderActionsKey.self] = newValue }
+    }
+
+    var experiencePOIVisitorSummary: AnyView? {
+        get { self[ExperiencePOIVisitorSummaryKey.self] }
+        set { self[ExperiencePOIVisitorSummaryKey.self] = newValue }
+    }
+
+    var experiencePOIFootprintsVisible: Bool {
+        get { self[ExperiencePOIFootprintsVisibleKey.self] }
+        set { self[ExperiencePOIFootprintsVisibleKey.self] = newValue }
+    }
+
+    var experiencePOIPlaceHeader: ((UUID) -> AnyView?)? {
+        get { self[ExperiencePOIPlaceHeaderKey.self] }
+        set { self[ExperiencePOIPlaceHeaderKey.self] = newValue }
+    }
+
+    var experiencePOIPlaceTrailingAction: ((UUID) -> AnyView?)? {
+        get { self[ExperiencePOIPlaceTrailingActionKey.self] }
+        set { self[ExperiencePOIPlaceTrailingActionKey.self] = newValue }
     }
 }
 
@@ -30,7 +106,12 @@ struct ExperiencePanel: View {
     var featuredPOIMediaContent: AnyView? = nil
     @Environment(\.appEnv) private var environment
     @Environment(\.postEngagementRequest) private var postEngagementRequest
+    @Environment(\.experiencePOIHistoryVisible) private var showsPOIHistory
     @State private var contentNeedsScrolling = false
+
+    private var hidesPlaceHistory: Bool {
+        data.poiInfo != nil && !showsPOIHistory
+    }
 
     var body: some View {
         if usesNeutralAppearance && isSingleVideoHero {
@@ -133,7 +214,7 @@ struct ExperiencePanel: View {
                     defaultExperienceContent
                 }
 
-                if let commentTarget, let backend = environment.backend {
+                if !hidesPlaceHistory, let commentTarget, let backend = environment.backend {
                     BackendCommentThread(store: backend, target: commentTarget, onUserSelected: onUserSelected)
                         .id(commentTarget)
                         .id(PostEngagementSection.comments)
@@ -142,7 +223,7 @@ struct ExperiencePanel: View {
         }
         .padding(.horizontal, ExperienceSheetLayout.panelHorizontalPadding)
         .padding(.top, isSingleVideoHero || featuredPOIMedia != nil || usesNeutralAppearance ? 0 : 40)
-        .padding(.bottom, 60)
+        .padding(.bottom, hidesPlaceHistory ? 0 : 60)
     }
 
     private var postEngagementContent: some View {
@@ -213,12 +294,12 @@ struct ExperiencePanel: View {
                 )
                 .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
 
-                if data.badges.isEmpty == false {
+                if !hidesPlaceHistory, data.badges.isEmpty == false {
                     POITagList(badges: data.badges, accentColor: data.accentColor)
                         .padding(.horizontal, ExperienceSheetLayout.detailContentInset)
                 }
 
-                if data.engagement.hasContent {
+                if !hidesPlaceHistory, data.engagement.hasContent {
                     EngagementSection(
                         model: data.engagement,
                         accentColor: data.accentColor,
@@ -297,9 +378,21 @@ struct POITagList: View {
 struct POIPlaceHeading: View {
     let info: ExperienceDetailView.POIInfoModel
     let accentColor: Color
+    @Environment(\.experiencePOIPlaceHeader) private var placeHeader
+    @Environment(\.experiencePOIPlaceTrailingAction) private var placeTrailingAction
 
     var body: some View {
-        HStack(alignment: .top, spacing: POIHeroLayout.avatarSpacing) {
+        if let id = info.placeID, let customHeader = placeHeader?(id) {
+            customHeader
+        } else {
+            originalHeading
+        }
+    }
+
+    private var originalHeading: some View {
+        let trailingAction = info.placeID.flatMap { placeTrailingAction?($0) }
+        return HStack(alignment: trailingAction == nil ? .top : .center,
+                      spacing: POIHeroLayout.avatarSpacing) {
             POIAvatar(category: info.category, accentColor: accentColor, size: POIHeroLayout.collapsedAvatarSize)
                 .alignmentGuide(.top) { $0[.top] }
 
@@ -307,6 +400,7 @@ struct POIPlaceHeading: View {
                 Text(info.name)
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(.white)
+                    .lineLimit(trailingAction == nil ? nil : 1)
                 HStack(spacing: 8) {
                     Text(info.category.displayName)
                         .font(.caption)
@@ -315,6 +409,11 @@ struct POIPlaceHeading: View {
                         POIBadgeSummaryPill(badge: badge)
                     }
                 }
+            }
+
+            if let trailingAction {
+                Spacer(minLength: 0)
+                trailingAction
             }
         }
     }
@@ -327,13 +426,28 @@ struct POICollapsedHero: View {
     let recentSharers: [ExperienceDetailView.POIStoryContributor]
     let onRecentSharerSelected: ((Int) -> Void)?
     let isContributorUnseen: ([String]) -> Bool
+    @Environment(\.experiencePOIPlaybackActionsVisible) private var showsPlaybackActions
+    @Environment(\.experiencePOIVisitorSummary) private var visitorSummary
+    @Environment(\.experiencePOIPlaceHeader) private var placeHeader
+
+    private var usesOverviewPlaceHeader: Bool {
+        placeHeader != nil && visitorSummary != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             POIPlaceHeading(info: info, accentColor: accentColor)
+                // Move only the preview overview heading to the instant-card anchor.
+                // Visitor summaries and stats keep their original content bounds.
+                .padding(.horizontal, usesOverviewPlaceHeader
+                    ? 20 - POIHeroLayout.collapsedHorizontalPadding : 0)
+                .offset(y: usesOverviewPlaceHeader
+                    ? 28 - POIHeroLayout.headerTopPadding - POIHeroLayout.collapsedVerticalPadding : 0)
                 .accessibilityIdentifier("experience.poi.collapsed.heading")
 
-            if recentSharers.isEmpty == false {
+            if let visitorSummary {
+                visitorSummary
+            } else if placeHeader == nil, recentSharers.isEmpty == false {
                 POIRecentSharersRow(
                     sharers: recentSharers,
                     accentColor: accentColor,
@@ -345,7 +459,7 @@ struct POICollapsedHero: View {
 
             Spacer(minLength: 0)
 
-            if let stats {
+            if let stats, !showsPlaybackActions, placeHeader == nil || visitorSummary != nil {
                 POIHeroStatsRow(model: stats, directionsDestination: info.directionsDestination)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("experience.poi.collapsed.stats")
@@ -370,6 +484,16 @@ struct POIExpandedHero: View {
     var featuredMedia: RatedPOI.Media? = nil
     var featuredMediaContent: AnyView? = nil
     var isPlaybackActive = true
+    @Environment(\.experiencePOIRecentSharersVisible) private var showsRecentSharers
+    @Environment(\.experiencePOIPlaybackActionsVisible) private var showsPlaybackActions
+    @Environment(\.experiencePOIPlaybackActions) private var playbackActions
+    @Environment(\.experiencePOIVisitorSummary) private var visitorSummary
+    @Environment(\.experiencePOIPlaceHeader) private var placeHeader
+    @Environment(\.experiencePOIPlaceTrailingAction) private var placeTrailingAction
+
+    private var usesOverviewPlaceHeader: Bool {
+        placeHeader != nil && visitorSummary != nil
+    }
 
     var body: some View {
         Group {
@@ -377,7 +501,7 @@ struct POIExpandedHero: View {
                 VStack(alignment: .leading, spacing: 16) {
                     featuredStage(media: featuredMedia)
 
-                    if !recentSharers.isEmpty {
+                    if showsRecentSharers && (visitorSummary != nil || !recentSharers.isEmpty) {
                         recentSharersRow
                             .padding(.horizontal, POIHeroLayout.collapsedHorizontalPadding)
                             .padding(.bottom, POIHeroLayout.collapsedVerticalPadding)
@@ -387,13 +511,18 @@ struct POIExpandedHero: View {
                 // The direct-map place page keeps its original layout.
                 VStack(alignment: .leading, spacing: 6) {
                     POIPlaceHeading(info: info, accentColor: accentColor)
+                        // Preserve the other rows while matching the instant-card heading.
+                        .padding(.horizontal, usesOverviewPlaceHeader
+                            ? 20 - POIHeroLayout.collapsedHorizontalPadding : 0)
+                        .offset(y: usesOverviewPlaceHeader
+                            ? 28 - POIHeroLayout.headerTopPadding - POIHeroLayout.collapsedVerticalPadding : 0)
                         .accessibilityIdentifier("experience.poi.expanded.heading")
 
-                    if !recentSharers.isEmpty {
+                    if showsRecentSharers && (visitorSummary != nil || !recentSharers.isEmpty) {
                         recentSharersRow
                     }
 
-                    if let stats {
+                    if let stats, !showsPlaybackActions, placeHeader == nil || visitorSummary != nil {
                         POIHeroStatsRow(model: stats, directionsDestination: info.directionsDestination)
                     }
                 }
@@ -432,7 +561,7 @@ struct POIExpandedHero: View {
             POIPlaceHeading(info: info, accentColor: accentColor)
                 .padding(.horizontal, 20)
                 .padding(.top, 28)
-                .allowsHitTesting(false)
+                .allowsHitTesting(placeHeader != nil || placeTrailingAction != nil)
                 .accessibilityIdentifier("experience.poi.expanded.heading")
         }
         .overlay(alignment: .bottom) {
@@ -443,7 +572,7 @@ struct POIExpandedHero: View {
                 .accessibilityHidden(true)
         }
         .overlay(alignment: .bottomTrailing) {
-            if let stats {
+            if let stats, !showsPlaybackActions, placeHeader == nil || visitorSummary != nil {
                 POIHeroStatsRow(model: stats, directionsDestination: info.directionsDestination)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 32)
@@ -451,15 +580,26 @@ struct POIExpandedHero: View {
                     .accessibilityIdentifier("experience.poi.expanded.stats")
             }
         }
+        .overlay(alignment: .bottom) {
+            if let playbackActions {
+                playbackActions
+                    .padding(.horizontal, 20)
+            }
+        }
     }
 
+    @ViewBuilder
     private var recentSharersRow: some View {
-        POIRecentSharersRow(
-            sharers: recentSharers,
-            accentColor: accentColor,
-            isContributorUnseen: isContributorUnseen
-        ) { index in
-            onRecentSharerSelected?(index)
+        if let visitorSummary {
+            visitorSummary
+        } else {
+            POIRecentSharersRow(
+                sharers: recentSharers,
+                accentColor: accentColor,
+                isContributorUnseen: isContributorUnseen
+            ) { index in
+                onRecentSharerSelected?(index)
+            }
         }
     }
 }
@@ -691,42 +831,94 @@ struct POIAvatar: View {
 }
 
 struct POIRecentSharersRow: View {
+    struct TransitionID: Hashable {
+        let placeID: UUID
+        let userID: UUID
+    }
+
     let sharers: [ExperienceDetailView.POIStoryContributor]
     let accentColor: Color
     let isContributorUnseen: ([String]) -> Bool
     let onSelect: (Int) -> Void
+    var wraps = false
+    var visitCounts: [UUID: Int] = [:]
+    var transitionNamespace: Namespace.ID? = nil
+    var transitionPlaceID: UUID? = nil
 
     private let avatarSize: CGFloat = 56
+    private var cellWidth: CGFloat { visitCounts.isEmpty ? avatarSize + 8 : avatarSize + 14 }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 18) {
-                ForEach(Array(sharers.enumerated()), id: \.element.id) { index, sharer in
-                    Button {
-                        onSelect(index)
-                    } label: {
-                        VStack(spacing: 6) {
-                            POISharerAvatarCircle(
-                                contributor: sharer,
-                                accentColor: accentColor,
-                                size: avatarSize,
-                                isUnseen: isContributorUnseen(sharer.readKeys)
-                            )
-                            Text(sharer.user?.handle ?? "Friend")
-                                .font(.caption2.bold())
-                                .foregroundStyle(.white)
-                                .lineLimit(1)
-                        }
-                        .frame(width: avatarSize + 8)
-                        .padding(.vertical, 4)
+        Group {
+            if wraps {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: cellWidth, maximum: cellWidth), spacing: 18)],
+                          alignment: .leading, spacing: 14) {
+                    people
+                }
+                .padding(.vertical, 2)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 18) {
+                        people
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("experience.poi.sharer.\(sharer.userId.uuidString)")
+                    .padding(.vertical, 2)
                 }
             }
-            .padding(.vertical, 2)
         }
         .padding(.vertical, 2)
+    }
+
+    private var people: some View {
+        ForEach(Array(sharers.enumerated()), id: \.element.id) { index, sharer in
+            personButton(sharer, index: index)
+        }
+    }
+
+    private func personButton(_ sharer: ExperienceDetailView.POIStoryContributor, index: Int) -> some View {
+        Button {
+                onSelect(index)
+            } label: {
+                VStack(spacing: 6) {
+                    transitionAvatar(sharer)
+                    .overlay(alignment: .bottomTrailing) {
+                        if let count = visitCounts[sharer.userId] {
+                            Text("\(count)")
+                                .font(.system(size: 10, weight: .semibold))
+                                .monospacedDigit()
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .frame(minWidth: 24, minHeight: 20)
+                                .background(Color(white: 0.16), in: Capsule())
+                                .overlay(Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 1))
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    Text(sharer.user?.handle ?? "Friend")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                .frame(width: cellWidth)
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(visitCounts[sharer.userId].map { $0 == 1 ? "1 visit" : "\($0) visits" } ?? "")
+            .accessibilityIdentifier("experience.poi.sharer.\(sharer.userId.uuidString)")
+    }
+
+    @ViewBuilder
+    private func transitionAvatar(_ sharer: ExperienceDetailView.POIStoryContributor) -> some View {
+        let avatar = POISharerAvatarCircle(contributor: sharer,
+            accentColor: accentColor, size: avatarSize,
+            isUnseen: isContributorUnseen(sharer.readKeys))
+        if let namespace = transitionNamespace, let placeID = transitionPlaceID {
+            // Only the tapped circular avatar participates in the zoom.
+            // The place card, its safe area and count/name labels remain unchanged.
+            avatar.matchedTransitionSource(
+                id: TransitionID(placeID: placeID, userID: sharer.userId), in: namespace)
+        } else {
+            avatar
+        }
     }
 }
 
@@ -861,10 +1053,12 @@ struct EngagementSection: View {
     let onUserSelected: (User) -> Void
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
+    @Environment(\.experiencePOIFootprintsVisible) private var showsFootprints
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            if model.friendLikes.isEmpty == false {
+            if model.friendLikes.isEmpty == false,
+               showsFootprints || model.friendLikesIconName != "shoeprints.fill" {
                 LikesAvatarGrid(
                     entries: model.friendLikes,
                     iconName: model.friendLikesIconName,

@@ -1304,7 +1304,8 @@ private struct UserMapPOICard: View {
         } label: {
             Group {
                 if let url = currentUser.avatarURL {
-                    MapImage(url: url) { phase in
+                    MapImage(url: url, thumbnailSize: CGSize(width: size - ringWidth * 2,
+                                                             height: size - ringWidth * 2)) { phase in
                         switch phase {
                         case let .success(image):
                             image.resizable().scaledToFill()
@@ -1614,7 +1615,7 @@ struct UserMapCollapsedReelMarker: View {
 
         VStack(spacing: 0) {
             if let url = thumbnailURL {
-                MapImage(url: url) { phase in
+                MapImage(url: url, thumbnailSize: CGSize(width: circleSize, height: circleSize)) { phase in
                     switch phase {
                     case let .success(image):
                         image.resizable().scaledToFill()

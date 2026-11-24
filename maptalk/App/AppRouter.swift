@@ -4,6 +4,7 @@ import UIKit
 
 struct AppRouter: View {
     @Environment(\.appEnv) private var environment
+    @Environment(\.displayScale) private var displayScale
     @State private var selectedTab = 0
     @AppStorage("maptalk.map-layer") private var mapLayer: MapTalkMapLayer = .standard
     @State private var tabAvatarURL: URL?
@@ -66,7 +67,8 @@ struct AppRouter: View {
         .task(id: tabAvatarURL) {
             guard environment.backend != nil, let url = tabAvatarURL, url.isFileURL else { return }
             do {
-                let decoded = try await LocalMapImageLoader.shared.image(at: url)
+                let decoded = try await LocalMapImageLoader.shared.image(at: url,
+                    thumbnailSize: CGSize(width: 30, height: 30), displayScale: displayScale)
                 try Task.checkCancellation()
                 guard tabAvatarURL == url else { return }
                 tabAvatar = ProfileTabAvatar.image(from: UIImage(cgImage: decoded.image))

@@ -171,6 +171,96 @@ struct BackendOutboxTests {
         #expect(context.fixture.requests.isEmpty)
     }
 
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func remoteNamedPostUsesCachedCapabilitiesOfflineAndKeepsItsLocationAcrossRestart(lostResponse: Bool) async throws {
+        let context = try OutboxTestContext(postOutcomes: lostResponse ? [.lostResponse, .success] : [.success],
+                                           supportsNamedPostLocations: true)
+        defer { context.finish() }
+        let connected = context.makeStore()
+        try await connected.cacheVerifiedIdentity()
+        await connected.prepareNamedPostLocations()
+        let capabilities = try context.state()
+        #expect(capabilities.supportsPostLocationNames == true)
+        #expect(capabilities.supportsPostLocationIdentity == true)
+        let initialRequests = context.fixture.requests
+        #expect(initialRequests == ["GET /health"])
+
+        // A previously validated Post selection can enter the outbox after
+        // restarting without a connection. No current GPS is passed to the
+        // outbox: its sole coordinate is the chosen Post subject in Tokyo.
+        context.fixture.setOffline(true)
+        let offline = context.makeStore()
+        #expect(await offline.restoreCachedState())
+        let subject = CLLocation(latitude: 35.681236, longitude: 139.767125)
+        #expect(subject.distance(from: location) > 1_000_000)
+        let locationID = UUID()
+        let selection = MapTalkPostLocationSelection(coordinate: subject.coordinate,
+            title: "Tokyo station", locationName: "Tokyo station", locationID: locationID)
+        let postDraft = MapTalkPublishDraft.reel(.init(text: "Remembering this place", attachments: [],
+            bubbleSource: nil, location: selection))
+        let requestID = UUID()
+        let pending = try await offline.enqueuePublish(postDraft, audience: .livePublic,
+            location: subject, requestID: requestID)
+        guard case let .reel(localPost) = pending else { Issue.record("Expected local Post"); return }
+        #expect(localPost.center.latitude == subject.coordinate.latitude)
+        #expect(localPost.center.longitude == subject.coordinate.longitude)
+        #expect(localPost.locationName == selection.locationName)
+        #expect(localPost.locationID == locationID)
+        #expect(offline.pendingPublications[requestID] == .waiting)
+        #expect(offline.feedReels.value.isEmpty)
+        #expect(context.fixture.requests == initialRequests, "Saving offline must not re-probe the cached capability")
+        let original = try #require(try context.state().queued.first)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let originalInput = try encoder.encode(original.input)
+
+        let restored = context.makeStore()
+        #expect(await restored.restoreCachedState())
+        let restoredPost = try #require(restored.archive.privateReels.first { $0.id == requestID })
+        #expect(restoredPost.center.latitude == subject.coordinate.latitude)
+        #expect(restoredPost.center.longitude == subject.coordinate.longitude)
+        #expect(restoredPost.locationName == selection.locationName)
+        #expect(restoredPost.locationID == locationID)
+        #expect(restoredPost.createdAt == localPost.createdAt)
+        // A later action at the device's different location cannot rewrite an
+        // already-durable Post, its name, identity, audience or first-tap time.
+        _ = try await restored.enqueuePublish(draft("Do not replace this Post"), audience: .privateMyMap,
+            location: location, requestID: requestID)
+        let unchanged = try #require(try context.state().queued.first)
+        #expect(try encoder.encode(unchanged.input) == originalInput)
+        await restored.syncPendingPublications()
+        #expect(context.fixture.requests == initialRequests, "Restoring offline must not authorize a background write")
+
+        context.fixture.setOffline(false)
+        restored.resumeVerifiedConnection()
+        await restored.syncPendingPublications()
+        let confirmed: BackendStore
+        if lostResponse {
+            #expect(restored.pendingPublications[requestID] == .waiting)
+            let retry = context.makeStore()
+            #expect(await retry.restoreCachedState())
+            retry.resumeVerifiedConnection()
+            await retry.syncPendingPublications()
+            confirmed = retry
+        } else {
+            confirmed = restored
+        }
+        #expect(confirmed.pendingPublications.isEmpty)
+        let saved = try #require(confirmed.archive.privateReels.first { $0.id == requestID })
+        #expect(saved.locationName == selection.locationName)
+        #expect(saved.locationID == locationID)
+        #expect(saved.center.latitude == subject.coordinate.latitude)
+        #expect(saved.center.longitude == subject.coordinate.longitude)
+        #expect(abs(saved.createdAt.timeIntervalSince(localPost.createdAt)) < 0.002)
+        #expect(context.fixture.inputs.count == (lostResponse ? 2 : 1))
+        for input in context.fixture.inputs {
+            #expect(try encoder.encode(input) == originalInput,
+                    "Upload and uncertain-response retries must preserve the original named Post byte for byte")
+        }
+        #expect(context.fixture.savedMemoryCount == 1)
+        #expect(context.fixture.requests.filter { $0 == "GET /health" }.count == 1)
+    }
+
     @Test(.timeLimit(.minutes(1)))
     func lostPhotoResponseReusesTheSameUploadKeyAndBytesBeforePostingOnce() async throws {
         let context = try OutboxTestContext(uploadOutcomes: [.lostResponse, .success])
@@ -245,10 +335,12 @@ struct BackendOutboxTests {
         #expect(restored.feedReels.value.map(\.id) == [id])
         let feedPost = try #require(restored.feedReels.value.first)
         let archivePost = try #require(restored.archive.privateReels.first { $0.id == id })
-        #expect(feedPost.activityDate == decodedDate)
+        // The simulated API response round-trips millisecond timestamps;
+        // wire capturedAt and retry input identity remain exact above.
+        #expect(abs(feedPost.activityDate.timeIntervalSince(decodedDate)) < 0.002)
         #expect(archivePost.cardDisplayDate == feedPost.cardDisplayDate)
         #expect(abs(archivePost.activityDate.timeIntervalSince(savedTime)) < 0.002)
-        #expect(feedPost.expiresAt == decodedDate.addingTimeInterval(StoryReadKeys.freshWindow))
+        #expect(abs(feedPost.expiresAt.timeIntervalSince(decodedDate.addingTimeInterval(StoryReadKeys.freshWindow))) < 0.002)
     }
 
     @Test(.timeLimit(.minutes(1)), arguments: [404, 422])
@@ -746,19 +838,40 @@ struct BackendOutboxTests {
         defer { try? FileManager.default.removeItem(at: file) }
         let photo = try context.photo()
         let id = UUID()
+        let myMap = UserMapViewModel(environment: .connected(to: store), dataScope: .privateArchive)
+        let rowActions = BackendPostActionState(store: store, reference: .reel(id))
         var progress: [Double] = []
         var statuses: [PendingPublicationStatus] = []
+        var listStatuses: [PendingPublicationStatus] = []
+        var rowPublishingIDs: [Set<UUID>] = []
+        var rowContentUpdates = 0
+        var rowContentUpdatesBeforeUpload: Int?
+        let rowContentObserver = rowActions.$memories.sink { _ in rowContentUpdates += 1 }
+        let rowStatusObserver = rowActions.$publishingIDs.sink { rowPublishingIDs.append($0) }
+        let listStatusObserver = myMap.$pendingPublications.sink { values in
+            if let value = values[id] { listStatuses.append(value) }
+        }
         let progressObserver = store.$publicationProgress.sink { values in
-            if let value = values[id] { progress.append(value) }
+            if let value = values[id] {
+                progress.append(value)
+                if let initialCount = rowContentUpdatesBeforeUpload {
+                    #expect(rowContentUpdates == initialCount,
+                            "Upload fractions must not rebuild an existing row's menu/content snapshot")
+                }
+            }
         }
         let statusObserver = store.$pendingPublications.sink { values in
             if let value = values[id] { statuses.append(value) }
         }
-        defer { progressObserver.cancel(); statusObserver.cancel() }
+        defer {
+            progressObserver.cancel(); statusObserver.cancel()
+            rowContentObserver.cancel(); rowStatusObserver.cancel(); listStatusObserver.cancel()
+        }
         _ = try await store.enqueuePublish(.reel(.init(text: "Mixed progress", attachments: [
             .init(kind: .video(url: file, poster: photo)), .init(kind: .photo(photo)),
             .init(kind: .video(url: file, poster: photo))], bubbleSource: nil)),
             audience: .livePublic, location: location, requestID: id)
+        rowContentUpdatesBeforeUpload = rowContentUpdates
         await store.syncPendingPublications()
         #expect(store.pendingPublications[id] == nil)
         #expect(zip(progress, progress.dropFirst()).allSatisfy { pair in pair.0 <= pair.1 })
@@ -767,6 +880,12 @@ struct BackendOutboxTests {
         #expect(progress.last == 1)
         #expect(statuses.contains(.processing))
         #expect(statuses.last == .uploading, "Video processing must end before post confirmation")
+        #expect(zip(statuses, statuses.dropFirst()).allSatisfy { pair in pair.0 != pair.1 },
+                "Only actual state transitions may refresh MyMap; chunks must not republish .uploading")
+        #expect(listStatuses == statuses, "MyMap still receives every actual upload-state transition")
+        #expect(rowPublishingIDs == [[], [id], []],
+                "Row menu availability changes when publishing starts/ends, not on fractions or processing transitions")
+        #expect(rowActions.memories.first?.id == id)
         #expect(store.publicationProgress[id] == nil)
     }
 
@@ -913,8 +1032,10 @@ private final class OutboxTestContext {
     let api: BackendAPI
     private var stores: [BackendStore] = []
 
-    init(uploadOutcomes: [OutboxFixture.Outcome] = [], postOutcomes: [OutboxFixture.Outcome] = []) throws {
-        let fixture = OutboxFixture(uploadOutcomes: uploadOutcomes, postOutcomes: postOutcomes)
+    init(uploadOutcomes: [OutboxFixture.Outcome] = [], postOutcomes: [OutboxFixture.Outcome] = [],
+         supportsNamedPostLocations: Bool = false) throws {
+        let fixture = OutboxFixture(uploadOutcomes: uploadOutcomes, postOutcomes: postOutcomes,
+                                   supportsNamedPostLocations: supportsNamedPostLocations)
         self.fixture = fixture
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("outbox-test-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -977,6 +1098,7 @@ private final class OutboxFixture: @unchecked Sendable {
     }
     let userID = UUID()
     let canonicalPlaceID = UUID()
+    private let supportsNamedPostLocations: Bool
     private let lock = NSLock()
     private var offline = false
     private var uploadOutcomes: [Outcome]
@@ -1013,9 +1135,10 @@ private final class OutboxFixture: @unchecked Sendable {
     var cancelledIDs: Set<UUID> { lock.withLock { cancelled } }
     var cancelledUploadKeys: Set<UUID> { lock.withLock { cancelledUploads } }
 
-    init(uploadOutcomes: [Outcome], postOutcomes: [Outcome]) {
+    init(uploadOutcomes: [Outcome], postOutcomes: [Outcome], supportsNamedPostLocations: Bool = false) {
         self.uploadOutcomes = uploadOutcomes
         self.postOutcomes = postOutcomes
+        self.supportsNamedPostLocations = supportsNamedPostLocations
     }
 
     func setOffline(_ value: Bool) { lock.withLock { offline = value } }
@@ -1042,7 +1165,9 @@ private final class OutboxFixture: @unchecked Sendable {
         }
         if isOffline { operation.fail(URLError(.notConnectedToInternet)); return }
         do {
-            if path.hasPrefix("/v1/media/uploads/") {
+            if method == "GET", path == "/health", supportsNamedPostLocations {
+                operation.respond(status: 200, data: Data("{\"supportsPostLocationNames\":true,\"supportsPostLocationIdentity\":true,\"poiCheckInRadiusMeters\":500,\"features\":{\"poiFeedback\":true}}".utf8))
+            } else if path.hasPrefix("/v1/media/uploads/") {
                 if lock.withLock({ legacyOnly }) {
                     operation.respond(status: 404, data: Data()); return
                 }
@@ -1172,7 +1297,8 @@ private final class OutboxFixture: @unchecked Sendable {
                         owner: .init(id: userID, handle: "server_person"), kind: input.kind, visibility: input.visibility,
                         location: input.location, caption: input.caption ?? "", place: place, media: photos,
                         createdAt: captured, publishedAt: input.visibility == "public" ? captured : nil,
-                        expiresAt: captured.addingTimeInterval(StoryReadKeys.freshWindow), moderationStatus: "approved")
+                        expiresAt: captured.addingTimeInterval(StoryReadKeys.freshWindow), moderationStatus: "approved",
+                        locationName: input.locationName, locationId: input.locationId)
                     switch outcome {
                     case .success, .lostResponse: memories[input.id] = saved
                     case .interruptedBeforeCommit, .http: break

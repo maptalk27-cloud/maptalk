@@ -79,6 +79,211 @@ final class BackendAccountUITests: XCTestCase {
     }
 
     @MainActor
+    func testPublishedPOIFeedbackSurvivesTheRealAsyncSaveBridge() async throws {
+#if DEBUG
+        guard let value = ProcessInfo.processInfo.environment["MAPTALK_BACKEND_TEST_URL"] else {
+            throw XCTSkip("Set MAPTALK_BACKEND_TEST_URL to a disposable localhost backend.")
+        }
+        let baseURL = try XCTUnwrap(URL(string: value))
+        guard baseURL.scheme == "http", ["127.0.0.1", "localhost"].contains(baseURL.host ?? ""),
+              baseURL.user == nil, baseURL.password == nil,
+              baseURL.query == nil, baseURL.fragment == nil,
+              baseURL.path.isEmpty || baseURL.path == "/" else {
+            XCTFail("Feedback acceptance is restricted to a disposable localhost HTTP backend.")
+            return
+        }
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let (healthData, healthResponse) = try await session.data(from: baseURL.appendingPathComponent("health"))
+        XCTAssertEqual((healthResponse as? HTTPURLResponse)?.statusCode, 200)
+        let health = try XCTUnwrap(JSONSerialization.jsonObject(with: healthData) as? [String: Any])
+        guard health["mode"] as? String == "local-development",
+              (health["features"] as? [String: Any])?["poiFeedback"] as? Bool == true else {
+            XCTFail("Use a local-development backend with POI feedback; never a beta or live server.")
+            return
+        }
+
+        let account = TestAccount(prefix: "ui_feedback")
+        let registration = try await sendJSON(["handle": account.handle, "password": account.password],
+            path: "v1/auth/register", token: nil, expectedStatus: 201, baseURL: baseURL, session: session)
+        let auth = try JSONDecoder().decode(Auth.self, from: registration)
+        let app = XCUIApplication()
+        app.launchArguments = ["--local-backend", "--developer-login",
+                               "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchEnvironment["MAPTALK_BACKEND_URL"] = baseURL.absoluteString
+        app.launchEnvironment["MAPTALK_ACCOUNT_TEST_NAMESPACE"] = UUID().uuidString
+        let alertMonitor = addUIInterruptionMonitor(withDescription: "Feedback test location permission") { alert in
+            for title in ["Allow While Using App", "Allow While Using the App"] where alert.buttons[title].exists {
+                alert.buttons[title].tap()
+                return true
+            }
+            return false
+        }
+        defer {
+            removeUIInterruptionMonitor(alertMonitor)
+            app.terminate()
+        }
+        app.launch()
+        let handle = app.textFields["account.handle"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 10))
+        handle.tap()
+        handle.typeText(account.handle)
+        let password = app.secureTextFields["account.password"]
+        password.tap()
+        password.typeText(account.password + "\n")
+
+        let addPlace = app.buttons["Add a place"]
+        XCTAssertTrue(addPlace.waitForExistence(timeout: 20))
+        addPlace.tap()
+        let choosePlace = app.buttons["maptalk.place.choose-landmark"]
+        waitForAvatarControl(choosePlace)
+        choosePlace.tap()
+        let createPlace = app.buttons["maptalk.place.create-new"]
+        XCTAssertTrue(createPlace.waitForExistence(timeout: 10))
+        for _ in 0..<5 where !createPlace.isHittable {
+            guard let scroll = app.scrollViews.allElementsBoundByIndex.first(where: { $0.isHittable }) else { break }
+            scroll.swipeUp()
+        }
+        waitForAvatarControl(createPlace)
+        createPlace.tap()
+        let placeName = "Feedback regression \(UUID().uuidString.prefix(8))"
+        let nameField = app.textFields["maptalk.place.new-name"]
+        waitForAvatarControl(nameField)
+        nameField.tap()
+        nameField.typeText(placeName)
+        app.buttons["Use this place"].tap()
+        waitUntilGone(app.keyboards.firstMatch, timeout: 5, message: "The place editor should dismiss its keyboard")
+        let publicAudience = app.buttons["maptalk.place.audience.public"]
+        waitForAvatarControl(publicAudience)
+        publicAudience.tap()
+        let publish = app.buttons["maptalk.place.publish"]
+        waitUntilEnabled(publish, timeout: 20,
+                         message: "The existing simulator needs current simulated GPS to publish the visit")
+        publish.tap()
+
+        let save = app.buttons["maptalk.poi-feedback.save"]
+        XCTAssertTrue(save.waitForExistence(timeout: 10))
+        XCTAssertFalse(save.isEnabled, "Feedback is optional and starts empty")
+        // Wait for the parent while the real overlay remains open, then prove
+        // feedback changes neither its first publish time nor any other data.
+        let original = try await waitForLocalFeedbackVisit(token: auth.token, baseURL: baseURL,
+                                                          session: session, expectsFeedback: false)
+        XCTAssertEqual(original["kind"] as? String, "poi")
+        XCTAssertEqual(original["visibility"] as? String, "public")
+        XCTAssertEqual((original["place"] as? [String: Any])?["name"] as? String, placeName)
+        XCTAssertNotNil(original["createdAt"] as? String)
+        XCTAssertNotNil(original["publishedAt"] as? String)
+        XCTAssertNil(original["feedback"])
+
+        let comment = "A quiet corner after lunch. I would come back with a friend."
+        let commentField = app.descendants(matching: .any)["maptalk.poi-feedback.comment"].firstMatch
+        waitForAvatarControl(commentField)
+        commentField.tap()
+        commentField.typeText("  " + comment + "  ")
+        app.buttons["maptalk.poi-feedback.hype"].tap()
+        XCTAssertTrue(app.buttons["maptalk.poi-feedback.hype"].isSelected)
+        waitUntilEnabled(save, timeout: 5, message: "The optional feeling and comment should enable Save")
+        save.tap()
+        waitUntilGone(save, timeout: 10, message: "The saved feedback overlay must dismiss without a crash")
+        XCTAssertEqual(app.state, .runningForeground, "A vanished overlay must not be mistaken for an app crash")
+        XCTAssertTrue(addPlace.waitForExistence(timeout: 5))
+
+        var updated = try await waitForLocalFeedbackVisit(token: auth.token, baseURL: baseURL,
+                                                         session: session, expectsFeedback: true)
+        let feedback = try XCTUnwrap(updated.removeValue(forKey: "feedback") as? [String: Any])
+        XCTAssertEqual(feedback["endorsement"] as? String, "hype")
+        XCTAssertEqual(feedback["comment"] as? String, comment)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: updated, options: .sortedKeys),
+                       try JSONSerialization.data(withJSONObject: original, options: .sortedKeys),
+                       "Saving feedback must preserve the original ID, timestamps, location, visibility and content")
+#else
+        throw XCTSkip("Use Debug with -O and wholemodule for optimizer coverage; Release must never open developer login.")
+#endif
+    }
+
+    @MainActor
+    func testMyMapRowActionsPresentAndCancelWithoutChangingTheRecord() async throws {
+        guard let value = ProcessInfo.processInfo.environment["MAPTALK_BACKEND_TEST_URL"] else {
+            throw XCTSkip("Set MAPTALK_BACKEND_TEST_URL to a disposable localhost backend.")
+        }
+        let baseURL = try XCTUnwrap(URL(string: value))
+        guard baseURL.scheme == "http", ["127.0.0.1", "localhost"].contains(baseURL.host ?? "") else {
+            XCTFail("Row-action acceptance is restricted to a disposable localhost HTTP backend.")
+            return
+        }
+
+        // Seed through the normal API, then use the ordinary sign-in and row
+        // menu. No mock BackendStore, fixture route, GPS or media is required.
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let account = TestAccount(prefix: "ui_row")
+        let registration = try await sendJSON(["handle": account.handle, "password": account.password],
+            path: "v1/auth/register", token: nil, expectedStatus: 201, baseURL: baseURL, session: session)
+        let auth = try JSONDecoder().decode(Auth.self, from: registration)
+        let recordID = UUID()
+        let caption = "Row action acceptance \(UUID().uuidString.prefix(8))"
+        try await createPrivateReel(id: recordID, text: caption, token: auth.token,
+                                    baseURL: baseURL, session: session)
+
+        let app = XCUIApplication()
+        app.launchArguments = ["--local-backend", "--developer-login",
+                               "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchEnvironment["MAPTALK_BACKEND_URL"] = baseURL.absoluteString
+        app.launchEnvironment["MAPTALK_ACCOUNT_TEST_NAMESPACE"] = UUID().uuidString
+        defer { app.terminate() }
+        app.launch()
+        let handle = app.textFields["account.handle"]
+        XCTAssertTrue(handle.waitForExistence(timeout: 10))
+        handle.tap()
+        handle.typeText(account.handle)
+        let password = app.secureTextFields["account.password"]
+        password.tap()
+        password.typeText(account.password)
+        // The keyboard's Go action submits the existing form even when the
+        // sign-in button is below the keyboard on the current simulator.
+        password.typeText("\n")
+        openTab("MyMap", in: app)
+
+        let row = app.buttons["mymap.list-record.\(recordID.uuidString)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.press(forDuration: 0.8)
+        let edit = app.buttons["Edit caption"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5))
+        edit.tap()
+        let editor = app.textViews["post.caption.editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5), "The on-demand row host must present the caption sheet")
+        XCTAssertEqual(editor.value as? String, caption)
+        app.buttons["Cancel"].firstMatch.tap()
+        waitUntilGone(editor, timeout: 5, message: "Cancelling must remove the caption sheet and its row host")
+
+        row.press(forDuration: 0.8)
+        let delete = app.buttons["Delete post"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 5))
+        delete.tap()
+        let confirmation = app.staticTexts["Delete this post?"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 5), "A later row action must present a new confirmation host")
+        if app.buttons["Cancel"].firstMatch.exists {
+            app.buttons["Cancel"].firstMatch.tap()
+        } else {
+            // iOS 26 adapts confirmationDialog to a popover: cancellation is
+            // the native outside-dismiss region rather than a Cancel row.
+            let dismissRegion = app.otherElements["PopoverDismissRegion"]
+            XCTAssertTrue(dismissRegion.exists)
+            dismissRegion.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        }
+        waitUntilGone(confirmation, timeout: 5, message: "Cancelling must dismiss the delete confirmation")
+        XCTAssertTrue(row.isHittable)
+
+        var request = URLRequest(url: baseURL.appendingPathComponent("v1/memories/\(recordID.uuidString)"))
+        request.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await session.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(record["caption"] as? String, caption)
+        XCTAssertEqual(record["visibility"] as? String, "private")
+    }
+
+    @MainActor
     func testRegisterPublishRestoreAndSwitchAccountsKeepsPrivateMemoriesPrivate() async throws {
         guard let value = ProcessInfo.processInfo.environment["MAPTALK_BACKEND_TEST_URL"] else {
             throw XCTSkip("Set MAPTALK_BACKEND_TEST_URL to run the real local backend UI flow.")
@@ -532,6 +737,26 @@ final class BackendAccountUITests: XCTestCase {
         let data = try await sendJSON(["handle": account.handle, "password": account.password],
             path: "v1/auth/login", token: nil, expectedStatus: 200, baseURL: baseURL, session: session)
         return try JSONDecoder().decode(Auth.self, from: data)
+    }
+
+    private func waitForLocalFeedbackVisit(token: String, baseURL: URL, session: URLSession,
+                                          expectsFeedback: Bool) async throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            var request = URLRequest(url: baseURL.appendingPathComponent("v1/me/memories"), timeoutInterval: 5)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await session.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            let page = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let items = try XCTUnwrap(page["items"] as? [[String: Any]])
+            if let visit = items.first {
+                XCTAssertEqual(items.count, 1, "Feedback must update this account's one visit, not publish another")
+                if (visit["feedback"] != nil) == expectsFeedback { return visit }
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        throw NSError(domain: "MapTalkFeedbackUITest", code: 1, userInfo: [NSLocalizedDescriptionKey:
+            "The ordinary local API did not receive the \(expectsFeedback ? "feedback update" : "parent visit")."])
     }
 
     private func createPrivateReel(id: UUID, text: String, token: String, baseURL: URL, session: URLSession) async throws {

@@ -139,7 +139,17 @@ struct FriendStoryContentView: View {
     let userProvider: (UUID) -> User?
     let placeProvider: (UUID) -> RatedPOI?
     var feedPresentation: MapTalkFeedPresentation = .personStory
+    var showsFloatingHeader = true
+    var showsVisitExpression = false
+    var showsPersonalVisitCount = false
+    var showsHeaderTimestamp = true
+    var placeAuthors: [User] = []
+    var allowsPOIMediaLightbox = true
+    var mediaExpression: AnyView? = nil
+    var mediaDecoration: ((RatedPOI.Media) -> AnyView)? = nil
 
+    @Environment(\.experiencePOIPlaybackActions) private var playbackActions
+    @Environment(\.experiencePOIHeaderActions) private var headerActions
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
     @Environment(\.postCardPalette) private var postCardPalette
@@ -159,6 +169,8 @@ struct FriendStoryContentView: View {
             && !isKeyboardVisible && activeChildPresentations.isEmpty
     }
 
+    private var mediaRequestID: UUID? { playbackEnabled ? page.memoryID : nil }
+
     private var showsFullBleedPOIPreview: Bool {
         guard !isExpanded, case let .poi(_, _, media) = page.content else { return false }
         return media != nil
@@ -170,7 +182,7 @@ struct FriendStoryContentView: View {
             .contentShape(Rectangle())
             .clipped()
             .overlay(alignment: .bottom) {
-                if feedPresentation == .personStory, !isExpanded,
+                if feedPresentation == .personStory, !isExpanded, mediaPlaybackFooter == nil,
                    let momentIndex = group.momentIndex(containing: pageIndex),
                    group.moments[momentIndex].placeID != nil {
                     let range = group.moments[momentIndex].pageRange
@@ -178,6 +190,15 @@ struct FriendStoryContentView: View {
                         index: pageIndex - range.lowerBound)
                         .padding(.bottom, showsFullBleedPOIPreview ? 24 : 12)
                         .allowsHitTesting(false)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if !isExpanded || (mediaExpression != nil && page.kind == .poiLocationOnly),
+                   let mediaPlaybackFooter {
+                    mediaPlaybackFooter
+                        .padding(.horizontal, 20)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                        .ignoresSafeArea(.container, edges: .bottom)
                 }
             }
         .background(feedPresentation == .posts
@@ -191,8 +212,11 @@ struct FriendStoryContentView: View {
         .accessibilityValue(isExpanded ? "Expanded" : "Compact")
         .accessibilityAction(.escape, onClose)
         .modifier(FriendStoryCardHeader(
-            isEnabled: feedPresentation == .personStory,
-            isVisible: isPlaybackActive && selectedProfile == nil && activeChildPresentations.isEmpty
+            isEnabled: feedPresentation == .personStory && showsFloatingHeader,
+            isVisible: isPlaybackActive && selectedProfile == nil && activeChildPresentations.isEmpty,
+            backgroundMaterial: showsPersonalVisitCount && showsHeaderTimestamp ? .thin : .regular,
+            backgroundTint: showsPersonalVisitCount && !showsHeaderTimestamp
+                ? Color(white: 0.08).opacity(0.65) : .clear
         ) {
             navigationHeader
                 .environment(\.colorScheme, .dark)
@@ -206,6 +230,12 @@ struct FriendStoryContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
             isKeyboardVisible = false
+        }
+        .task(id: mediaRequestID) {
+            guard let id = mediaRequestID, let backend = environment.backend else { return }
+            // Adjacent pages stay mounted for swiping. Only the selected
+            // memory requests its video; metadata and cached photos show first.
+            _ = try? await backend.ensureMedia(for: [id])
         }
         .task(id: readinessTaskID) {
             guard canMarkViewed else { return }
@@ -230,72 +260,17 @@ struct FriendStoryContentView: View {
     }
 
     private var navigationHeader: some View {
-        let momentIndex = group.momentIndex(containing: pageIndex) ?? 0
-        return VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                authorIdentity
-                Spacer(minLength: 4)
-            }
-            .padding(.leading, 16)
-            .padding(.trailing, 16)
-            .frame(height: 44)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("friend-story.author-navigation")
-            .accessibilityValue("Stop \(momentIndex + 1) of \(group.moments.count)")
-
-            FriendStoryProgressBars(count: group.moments.count,
-                                    index: momentIndex, pageID: page.id,
-                                    pageIndex: pageIndex, pageCount: group.pages.count,
-                                    authorName: author?.handle ?? "Member",
-                                    onSelect: { index in
-                guard canNavigate, group.moments.indices.contains(index) else { return }
-                onSelectPage(group.moments[index].pageRange.lowerBound)
-            })
-                .frame(height: 24)
-                .accessibilityHint("Tap the progress bar to choose an update")
-                .accessibilityAdjustableAction { direction in
-                    switch direction {
-                    case .increment: onNextPage()
-                    case .decrement: onPreviousPage()
-                    @unknown default: break
-                    }
-                }
-                .accessibilityAction(named: "Previous update", onPreviousPage)
-                .accessibilityAction(named: "Next update", onNextPage)
-                .padding(.horizontal, 16)
-        }
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("friend-story.navigation")
-        .accessibilityAction(.escape, onClose)
-    }
-
-    private var authorIdentity: some View {
-        Button {
-            if let author { selectedProfile = .profileContext(for: author) }
-        } label: {
-            HStack(spacing: 8) {
-                FriendStoryAvatar(user: author, diameter: 32)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(author?.handle ?? "Member")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Text(page.publishedAt.formatted(.relative(presentation: .named)))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("friend-story.timestamp")
-                }
-            }
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(author == nil)
-        .accessibilityIdentifier("friend-story.open-author")
-        .accessibilityLabel("View profile")
-        .accessibilityValue(author?.handle ?? "Member")
+        FriendStoryNavigationHeader(author: author, group: group, page: page,
+            pageIndex: pageIndex, canNavigate: canNavigate,
+            onAuthor: {
+                if let author { selectedProfile = .profileContext(for: author) }
+            },
+            onPreviousPage: onPreviousPage, onNextPage: onNextPage,
+            onSelectPage: onSelectPage, onClose: onClose, trailingActions: headerActions,
+            showsVisitExpression: showsVisitExpression,
+            showsPersonalVisitCount: showsPersonalVisitCount,
+            showsTimestamp: showsHeaderTimestamp,
+            placeAuthors: placeAuthors)
     }
 
     private var pageSelection: Binding<String> {
@@ -333,7 +308,9 @@ struct FriendStoryContentView: View {
                         nativePostPager(mediaOnly: true)
                             .aspectRatio(ExperienceDetailView.POIFeaturedMedia.viewportAspectRatio, contentMode: .fit)
                             .overlay(alignment: .bottom) {
-                                placePageDots.padding(.bottom, 24)
+                                if mediaPlaybackFooter == nil {
+                                    placePageDots.padding(.bottom, 24)
+                                }
                             }
                     ),
                     onJourneyAvatarStackTap: { onJourney($0, page) },
@@ -345,6 +322,7 @@ struct FriendStoryContentView: View {
                 .id("story-place:\(page.authorID.uuidString):\(place.id.uuidString)")
                 .environment(\.friendStoryPlaybackEnabled, playbackEnabled)
                 .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
+                .environment(\.experiencePOIPlaybackActions, mediaPlaybackFooter)
             } else {
                 compactPOIPager(mediaOnly: true)
                     .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
@@ -379,6 +357,10 @@ struct FriendStoryContentView: View {
             return .init(id: candidate.memoryID,
                 mode: .real(real, pagerUserProvider(candidate.authorID)))
         }
+        let placeGroups = PostPlaceGrouping.groups(items.compactMap { item in
+            if case let .real(post, _) = item.mode { return post }
+            return nil
+        }, mode: .consecutive)
         return ProfileSequencePager(items: items,
             selection: Binding(get: {
                 pagerPages.first(where: { $0.id == selectedPageID.wrappedValue })?.memoryID ?? page.memoryID
@@ -393,7 +375,37 @@ struct FriendStoryContentView: View {
                     preparedPage(candidate, mediaOnly: false)
                 }
             }
+            .fixedPostPlaceChrome(groups: placeGroups,
+                selectedID: pagerPages.first(where: { $0.id == selectedPageID.wrappedValue })?.memoryID
+                    ?? page.memoryID, isExpanded: isExpanded)
             .accessibilityIdentifier("friend-story.post-pager")
+    }
+
+    /// Actions and position share one bottom anchor in both media sizes.
+    private var mediaPlaybackFooter: AnyView? {
+        if let mediaExpression {
+            // Expression floats above the same media footer at either detent.
+            // It must not change the action row's size or move the page dots.
+            return AnyView(Group {
+                if let playbackActions {
+                    playbackActions
+                } else {
+                    Color.clear.frame(height: 44).allowsHitTesting(false)
+                }
+            }
+            .overlay { placePageDots }
+            .overlay(alignment: .bottomLeading) {
+                mediaExpression
+                    .fixedSize(horizontal: false, vertical: true)
+                    .offset(y: -60)
+                    .allowsHitTesting(false)
+            }
+            .padding(.bottom, 8))
+        }
+        guard let playbackActions else { return nil }
+        return AnyView(playbackActions
+            .overlay { placePageDots }
+            .padding(.bottom, 8))
     }
 
     @ViewBuilder
@@ -416,15 +428,23 @@ struct FriendStoryContentView: View {
         // Keep a single native pager rather than nesting a pager per author.
         let chromePages = mediaOnly && !isExpanded ? poiChromePages : []
         let chromeRun = FriendStoryPOIChromeRun(pages: chromePages, selectedID: page.id)
+        let postPlaceGroups = feedPresentation == .posts ? PostPlaceGrouping.groups(
+            pagerPages.compactMap { candidate in
+                if case let .reel(post) = candidate.content { return post }
+                return nil
+            }, mode: .consecutive) : []
         return TabView(selection: pageSelection) {
             ForEach(pagerPages) { candidate in
                 preparedPage(candidate, mediaOnly: mediaOnly, chromeRun: chromeRun)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .postPlaceChromePage(postID: candidate.memoryID)
                     .tag(candidate.id)
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
         .accessibilityIdentifier("friend-story.post-pager")
         .fixedPOIChrome(pages: chromePages, selectedID: page.id)
+        .fixedPostPlaceChrome(groups: postPlaceGroups, selectedID: page.memoryID, isExpanded: isExpanded)
     }
 
     private func preparedPage(_ candidate: FriendStoryPage, mediaOnly: Bool,
@@ -433,6 +453,7 @@ struct FriendStoryContentView: View {
             if mediaOnly { mediaPage(for: candidate, chromeRun: chromeRun) }
             else { content(for: candidate) }
         }
+                    .environment(\.poiMediaLightboxEnabled, allowsPOIMediaLightbox)
                     .background(ExperiencePagerVerticalBounceGuard())
                     // Native paging keeps adjacent cards mounted. Only the
                     // selected card may play, mark read or present a child.
@@ -450,16 +471,26 @@ struct FriendStoryContentView: View {
     @ViewBuilder
     private func mediaPage(for candidate: FriendStoryPage, chromeRun: FriendStoryPOIChromeRun?) -> some View {
         if case let .poi(place, _, media) = candidate.content, let media {
-            if isExpanded {
-                ExperienceDetailView.POIFeaturedMedia(media: media,
-                    accentColor: place.poi.category.accentColor,
-                    isPlaybackActive: playbackEnabled && candidate.id == page.id,
-                    fillsContainer: true)
-            } else {
-                FriendStoryPOIPreview(place: place, media: media,
-                    isPlaybackActive: playbackEnabled && candidate.id == page.id,
-                    showsPlaceChrome: chromeRun?.contains(candidate.id) != true,
-                    chromePageID: candidate.id)
+            Group {
+                if isExpanded {
+                    ExperienceDetailView.POIFeaturedMedia(media: media,
+                        accentColor: place.poi.category.accentColor,
+                        isPlaybackActive: playbackEnabled && candidate.id == page.id,
+                        fillsContainer: true)
+                } else {
+                    FriendStoryPOIPreview(place: place, media: media,
+                        isPlaybackActive: playbackEnabled && candidate.id == page.id,
+                        showsPlaceChrome: chromeRun?.contains(candidate.id) != true,
+                        chromePageID: candidate.id,
+                        onMediaTap: allowsPOIMediaLightbox ? nil : onExpand)
+                }
+            }
+            .overlay {
+                // A per-media sample travels with its image/video, separately
+                // from the selected visit's fixed feeling footer.
+                if let mediaDecoration {
+                    mediaDecoration(media).allowsHitTesting(false)
+                }
             }
         } else {
             // The adjacent original card remains in the same native sequence.
@@ -498,7 +529,8 @@ struct FriendStoryContentView: View {
             Group {
                 if !isExpanded, let media {
                     FriendStoryPOIPreview(place: place, media: media,
-                        isPlaybackActive: playbackEnabled && candidate.id == page.id)
+                        isPlaybackActive: playbackEnabled && candidate.id == page.id,
+                        onMediaTap: allowsPOIMediaLightbox ? nil : onExpand)
                 } else {
                     // Keep the original place page; feature this exact slice
                     // inside it without filtering other visitors or history.
@@ -571,6 +603,296 @@ struct FriendStoryContentView: View {
 
 }
 
+/// Shared author/progress artwork; the containing browser owns navigation and profiles.
+struct FriendStoryNavigationHeader: View {
+    let author: User?
+    let group: FriendStoryGroup
+    let page: FriendStoryPage
+    let pageIndex: Int
+    let canNavigate: Bool
+    let onAuthor: () -> Void
+    let onPreviousPage: () -> Void
+    let onNextPage: () -> Void
+    let onSelectPage: (Int) -> Void
+    let onClose: () -> Void
+    var trailingActions: AnyView? = nil
+    var showsVisitExpression = false
+    var showsPersonalVisitCount = false
+    var showsTimestamp = true
+    var placeAuthors: [User] = []
+
+    private var usesQuietVisitSummary: Bool { showsPersonalVisitCount && !showsTimestamp }
+    private var visitComment: String? {
+        guard let comment = visitExpression?.comment?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !comment.isEmpty else { return nil }
+        return comment
+    }
+
+    private var personalVisitTotal: Int? {
+        guard showsPersonalVisitCount, case let .poi(place, visit, _) = page.content else { return nil }
+        var visitIDs = Set(place.checkIns.filter { $0.userId == visit.userId }.map(\.id))
+        visitIDs.insert(visit.id)
+        return visitIDs.count
+    }
+
+    private var visitExpression: RatedPOI.CheckIn? {
+        guard showsVisitExpression, case let .poi(_, visit, _) = page.content,
+              visit.endorsement != nil || !(visit.comment?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        else { return nil }
+        return visit
+    }
+
+    var body: some View {
+        let momentIndex = group.momentIndex(containing: pageIndex) ?? 0
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                authorIdentity
+                Spacer(minLength: 4)
+                if let trailingActions { trailingActions }
+            }
+            .padding(.leading, 16)
+            .padding(.trailing, 16)
+            .frame(height: 44)
+            .padding(.top, usesQuietVisitSummary ? 2 : 0)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("friend-story.author-navigation")
+            .accessibilityValue("Stop \(momentIndex + 1) of \(group.moments.count)")
+
+            FriendStoryProgressBars(count: group.moments.count,
+                                    index: momentIndex, pageID: page.id,
+                                    pageIndex: pageIndex, pageCount: group.pages.count,
+                                    authorName: author?.handle ?? "Member",
+                                    onSelect: { index in
+                guard canNavigate, group.moments.indices.contains(index) else { return }
+                onSelectPage(group.moments[index].pageRange.lowerBound)
+            })
+                .frame(height: usesQuietVisitSummary ? 22 : 24)
+                .accessibilityHint("Tap the progress bar to choose an update")
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment: onNextPage()
+                    case .decrement: onPreviousPage()
+                    @unknown default: break
+                    }
+                }
+                .accessibilityAction(named: "Previous update", onPreviousPage)
+                .accessibilityAction(named: "Next update", onNextPage)
+                .padding(.horizontal, 16)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("friend-story.navigation")
+        .accessibilityAction(.escape, onClose)
+    }
+
+    private var authorIdentity: some View {
+        Button(action: onAuthor) {
+            HStack(spacing: showsPersonalVisitCount ? 10 : 8) {
+                if placeAuthors.count > 1, let author {
+                    FriendStoryPlaceAuthors(author: author, people: placeAuthors)
+                } else {
+                    FriendStoryAvatar(user: author, diameter: 32)
+                }
+                if showsPersonalVisitCount {
+                    friendVisitIdentity
+                } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let visit = visitExpression {
+                        HStack(spacing: 8) {
+                            authorName
+                            personalVisitCount
+                            Spacer(minLength: 4)
+                            timestamp
+                        }
+                        HStack(spacing: 5) {
+                            if let feeling = visit.endorsement {
+                                POIFeedbackIcon(endorsement: feeling, set: .emoji, size: 16)
+                                    .fixedSize()
+                                    .frame(width: 22, height: 20)
+                                    .layoutPriority(1)
+                                    .accessibilityLabel(feeling.rawValue)
+                            }
+                            if let comment = visit.comment?.trimmingCharacters(in: .whitespacesAndNewlines),
+                               !comment.isEmpty {
+                                Text(comment)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.white.opacity(0.95))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
+                        .accessibilityIdentifier("friend-story.visit-expression")
+                    } else {
+                        HStack(spacing: 8) {
+                            authorName
+                            personalVisitCount
+                        }
+                        timestamp
+                    }
+                }
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 44,
+                   alignment: usesQuietVisitSummary ? .bottomLeading : .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(author == nil)
+        .accessibilityIdentifier("friend-story.open-author")
+        .accessibilityLabel("View profile")
+        .accessibilityValue(author?.handle ?? "Member")
+    }
+
+    private var friendVisitIdentity: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: usesQuietVisitSummary ? 3 : 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    authorName
+                    if usesQuietVisitSummary { personalVisitCount }
+                    Spacer(minLength: 0)
+                    timestamp.opacity(0.8)
+                }
+                if usesQuietVisitSummary {
+                    if let visitComment {
+                        visitCommentText(visitComment)
+                            .accessibilityIdentifier("friend-story.visit-expression")
+                    }
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        personalVisitCount
+                        if let visitComment {
+                            Text("·").foregroundStyle(.white.opacity(0.3))
+                            visitCommentText(visitComment)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("friend-story.visit-expression")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let visit = visitExpression, let feeling = visit.endorsement {
+                FriendStoryFeelingIcon(visitID: visit.id, endorsement: feeling)
+                    .layoutPriority(1)
+                    .accessibilityLabel(feeling.rawValue)
+                    .accessibilityIdentifier("friend-story.visit-feeling")
+            }
+        }
+        .frame(height: usesQuietVisitSummary ? 40 : 44)
+    }
+
+    private func visitCommentText(_ comment: String) -> some View {
+        Text(comment)
+            .font(.system(size: 13))
+            .foregroundStyle(.white.opacity(usesQuietVisitSummary ? 0.82 : 0.95))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var authorName: some View {
+        Text(author?.handle ?? "Member")
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+    }
+
+    @ViewBuilder
+    private var timestamp: some View {
+        if showsTimestamp {
+            Text(page.publishedAt.formatted(.relative(presentation: .named)))
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.7))
+                .lineLimit(1)
+                .accessibilityIdentifier("friend-story.timestamp")
+        }
+    }
+
+    @ViewBuilder
+    private var personalVisitCount: some View {
+        if let total = personalVisitTotal {
+            Text(total == 1 ? "1 visit" : "\(total) visits")
+                .font(.system(size: usesQuietVisitSummary ? 11 : 12, weight: .medium))
+                .foregroundStyle(.white.opacity(usesQuietVisitSummary ? 0.55 : 0.78))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityLabel("\(total) visits to this place")
+        }
+    }
+}
+
+/// Only "Loved it" greets once per visit; all other feelings stay still.
+struct FriendStoryFeelingIcon: View {
+    let visitID: UUID
+    let endorsement: RatedPOI.Endorsement
+    var size: CGFloat = 32
+    var emphasizesHype = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var animationTrigger = false
+
+    private struct Motion {
+        var scale: CGFloat = 1
+        var angle: Double = 0
+        var lift: CGFloat = 0
+    }
+
+    private var motionID: String { "\(visitID)-\(endorsement.rawValue)-\(emphasizesHype)" }
+    var body: some View {
+        let allowsMotion = endorsement == .hype && !reduceMotion
+        return POIFeedbackIcon(endorsement: endorsement, set: .emoji, size: size)
+            .fixedSize()
+            .keyframeAnimator(initialValue: Motion(), trigger: animationTrigger) { content, motion in
+                content
+                    .scaleEffect(allowsMotion ? motion.scale : 1)
+                    .rotationEffect(.degrees(allowsMotion ? motion.angle : 0))
+                    .offset(y: allowsMotion ? motion.lift : 0)
+            } keyframes: { _ in
+                KeyframeTrack(\.scale) {
+                    if emphasizesHype {
+                        CubicKeyframe(1.4, duration: 0.16)
+                        LinearKeyframe(1.4, duration: 0.4)
+                        CubicKeyframe(1, duration: 0.24)
+                    } else {
+                        CubicKeyframe(1.10, duration: 0.16)
+                        CubicKeyframe(0.98, duration: 0.18)
+                        CubicKeyframe(1, duration: 0.24)
+                    }
+                }
+                KeyframeTrack(\.angle) {
+                    if emphasizesHype {
+                        LinearKeyframe(0, duration: 0.16)
+                        CubicKeyframe(-12, duration: 0.1)
+                        CubicKeyframe(12, duration: 0.1)
+                        CubicKeyframe(-8, duration: 0.1)
+                        CubicKeyframe(4, duration: 0.1)
+                        CubicKeyframe(0, duration: 0.24)
+                    } else {
+                        CubicKeyframe(-10, duration: 0.16)
+                        CubicKeyframe(5, duration: 0.18)
+                        CubicKeyframe(0, duration: 0.24)
+                    }
+                }
+                KeyframeTrack(\.lift) {
+                    if emphasizesHype {
+                        CubicKeyframe(-3, duration: 0.16)
+                        LinearKeyframe(-3, duration: 0.4)
+                        CubicKeyframe(0, duration: 0.24)
+                    } else {
+                        CubicKeyframe(-2, duration: 0.16)
+                        CubicKeyframe(0, duration: 0.42)
+                    }
+                }
+            }
+            .frame(width: size + 8, height: size + 8)
+            .task(id: motionID) {
+                guard endorsement == .hype, !reduceMotion else { return }
+                animationTrigger.toggle()
+            }
+    }
+}
+
 /// Position within this place, separate from the person's stops above. A small
 /// window keeps long visits quiet without hiding the currently selected slice.
 struct FriendStoryPlacePageDots: View {
@@ -631,6 +953,7 @@ struct FriendStoryPOIPreview: View {
     let isPlaybackActive: Bool
     var showsPlaceChrome = true
     var chromePageID: String? = nil
+    var onMediaTap: (() -> Void)? = nil
     @State private var isLightboxPresented = false
     @State private var childPresentationID = UUID()
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
@@ -648,7 +971,8 @@ struct FriendStoryPOIPreview: View {
         ZStack {
             Button {
                 guard isPlaybackActive else { return }
-                isLightboxPresented = true
+                if let onMediaTap { onMediaTap() }
+                else { isLightboxPresented = true }
             } label: {
                 GeometryReader { geometry in
                     ExperienceDetailView.MediaCardView(item: item,
@@ -661,7 +985,7 @@ struct FriendStoryPOIPreview: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Open check-in media")
+            .accessibilityLabel(onMediaTap == nil ? "Open check-in media" : "Expand check-in card")
             .accessibilityIdentifier("friend-story.poi.media.\(media.id.uuidString)")
             // A same-place media run draws one fixed layer outside its pager.
             // Standalone and neighboring places still own their own chrome.
@@ -693,6 +1017,8 @@ struct FriendStoryPOIPreview: View {
 /// Place identity belongs to the containing card, not to each media slice.
 struct FriendStoryPOIChrome: View {
     let place: RatedPOI
+    @Environment(\.experiencePOIPlaybackActionsVisible) private var showsPlaybackActions
+    @Environment(\.experiencePOIPlaceHeader) private var placeHeader
 
     var body: some View {
         Color.clear
@@ -700,15 +1026,17 @@ struct FriendStoryPOIChrome: View {
             .overlay(alignment: .topLeading) {
                 ExperienceDetailView.POIPlaceHeading(
                     info: .init(name: place.poi.name, category: place.poi.category,
-                        endorsementBadges: ExperienceDetailView.poiEndorsementBadges(for: place)),
+                        endorsementBadges: ExperienceDetailView.poiEndorsementBadges(for: place),
+                        placeID: place.id),
                     accentColor: place.poi.category.accentColor)
                     .padding(.horizontal, 20)
                     .padding(.top, 28)
                     .shadow(color: .black.opacity(0.6), radius: 3, y: 1)
                     .accessibilityIdentifier("friend-story.poi.place-name")
-                    .allowsHitTesting(false)
+                    .allowsHitTesting(placeHeader != nil)
             }
             .overlay(alignment: .bottomTrailing) {
+                if !showsPlaybackActions, placeHeader == nil {
                 ExperienceDetailView.POIHeroStatsRow(model: .init(
                     checkIns: place.checkInPersonCount,
                     comments: place.comments.count,
@@ -722,6 +1050,7 @@ struct FriendStoryPOIChrome: View {
                     .shadow(color: .black.opacity(0.5), radius: 2, y: 1)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("friend-story.poi.stats")
+                }
             }
     }
 }
@@ -786,6 +1115,39 @@ struct StorySequenceProgressBar: View {
                         .frame(width: geometry.size.width * min(1, max(0, fraction)))
                 }
         }
+    }
+}
+
+/// Map-entry browsing keeps the current friend in front of the next people.
+/// Only this small stack animates; the bar and card keep their existing geometry.
+private struct FriendStoryPlaceAuthors: View {
+    let author: User
+    let people: [User]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var queue: [User] {
+        guard let currentIndex = people.firstIndex(where: { $0.id == author.id }) else {
+            return [author] + Array(people.prefix(2))
+        }
+        return Array((people[currentIndex...] + people[..<currentIndex]).prefix(3))
+    }
+
+    var body: some View {
+        let visible = queue
+        ZStack(alignment: .leading) {
+            ForEach(Array(visible.enumerated()), id: \.element.id) { index, person in
+                FriendStoryAvatar(user: person, diameter: 32)
+                    .overlay(Circle().strokeBorder(Color(white: 0.12), lineWidth: 1.5))
+                    .scaleEffect(1 - CGFloat(index) * 0.12)
+                    .opacity(index == 0 ? 1 : 0.85)
+                    .offset(x: CGFloat(index) * 10, y: -CGFloat(index) * 2)
+                    .zIndex(Double(visible.count - index))
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: 32 + CGFloat(max(0, visible.count - 1)) * 10, height: 40, alignment: .leading)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: author.id)
+        .accessibilityHidden(true)
     }
 }
 
@@ -860,6 +1222,7 @@ enum MapTalkPostEntryPage {
 struct MapTalkPostCoverEntry: View {
     let post: RealPost?
     let isResuming: Bool
+    let isVisible: Bool
     let isActive: Bool
     let isReturning: Bool
     let needsCardClearance: Bool
@@ -878,8 +1241,7 @@ struct MapTalkPostCoverEntry: View {
     @State private var drag = MapTalkPostEntryDrag()
     @GestureState private var isDragging = false
     @State private var suppressTapUntil = Date.distantPast
-    @State private var floatStartedAt = Date.now
-    @State private var floatPausedAt: Date?
+    @State private var floatMotion = MapTalkPostEntryFloat()
 
     private let shape = RoundedRectangle(cornerRadius: 19, style: .continuous)
 
@@ -906,7 +1268,7 @@ struct MapTalkPostCoverEntry: View {
     }
 
     private var canFloat: Bool {
-        !isActive && !reduceMotion && scenePhase == .active && !isPressed && !drag.isActive
+        isVisible && !isActive && !reduceMotion && scenePhase == .active && !isPressed && !drag.isActive
     }
 
     private func constrained(_ point: CGPoint) -> CGPoint {
@@ -916,8 +1278,7 @@ struct MapTalkPostCoverEntry: View {
 
     private func floatingOffset(at date: Date) -> CGFloat {
         guard !reduceMotion else { return 0 }
-        let elapsed = (floatPausedAt ?? date).timeIntervalSince(floatStartedAt)
-        return sin(elapsed * .pi / 2.4) * 2.5
+        return floatMotion.offset(at: date)
     }
 
     private var coverURL: URL? {
@@ -931,8 +1292,13 @@ struct MapTalkPostCoverEntry: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !canFloat)) { context in
-            coverButton.offset(y: floatingOffset(at: context.date))
+        TimelineView(.animation(minimumInterval: 1.0 / 30,
+                                paused: !canFloat || floatMotion.isSettled)) { context in
+            coverButton
+                .offset(y: floatingOffset(at: context.date))
+                .onChangeCompat(of: floatMotion.isComplete(at: context.date)) { complete in
+                    if complete { floatMotion.settle() }
+                }
         }
         .shadow(color: .black.opacity(0.16), radius: 5, x: 0, y: 3)
         // Only the postcard owns a drag. Its full-canvas positioning space
@@ -949,15 +1315,9 @@ struct MapTalkPostCoverEntry: View {
                 $0.disablesAnimations = true
             }
         }
-        .onChangeCompat(of: canFloat) { enabled in
-            let now = Date.now
-            if enabled, let pausedAt = floatPausedAt {
-                floatStartedAt = floatStartedAt.addingTimeInterval(now.timeIntervalSince(pausedAt))
-                floatPausedAt = nil
-            } else if !enabled, floatPausedAt == nil {
-                floatPausedAt = now
-            }
-        }
+        .onAppear { floatMotion.setRunning(canFloat, at: .now) }
+        .onDisappear { floatMotion.setRunning(false, at: .now) }
+        .onChangeCompat(of: canFloat) { floatMotion.setRunning($0, at: .now) }
         .onChangeCompat(of: isDragging) { dragging in
             guard !dragging else { return }
             // GestureState can reset before onEnded delivers its final sample.
@@ -1027,8 +1387,7 @@ struct MapTalkPostCoverEntry: View {
                                  y: mapCenter.y + floatingOffset(at: now))
             updateDragImmediately {
                 position = center
-                floatStartedAt = now
-                floatPausedAt = now
+                floatMotion = MapTalkPostEntryFloat(at: now)
             }
             action()
         } label: {
@@ -1112,6 +1471,45 @@ struct MapTalkPostCoverEntry: View {
                     .padding(9)
             }
     }
+}
+
+/// Keep the gentle invitation, then rest instead of redrawing an idle map
+/// accessory forever. Pauses keep the exact offset used by the zoom source.
+struct MapTalkPostEntryFloat {
+    static let duration: TimeInterval = 9.6
+    private var startedAt: Date
+    private var pausedAt: Date?
+    private(set) var isSettled = false
+
+    init(at date: Date = .now) {
+        startedAt = date
+        pausedAt = date
+    }
+
+    func offset(at date: Date) -> CGFloat {
+        guard !isSettled, !isComplete(at: date) else { return 0 }
+        let elapsed = max(0, (pausedAt ?? date).timeIntervalSince(startedAt))
+        // Fade the final half-cycle with zero velocity at rest; do not snap
+        // back to baseline when the TimelineView stops scheduling frames.
+        let fade = min(1, (Self.duration - elapsed) / 2.4)
+        let envelope = fade * fade * (3 - 2 * fade)
+        return sin(elapsed * .pi / 2.4) * 2.5 * envelope
+    }
+
+    func isComplete(at date: Date) -> Bool {
+        (pausedAt ?? date) >= startedAt.addingTimeInterval(Self.duration)
+    }
+
+    mutating func setRunning(_ running: Bool, at date: Date) {
+        if running, let pausedAt {
+            startedAt = startedAt.addingTimeInterval(date.timeIntervalSince(pausedAt))
+            self.pausedAt = nil
+        } else if !running, pausedAt == nil {
+            pausedAt = date
+        }
+    }
+
+    mutating func settle() { isSettled = true }
 }
 
 /// Local gesture state only. Parent map placement is committed once on release,

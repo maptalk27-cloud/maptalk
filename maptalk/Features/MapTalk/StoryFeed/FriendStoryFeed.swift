@@ -61,7 +61,9 @@ struct FriendStoryPage: Identifiable {
     var locationKey: String? {
         guard coordinate != nil else { return nil }
         switch content {
-        case .reel: return "reel:\(memoryID.uuidString)"
+        case let .reel(post):
+            return PostPlaceGrouping.placeKey(for: post).map { "post-place:\($0)" }
+                ?? "reel:\(memoryID.uuidString)"
         case let .poi(rated, _, _): return "place:\(rated.id.uuidString)"
         }
     }
@@ -265,7 +267,7 @@ enum FriendStoryFeed {
                     attachments: descriptors.compactMap { cached[$0.id] }, capsuleId: projected?.capsuleId,
                     likes: projected?.likes ?? [], comments: projected?.comments ?? [], visibility: .publicAll,
                     createdAt: record.createdAt, expiresAt: expiresAt, publishedAt: record.publishedAt,
-                    locationName: record.locationName)
+                    locationName: record.locationName, locationID: record.locationId)
                 pages.append(reelPage(real, descriptors: descriptors,
                     expiresAt: postHistory ? .distantFuture : expiresAt))
             case "poi":
