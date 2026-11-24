@@ -15,6 +15,10 @@ enum StoryReadKeys {
         "poi-page:\(poiId.uuidString):\(checkInId.uuidString):\(mediaId.uuidString):\(timestampToken(timestamp))"
     }
 
+    static func poiVisit(poiId: UUID, checkInId: UUID, timestamp: Date) -> String {
+        "poi-visit:\(poiId.uuidString):\(checkInId.uuidString):\(timestampToken(timestamp))"
+    }
+
     static func expiresAt(forActivityAt date: Date) -> Date {
         date.addingTimeInterval(freshWindow)
     }

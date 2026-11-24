@@ -142,6 +142,7 @@ struct FriendStoryContentView: View {
     var showsFloatingHeader = true
     var showsVisitExpression = false
     var showsPersonalVisitCount = false
+    var personalVisitCountLabel: String? = nil
     var showsHeaderTimestamp = true
     var placeAuthors: [User] = []
     var allowsPOIMediaLightbox = true
@@ -193,7 +194,7 @@ struct FriendStoryContentView: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                if !isExpanded || (mediaExpression != nil && page.kind == .poiLocationOnly),
+                if !isExpanded || page.kind == .poiLocationOnly,
                    let mediaPlaybackFooter {
                     mediaPlaybackFooter
                         .padding(.horizontal, 20)
@@ -269,6 +270,7 @@ struct FriendStoryContentView: View {
             onSelectPage: onSelectPage, onClose: onClose, trailingActions: headerActions,
             showsVisitExpression: showsVisitExpression,
             showsPersonalVisitCount: showsPersonalVisitCount,
+            personalVisitCountLabel: personalVisitCountLabel,
             showsTimestamp: showsHeaderTimestamp,
             placeAuthors: placeAuthors)
     }
@@ -454,6 +456,11 @@ struct FriendStoryContentView: View {
             else { content(for: candidate) }
         }
                     .environment(\.poiMediaLightboxEnabled, allowsPOIMediaLightbox)
+                    // The selected visit owns one fixed footer outside this
+                    // pager. Adjacent mounted pages must not repeat its time
+                    // or directions while a swipe is still settling.
+                    .environment(\.experiencePOIPlaybackActions,
+                                 feedPresentation == .personStory ? nil : playbackActions)
                     .background(ExperiencePagerVerticalBounceGuard())
                     // Native paging keeps adjacent cards mounted. Only the
                     // selected card may play, mark read or present a child.
@@ -618,8 +625,10 @@ struct FriendStoryNavigationHeader: View {
     var trailingActions: AnyView? = nil
     var showsVisitExpression = false
     var showsPersonalVisitCount = false
+    var personalVisitCountLabel: String? = nil
     var showsTimestamp = true
     var placeAuthors: [User] = []
+    var showsProgress = true
 
     private var usesQuietVisitSummary: Bool { showsPersonalVisitCount && !showsTimestamp }
     private var visitComment: String? {
@@ -656,28 +665,30 @@ struct FriendStoryNavigationHeader: View {
             .padding(.top, usesQuietVisitSummary ? 2 : 0)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("friend-story.author-navigation")
-            .accessibilityValue("Stop \(momentIndex + 1) of \(group.moments.count)")
+            .accessibilityValue(showsProgress ? "Stop \(momentIndex + 1) of \(group.moments.count)" : "")
 
-            FriendStoryProgressBars(count: group.moments.count,
-                                    index: momentIndex, pageID: page.id,
-                                    pageIndex: pageIndex, pageCount: group.pages.count,
-                                    authorName: author?.handle ?? "Member",
-                                    onSelect: { index in
-                guard canNavigate, group.moments.indices.contains(index) else { return }
-                onSelectPage(group.moments[index].pageRange.lowerBound)
-            })
-                .frame(height: usesQuietVisitSummary ? 22 : 24)
-                .accessibilityHint("Tap the progress bar to choose an update")
-                .accessibilityAdjustableAction { direction in
-                    switch direction {
-                    case .increment: onNextPage()
-                    case .decrement: onPreviousPage()
-                    @unknown default: break
+            if showsProgress {
+                FriendStoryProgressBars(count: group.moments.count,
+                                        index: momentIndex, pageID: page.id,
+                                        pageIndex: pageIndex, pageCount: group.pages.count,
+                                        authorName: author?.handle ?? "Member",
+                                        onSelect: { index in
+                    guard canNavigate, group.moments.indices.contains(index) else { return }
+                    onSelectPage(group.moments[index].pageRange.lowerBound)
+                })
+                    .frame(height: usesQuietVisitSummary ? 22 : 24)
+                    .accessibilityHint("Tap the progress bar to choose an update")
+                    .accessibilityAdjustableAction { direction in
+                        switch direction {
+                        case .increment: onNextPage()
+                        case .decrement: onPreviousPage()
+                        @unknown default: break
+                        }
                     }
-                }
-                .accessibilityAction(named: "Previous update", onPreviousPage)
-                .accessibilityAction(named: "Next update", onNextPage)
-                .padding(.horizontal, 16)
+                    .accessibilityAction(named: "Previous update", onPreviousPage)
+                    .accessibilityAction(named: "Next update", onNextPage)
+                    .padding(.horizontal, 16)
+            }
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .contain)
@@ -811,13 +822,14 @@ struct FriendStoryNavigationHeader: View {
 
     @ViewBuilder
     private var personalVisitCount: some View {
-        if let total = personalVisitTotal {
-            Text(total == 1 ? "1 visit" : "\(total) visits")
+        if showsPersonalVisitCount,
+           let label = personalVisitCountLabel ?? personalVisitTotal.map({ $0 == 1 ? "1 visit" : "\($0) visits" }) {
+            Text(label)
                 .font(.system(size: usesQuietVisitSummary ? 11 : 12, weight: .medium))
                 .foregroundStyle(.white.opacity(usesQuietVisitSummary ? 0.55 : 0.78))
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
-                .accessibilityLabel("\(total) visits to this place")
+                .accessibilityLabel("\(label) to this place")
         }
     }
 }
@@ -957,6 +969,7 @@ struct FriendStoryPOIPreview: View {
     @State private var isLightboxPresented = false
     @State private var childPresentationID = UUID()
     @Environment(\.friendStoryChildPresentationChanged) private var childPresentationChanged
+    @Environment(\.poiMediaLightboxEnabled) private var lightboxEnabled
 
     private var item: ExperienceDetailView.MediaDisplayItem {
         switch media.kind {
@@ -969,23 +982,23 @@ struct FriendStoryPOIPreview: View {
 
     var body: some View {
         ZStack {
-            Button {
-                guard isPlaybackActive else { return }
-                if let onMediaTap { onMediaTap() }
-                else { isLightboxPresented = true }
-            } label: {
-                GeometryReader { geometry in
-                    ExperienceDetailView.MediaCardView(item: item,
-                        accentColor: place.poi.category.accentColor, mode: .card,
-                        isPlaybackActive: isPlaybackActive && !isLightboxPresented,
-                        blendsWithBackground: true)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .clipped()
+            Group {
+                if onMediaTap != nil || lightboxEnabled {
+                    Button {
+                        guard isPlaybackActive else { return }
+                        if let onMediaTap { onMediaTap() }
+                        else if lightboxEnabled { isLightboxPresented = true }
+                    } label: {
+                        mediaCanvas
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(onMediaTap == nil ? "Open check-in media" : "Expand check-in card")
+                } else {
+                    // Expanded instant browsing is already the media viewer.
+                    // Do not expose an inert button or reopen the old lightbox.
+                    mediaCanvas
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(onMediaTap == nil ? "Open check-in media" : "Expand check-in card")
             .accessibilityIdentifier("friend-story.poi.media.\(media.id.uuidString)")
             // A same-place media run draws one fixed layer outside its pager.
             // Standalone and neighboring places still own their own chrome.
@@ -1011,6 +1024,18 @@ struct FriendStoryPOIPreview: View {
                 .environment(\.friendStoryOnMediaReady, nil)
                 .environment(\.friendStoryChildPresentationChanged, nil)
         }
+    }
+
+    private var mediaCanvas: some View {
+        GeometryReader { geometry in
+            ExperienceDetailView.MediaCardView(item: item,
+                accentColor: place.poi.category.accentColor, mode: .card,
+                isPlaybackActive: isPlaybackActive && !isLightboxPresented,
+                blendsWithBackground: true)
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipped()
+        }
+        .contentShape(Rectangle())
     }
 }
 

@@ -694,6 +694,7 @@ struct MapTalkView: View {
                                     selection: selectionBinding,
                                     isExpanded: isExpanded,
                                     usesClassicPostPreview: viewModel.isUserScope,
+                                    usesUpdatedPOIStyle: true,
                                     poiBrowsingUserID: viewModel.scopedUser?.id,
                                     poiOverviewID: poiOverviewID,
                                     onCollapsedTap: presentation.expand,
@@ -716,6 +717,7 @@ struct MapTalkView: View {
                             ExperienceDetailView(
                                 ratedPOI: rated,
                                 isExpanded: isExpanded,
+                                usesUpdatedPOIStyle: true,
                                 onCollapsedTap: presentation.expand,
                                 userProvider: viewModel.user(for:),
                                 onPOIContributorViewed: markStoryReadKeysViewed,
@@ -752,6 +754,7 @@ struct MapTalkView: View {
                             ExperienceDetailView(
                                 ratedPOI: rated,
                                 isExpanded: isExpanded,
+                                usesUpdatedPOIStyle: true,
                                 onCollapsedTap: presentation.expand,
                                 userProvider: viewModel.user(for:),
                                 onPOIContributorViewed: markStoryReadKeysViewed,

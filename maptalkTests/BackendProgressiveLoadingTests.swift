@@ -19,7 +19,10 @@ struct BackendProgressiveLoadingTests {
         let rowObserver = rowActions.$memories.dropFirst().sink { _ in rowUpdates += 1 }
         defer { recordsObserver.cancel(); rowObserver.cancel() }
 
+        #expect(!context.store.hasPreparedMedia(for: context.recordID), "Unknown records are not ready")
         try await context.store.refresh()
+        #expect(context.store.hasPreparedMedia(for: context.recordID), "A known no-media record is ready")
+        #expect(!context.store.hasPreparedMedia(for: UUID()))
         #expect(!counts.isEmpty)
         #expect(counts.allSatisfy { $0 == 32 }, "Subscribers must never receive a half-filled metadata batch")
         #expect(counts.count <= 8, "Refreshing 32 owned records must not emit once per record")
@@ -133,8 +136,10 @@ struct BackendProgressiveLoadingTests {
         #expect(beforeAssets.id == context.recordID)
         #expect(beforeAssets.media.map(\.id) == [context.videoID, context.photoID])
         #expect(context.store.feedReels.value.first?.attachments.isEmpty == true)
+        #expect(!context.store.hasPreparedMedia(for: context.recordID), "Metadata alone is not media readiness")
         photo.respond(context.photo, contentType: "image/png")
         try await operation.value
+        #expect(!context.store.hasPreparedMedia(for: context.recordID), "A loaded photo cannot hide a missing video")
         #expect(context.mediaRequestPaths == [context.photoPath], "Opening the feed must not download every MP4")
         let selection = Task { try await context.store.ensureMedia(for: [context.recordID]) }
         defer { selection.cancel() }
@@ -149,9 +154,11 @@ struct BackendProgressiveLoadingTests {
             $0.map(\.id) == [context.recordID] && $0.first?.media.map(\.id) == [context.videoID, context.photoID]
         })
         #expect(context.store.feedReels.value.first?.attachments.map(\.id) == [context.videoID, context.photoID])
+        #expect(context.store.hasPreparedMedia(for: context.recordID))
         #expect(archiveRefreshes == 1, "Other people's feed media must not rebuild MyMap")
         #expect(profileRefreshes == 1, "Other people's feed media must not rebuild the owner's Profile")
         context.store.clearLocalMedia()
+        #expect(!context.store.hasPreparedMedia(for: context.recordID), "A signed-out store is never ready")
         #expect(context.store.feedRecords.value.isEmpty, "Sign-out must clear raw metadata as well as cards")
     }
 
@@ -227,6 +234,7 @@ struct BackendProgressiveLoadingTests {
         #expect(context.store.ownPublicReels.isEmpty)
         #expect(context.store.feedReels.value.isEmpty)
         #expect(context.store.cachedSnapshot(for: [context.recordID], publicOnly: true).reels.isEmpty)
+        #expect(!context.store.hasPreparedMedia(for: context.recordID))
 
         let first = Task { try await context.store.ensureMedia(for: [context.recordID]) }
         defer { first.cancel() }
@@ -242,6 +250,7 @@ struct BackendProgressiveLoadingTests {
         let secondResult = try await second.value
         #expect(firstResult.reels.first?.attachments.map(\.id) == [context.videoID, context.photoID])
         #expect(secondResult.reels.first?.attachments.map(\.id) == [context.videoID, context.photoID])
+        #expect(context.store.hasPreparedMedia(for: context.recordID), "The owner's prepared private archive is authorized")
         _ = try await context.store.ensureMedia(for: [context.recordID])
         #expect(context.mediaRequestPaths == [context.photoPath, context.videoPath],
             "Concurrent selection and repeat opens share the same download; unrelated historical videos stay cold")
@@ -320,6 +329,7 @@ struct BackendProgressiveLoadingTests {
         photo.respond(context.photo, contentType: "image/png")
         try await operation.value
         #expect(context.mediaRequestPaths == [context.photoPath])
+        #expect(!context.store.hasPreparedMedia(for: context.recordID))
         let selection = Task { try await context.store.ensureMedia(for: [context.recordID]) }
         defer { selection.cancel() }
         let source = try await VideoTestFixture.makeVideo()
@@ -333,6 +343,8 @@ struct BackendProgressiveLoadingTests {
         #expect(context.store.journey(for: context.recordID, publicOnly: true)?
             .reels.first?.attachments.map(\.id) == [context.bubbleVideoID])
         #expect(context.store.cachedSnapshot(for: [context.bubbleMemberID]).reels.isEmpty)
+        #expect(context.store.hasPreparedMedia(for: context.recordID), "All attached Bubble media belongs to parent readiness")
+        #expect(!context.store.hasPreparedMedia(for: context.bubbleMemberID), "Private snapshot members are not standalone authorized records")
         #expect(context.store.feedRecords.value.map(\.id) == [context.recordID])
         #expect(context.store.feedReels.value.map(\.id) == [context.recordID])
     }
@@ -359,6 +371,7 @@ struct BackendProgressiveLoadingTests {
         catch is CancellationError {}
         #expect(mediaUpdates == 0)
         #expect(context.store.cachedSnapshot(for: [context.recordID]).reels.isEmpty)
+        #expect(!context.store.hasPreparedMedia(for: context.recordID), "Deleted or blocked records are never ready")
         #expect(try await context.store.ensureMedia(for: [context.recordID]).reels.isEmpty)
     }
 

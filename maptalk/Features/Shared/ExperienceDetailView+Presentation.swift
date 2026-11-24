@@ -78,22 +78,8 @@ extension ExperienceDetailView {
             if let context = sequenceContext, context.pager.items.count > 1 {
                 TabView(selection: context.selection) {
                     ForEach(context.pager.items) { item in
-                        ExperiencePanel(
-                            data: contentData(for: item.mode),
-                            onRecentSharerSelected: { index, data in
-                                openRecentSharer(at: index, using: data)
-                            },
-                            journeyProvider: journeyProvider,
-                            userProvider: userProvider,
-                            onJourneyAvatarStackTap: onJourneyAvatarStackTap,
-                            onUserSelected: openProfile,
-                            onPOIContributorViewed: onPOIContributorViewed,
-                            isPOIContributorUnseen: isPOIContributorUnseen,
-                            isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id,
-                            usesNeutralAppearance: isClassicPostPreview,
-                            commentTarget: item.mode.commentTarget,
-                            featuredPOIMedia: browsingPOIMedia(for: item.mode)
-                        )
+                        expandedPage(for: item.mode,
+                            isPlaybackActive: isMediaPlaybackActive && context.selection.wrappedValue == item.id)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .postPlaceChromePage(postID: item.id)
                         .background(ExperiencePagerVerticalBounceGuard())
@@ -102,8 +88,23 @@ extension ExperienceDetailView {
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
             } else {
+                expandedPage(for: currentMode, isPlaybackActive: isMediaPlaybackActive,
+                    featuredPOIMedia: expandedPOIMedia, featuredPOIMediaContent: expandedPOIMediaContent)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func expandedPage(for mode: Mode, isPlaybackActive: Bool,
+                              featuredPOIMedia: RatedPOI.Media? = nil,
+                              featuredPOIMediaContent: AnyView? = nil) -> some View {
+        if let context = personalPOIBrowsingContext(for: mode) {
+            personalPOIPreview(place: context.place, selection: context.selection,
+                               isPlaybackActive: isPlaybackActive)
+        } else {
+            updatedPOIOverview(for: mode) {
                 ExperiencePanel(
-                    data: data,
+                    data: contentData(for: mode),
                     onRecentSharerSelected: { index, content in
                         openRecentSharer(at: index, using: content)
                     },
@@ -113,11 +114,11 @@ extension ExperienceDetailView {
                     onUserSelected: openProfile,
                     onPOIContributorViewed: onPOIContributorViewed,
                     isPOIContributorUnseen: isPOIContributorUnseen,
-                    isPlaybackActive: isMediaPlaybackActive,
+                    isPlaybackActive: isPlaybackActive,
                     usesNeutralAppearance: isClassicPostPreview,
-                    commentTarget: currentMode.commentTarget,
-                    featuredPOIMedia: expandedPOIMedia ?? browsingPOIMedia(for: currentMode),
-                    featuredPOIMediaContent: expandedPOIMediaContent
+                    commentTarget: mode.commentTarget,
+                    featuredPOIMedia: featuredPOIMedia ?? browsingPOIMedia(for: mode),
+                    featuredPOIMediaContent: featuredPOIMediaContent
                 )
             }
         }
@@ -145,7 +146,7 @@ extension ExperienceDetailView {
                     .frame(width: size.width, height: size.height)
                 } else {
                     Group {
-                        if usesClassicPostPreview, poiBrowsingUserID != nil {
+                        if usesUpdatedPOIStyle || (usesClassicPostPreview && poiBrowsingUserID != nil) {
                             collapsedPreviewContent(for: currentMode,
                                 isPlaybackActive: isMediaPlaybackActive, viewportHeight: size.height)
                         } else {
@@ -158,7 +159,9 @@ extension ExperienceDetailView {
             }
             // This preview already uses the full measured width. The custom
             // place overview must not inherit the legacy leftward sheet offset.
-            .padding(.horizontal, usesNeutralPreviewBackground || isClassicPOIMediaPreview || poiVisitorSummary != nil
+            .padding(.horizontal, usesNeutralPreviewBackground || isClassicPOIMediaPreview
+                || personalPOIBrowsingContext != nil || poiVisitorSummary != nil
+                || (usesUpdatedPOIStyle && data.poiInfo != nil)
                 ? 0 : -ExperienceSheetLayout.horizontalInset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -177,7 +180,8 @@ extension ExperienceDetailView {
                   case .video = attachment.kind else { return false }
             return true
         case let .poi(place):
-            return !isExpanded && browsingPOISelection(for: place)?.media != nil
+            return personalPOIBrowsingContext(for: mode) != nil
+                || (!isExpanded && browsingPOISelection(for: place)?.media != nil)
         case .journey:
             return false
         }
@@ -185,11 +189,144 @@ extension ExperienceDetailView {
 
     @ViewBuilder
     private func collapsedPreviewContent(for mode: Mode, isPlaybackActive: Bool, viewportHeight: CGFloat) -> some View {
-        if case let .poi(place) = mediaResolvedMode(mode),
+        if let context = personalPOIBrowsingContext(for: mode) {
+            personalPOIPreview(place: context.place, selection: context.selection,
+                               isPlaybackActive: isPlaybackActive)
+        } else if case let .poi(place) = mediaResolvedMode(mode),
            let media = browsingPOISelection(for: place)?.media {
             FriendStoryPOIPreview(place: place, media: media, isPlaybackActive: isPlaybackActive)
         } else {
-            collapsedPreviewLayer(using: contentData(for: mode), viewportHeight: viewportHeight)
+            updatedPOIOverview(for: mode) {
+                collapsedPreviewLayer(using: contentData(for: mode), viewportHeight: viewportHeight)
+            }
+        }
+    }
+
+    /// Personal history shares the instant visual, never the active-feed
+    /// membership window. An explicit place open is its only overview opt-out.
+    var personalPOIBrowsingContext: (place: RatedPOI, selection: POIStorySelection)? {
+        personalPOIBrowsingContext(for: currentMode)
+    }
+
+    private func personalPOIBrowsingContext(for mode: Mode) -> (place: RatedPOI, selection: POIStorySelection)? {
+        guard usesUpdatedPOIStyle, poiStorySelection == nil,
+              case let .poi(place) = mediaResolvedMode(mode),
+              let selection = browsingPOISelection(for: place) else { return nil }
+        return (place, selection)
+    }
+
+    @ViewBuilder
+    private func updatedPOIOverview<Content: View>(for mode: Mode,
+                                                  @ViewBuilder content: () -> Content) -> some View {
+        if case let .poi(place) = mediaResolvedMode(mode) {
+            content()
+                .modifier(POIPlaceOverviewStyle(place: place, userProvider: userProvider,
+                    isExpanded: isExpanded,
+                    isEnabled: usesUpdatedPOIStyle && poiStorySelection == nil
+                        && browsingPOISelection(for: place) == nil,
+                    onUserSelected: openProfile,
+                    onContributorViewed: onPOIContributorViewed,
+                    isContributorUnseen: isPOIContributorUnseen))
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if personalPOIOverviewID == place.id {
+                        Button {
+                            personalPOIOverviewID = nil
+                        } label: {
+                            Label("Back to visit", systemImage: "chevron.left")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 20)
+                        .background(Color.black.opacity(0.35))
+                        .accessibilityIdentifier("personal-poi.overview.back")
+                    }
+                }
+        } else {
+            content()
+        }
+    }
+
+    private func personalPOIPreview(place: RatedPOI, selection: POIStorySelection,
+                                    isPlaybackActive: Bool) -> some View {
+        ZStack {
+            if let media = selection.media {
+                FriendStoryPOIPreview(place: place, media: media,
+                    isPlaybackActive: isPlaybackActive, showsPlaceChrome: false,
+                    onMediaTap: isExpanded ? nil : onCollapsedTap)
+                    .environment(\.poiMediaLightboxEnabled, false)
+            } else {
+                // A location-only visit remains its own memory even when an
+                // older visit at this place has attractive, cached media.
+                VStack(spacing: 10) {
+                    switch personalPOIMediaState(for: selection.checkIn.id) {
+                    case .loading:
+                        ProgressView().tint(.white)
+                        Text("Loading this visit’s media…")
+                            .font(.subheadline)
+                    case .unavailable:
+                        Image(systemName: "photo.badge.exclamationmark")
+                            .font(.system(size: 32))
+                        Text("Media is unavailable right now")
+                            .font(.subheadline)
+                    case .empty:
+                        Image(systemName: "mappin.and.ellipse")
+                            .font(.system(size: 40))
+                        Text("No photo or video from this visit")
+                            .font(.subheadline)
+                    }
+                }
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(white: 0.12))
+            }
+            LinearGradient(stops: [
+                .init(color: .black.opacity(0.5), location: 0),
+                .init(color: .clear, location: 0.42),
+                .init(color: .clear, location: 0.55),
+                .init(color: .black.opacity(0.6), location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+            .allowsHitTesting(false)
+        }
+        .overlay(alignment: .topLeading) {
+            POIStoryPlaceHeading(place: place, onOpen: {
+                personalPOIOverviewID = place.id
+                if !isExpanded { onCollapsedTap?() }
+            })
+            .padding(.horizontal, 20)
+            .padding(.top, 28)
+        }
+        .overlay(alignment: .bottom) {
+            POIStoryPlaybackFooter(place: place, publishedAt: selection.checkIn.activityDate)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("personal-poi.instant.\(selection.checkIn.id.uuidString)")
+    }
+
+    @ViewBuilder
+    func personalPOINavigationHeader(onClose: @escaping () -> Void) -> some View {
+        if let context = personalPOIBrowsingContext {
+            let visit = context.selection.checkIn
+            let author = userProvider(visit.userId)
+            // Adapter for shared presentation only. The outer Post/POI pager
+            // still owns navigation; no feed expiry or read state is inferred.
+            let page = FriendStoryPage(id: "personal-poi-\(visit.id.uuidString)",
+                authorID: visit.userId, memoryID: visit.id, mediaID: context.selection.media?.id,
+                publishedAt: visit.activityDate, capturedAt: visit.createdAt,
+                expiresAt: .distantFuture, readKey: "", kind: context.selection.media == nil ? .poiLocationOnly : .poiMedia,
+                expectedMedia: [], content: .poi(context.place, visit, context.selection.media))
+            let group = FriendStoryGroup(authorID: visit.userId, user: author, pages: [page])
+            FriendStoryNavigationHeader(author: author, group: group, page: page,
+                pageIndex: 0, canNavigate: false,
+                onAuthor: { if let author { openProfile(for: author) } },
+                onPreviousPage: {}, onNextPage: {}, onSelectPage: { _ in }, onClose: onClose,
+                showsVisitExpression: true, showsPersonalVisitCount: true,
+                showsTimestamp: false, showsProgress: false)
         }
     }
 

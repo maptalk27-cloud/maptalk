@@ -311,6 +311,7 @@ struct FriendStoryFlow: View {
     var onRetryPosts: () -> Void = {}
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appEnv) private var environment
+    @Environment(\.colorScheme) private var inheritedRouteColorScheme
     @State private var placeHistoryStatus: [UUID: PlaceHistoryStatus] = [:]
     @State private var placeHistoryRetry: [UUID: Int] = [:]
     @State private var placeHistoryPages: [UUID: BackendStore.PlaceHistoryPage] = [:]
@@ -365,8 +366,17 @@ struct FriendStoryFlow: View {
                     journeyProvider: journeyProvider,
                     userProvider: userProvider,
                     placeProvider: placeProvider,
-                    feedPresentation: feedPresentation
+                    feedPresentation: feedPresentation,
+                    showsVisitExpression: feedPresentation == .personStory,
+                    showsPersonalVisitCount: feedPresentation == .personStory,
+                    personalVisitCountLabel: recentVisitLabel(for: page, in: group),
+                    showsHeaderTimestamp: feedPresentation != .personStory,
+                    allowsPOIMediaLightbox: feedPresentation != .personStory
                 )
+                .environment(\.experiencePOIHistoryVisible, feedPresentation != .personStory)
+                .environment(\.experiencePOIRecentSharersVisible, feedPresentation != .personStory)
+                .environment(\.experiencePOIPlaceHeader, instantPlaceHeader(for: page))
+                .environment(\.experiencePOIPlaybackActions, instantPlaybackFooter(for: page))
                 .opacity(navigation.routes.isEmpty ? 1 : 0)
                 .allowsHitTesting(navigation.routes.isEmpty)
                 .accessibilityHidden(!navigation.routes.isEmpty)
@@ -402,6 +412,10 @@ struct FriendStoryFlow: View {
                         .padding(.bottom, 4)
                 }
             }
+        }
+        .onChangeCompat(of: isExpanded) { expanded in
+            guard !expanded else { return }
+            returnFromPlaceAfterCollapse()
         }
     }
 
@@ -455,20 +469,63 @@ struct FriendStoryFlow: View {
         focusPage(page)
     }
 
-    private func openPlace(_ id: UUID) {
-        guard let place = placeProvider(id) else { return }
+    private func routeColorScheme(_ route: FriendStoryNavigation.Route) -> ColorScheme {
+        if case .place = route.content { return .dark }
+        return inheritedRouteColorScheme
+    }
+
+    private func recentVisitLabel(for page: FriendStoryPage, in group: FriendStoryGroup) -> String? {
+        guard feedPresentation == .personStory, case let .poi(place, _, _) = page.content else { return nil }
+        // Home owns an active feed, not the author's lifetime place archive.
+        // Count visits rather than media slices and name that scope honestly.
+        let count = Set(group.pages.compactMap { candidate -> UUID? in
+            guard case let .poi(candidatePlace, visit, _) = candidate.content,
+                  candidatePlace.id == place.id, visit.userId == page.authorID else { return nil }
+            return visit.id
+        }).count
+        return count == 1 ? "1 recent visit" : "\(count) recent visits"
+    }
+
+    private func instantPlaceHeader(for page: FriendStoryPage) -> ((UUID) -> AnyView?)? {
+        guard feedPresentation == .personStory, case let .poi(currentPlace, _, _) = page.content else { return nil }
+        let pages = navigation.session?.pagesInStoryOrder ?? []
+        return { id in
+            let place = placeProvider(id) ?? pages.compactMap { candidate -> RatedPOI? in
+                guard case let .poi(place, _, _) = candidate.content, place.id == id else { return nil }
+                return place
+            }.first
+            guard let place else { return nil }
+            // A neighboring native page can already be mounted while its
+            // swipe is still settling. Only the current heading opens a route.
+            return AnyView(POIStoryPlaceHeading(place: place,
+                onOpen: id == currentPlace.id ? { openPlace(id, from: page) } : nil))
+        }
+    }
+
+    private func instantPlaybackFooter(for page: FriendStoryPage) -> AnyView? {
+        guard feedPresentation == .personStory, case let .poi(place, _, _) = page.content else { return nil }
+        return AnyView(POIStoryPlaybackFooter(place: place, publishedAt: page.publishedAt))
+    }
+
+    private func openPlace(_ id: UUID, from sourcePage: FriendStoryPage) {
+        guard navigation.routes.isEmpty, allowsPlayback,
+              navigation.session?.currentPage?.id == sourcePage.id,
+              case let .poi(sourcePlace, _, _) = sourcePage.content,
+              sourcePlace.id == id else { return }
+        let place = placeProvider(id) ?? sourcePlace
         let isCurrentPlace: Bool
         if case let .poi(current, _, _)? = navigation.session?.currentPage?.content {
             isCurrentPlace = navigation.routes.isEmpty && current.id == id
         } else { isCurrentPlace = false }
-        navigation.push(.init(
+        guard navigation.push(.init(
             content: .place(place),
             returnCamera: captureCamera(),
             returnDetent: detent
-        ))
+        ), from: sourcePage) else { return }
         if Self.shouldFocusPlace(isCurrentPlace: isCurrentPlace, isExpanded: isExpanded) {
             focusContent(.poi(place))
         }
+        withAnimation(.easeInOut(duration: 0.24)) { detent = .large }
     }
 
     private func openBubble(_ bubble: JourneyPost, from sourcePage: FriendStoryPage? = nil) {
@@ -526,6 +583,7 @@ struct FriendStoryFlow: View {
                     ExperienceDetailView(
                         ratedPOI: place,
                         isExpanded: isExpanded,
+                        usesUpdatedPOIStyle: true,
                         onCollapsedTap: { detent = .large },
                         userProvider: userProvider,
                         onPOIContributorViewed: { $0.forEach(onRead) },
@@ -623,6 +681,7 @@ struct FriendStoryFlow: View {
                 }
             }
         }
+        .environment(\.colorScheme, routeColorScheme(route))
         .environment(\.friendStoryPlaybackEnabled, allowsPlayback && scenePhase == .active && navigation.routes.last?.id == route.id)
         .task(id: allowsPlayback && scenePhase == .active && navigation.routes.last?.id == route.id ? route.id : nil) {
             guard allowsPlayback, scenePhase == .active, navigation.routes.last?.id == route.id,
@@ -716,6 +775,19 @@ struct FriendStoryFlow: View {
     private func isBubbleRoute(_ route: FriendStoryNavigation.Route) -> Bool {
         if case .bubble = route.content { return true }
         return false
+    }
+
+    private func returnFromPlaceAfterCollapse() {
+        guard feedPresentation == .personStory, detent == compactDetent,
+              navigation.routes.count == 1, let route = navigation.routes.last,
+              case let .place(place) = route.content, let pageID = route.returnPageID,
+              let page = navigation.session?.pagesInStoryOrder.first(where: { $0.id == pageID }),
+              case let .poi(sourcePlace, _, _) = page.content,
+              sourcePlace.id == place.id,
+              navigation.popRoute() != nil else { return }
+        // UIKit has already collapsed. Reveal the retained story at that size,
+        // without restoring its former large detent or reflying the same place.
+        restoreCamera(route.returnCamera)
     }
 
     private func goBack() {

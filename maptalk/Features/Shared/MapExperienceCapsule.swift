@@ -188,6 +188,7 @@ struct MapExperienceCapsule: View {
     @Binding private var selection: UUID
     let isExpanded: Bool
     let usesClassicPostPreview: Bool
+    let usesUpdatedPOIStyle: Bool
     let poiBrowsingUserID: UUID?
     let poiOverviewID: UUID?
     let onCollapsedTap: (() -> Void)?
@@ -203,6 +204,7 @@ struct MapExperienceCapsule: View {
         selection: Binding<UUID>,
         isExpanded: Bool,
         usesClassicPostPreview: Bool = false,
+        usesUpdatedPOIStyle: Bool = false,
         poiBrowsingUserID: UUID? = nil,
         poiOverviewID: UUID? = nil,
         onCollapsedTap: (() -> Void)? = nil,
@@ -217,6 +219,7 @@ struct MapExperienceCapsule: View {
         _selection = selection
         self.isExpanded = isExpanded
         self.usesClassicPostPreview = usesClassicPostPreview
+        self.usesUpdatedPOIStyle = usesUpdatedPOIStyle
         self.poiBrowsingUserID = poiBrowsingUserID
         self.poiOverviewID = poiOverviewID
         self.onCollapsedTap = onCollapsedTap
@@ -234,6 +237,7 @@ struct MapExperienceCapsule: View {
             selection: $selection,
             isExpanded: isExpanded,
             usesClassicPostPreview: usesClassicPostPreview,
+            usesUpdatedPOIStyle: usesUpdatedPOIStyle,
             poiBrowsingUserID: poiBrowsingUserID,
             poiOverviewID: poiOverviewID,
             onCollapsedTap: onCollapsedTap,

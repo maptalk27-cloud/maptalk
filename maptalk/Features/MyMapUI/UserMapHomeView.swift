@@ -3918,6 +3918,7 @@ struct UserMapHomeView: View {
                 pager: .init(items: mapSequenceItems),
                 selection: mapSequenceSelection,
                 isExpanded: mapCapsulePresentation.isExpanded,
+                usesUpdatedPOIStyle: true,
                 poiBrowsingUserID: user.id,
                 poiOverviewID: mapOverviewPOIID,
                 onCollapsedTap: mapCapsulePresentation.expand,

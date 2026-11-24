@@ -763,6 +763,15 @@ final class BackendStore: ObservableObject {
         return project(records)
     }
 
+    /// Read-only readiness for one authorized memory, including attached Bubble
+    /// media. Empty media is ready only for a known, still-visible record.
+    func hasPreparedMedia(for memoryID: UUID) -> Bool {
+        guard isActive, let known = knownMemories[memoryID],
+              let record = currentRecords([known]).first,
+              record.ownerId == user.id || Self.isPubliclyVisible(record) else { return false }
+        return record.attachedMedia.allSatisfy { localMedia[$0.id] != nil }
+    }
+
     /// Full videos belong to a visible card, not to opening the app. Call with
     /// the current memory and, at most, its next neighbor. IDs are exact visits
     /// or Posts, never a shared place ID. Bubble media remains attached to its

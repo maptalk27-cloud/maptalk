@@ -96,6 +96,29 @@ struct POICheckInPeopleTests {
         #expect(rated([]).checkInPersonCount == 0)
     }
 
+    @Test
+    func updatedPlaceOverviewKeepsOldAndLocationOnlyVisitsWithoutDuplicatingPeople() throws {
+        let person = UUID()
+        let friend = UUID()
+        let old = checkIn(user: person, secondsAgo: StoryReadKeys.freshWindow + 100)
+        let latest = checkIn(user: person, secondsAgo: 10, media: false)
+        let other = checkIn(user: friend, secondsAgo: 20)
+        let place = rated([old, other, latest])
+        let contributors = POIPlaceHistoryPresentation.contributors(for: place, userProvider: { _ in nil })
+
+        #expect(contributors.map(\.userId) == [person, friend])
+        let own = try #require(contributors.first)
+        #expect(own.items.map(\.id) == [old.media[0].id, latest.id])
+        #expect(own.items.last?.media.content == .emoji("📍"))
+        #expect(own.items.first?.readKey == readKey(placeID: place.id, checkIn: old))
+        #expect(own.mostRecent == latest.activityDate)
+        // Passing a narrower visibility projection must never recover others.
+        let restricted = POIPlaceHistoryPresentation.contributors(
+            for: rated([latest]), userProvider: { _ in nil })
+        #expect(restricted.map(\.userId) == [person])
+        #expect(restricted.first?.items.map(\.id) == [latest.id])
+    }
+
     private func checkIn(user: UUID, secondsAgo: Double, media: Bool = true) -> RatedPOI.CheckIn {
         .init(userId: user, createdAt: now.addingTimeInterval(-secondsAgo),
             media: media ? [.init(kind: .photo(URL(fileURLWithPath: "/tmp/photo.jpg")))] : [])

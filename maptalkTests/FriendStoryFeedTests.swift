@@ -224,7 +224,26 @@ struct FriendStoryFeedTests {
         #expect(result.pages.map(\.kind) == [.poiLocationOnly, .reelCard])
         #expect(result.pages.allSatisfy { $0.isMediaReady })
         #expect(result.pages.first?.mediaID == nil)
-        #expect(result.pages.first?.readKey.hasPrefix("poi-visit:") == true)
+        let readKey = StoryReadKeys.poiVisit(poiId: uuid(500), checkInId: checkIn.id,
+            timestamp: checkIn.activityDate)
+        #expect(result.pages.first?.readKey == readKey)
+        #expect(readKey == "poi-visit:\(uuid(500).uuidString):\(checkIn.id.uuidString):\(Int(checkIn.activityDate.timeIntervalSinceReferenceDate))",
+            "Extracting the helper must preserve existing persisted read keys")
+    }
+
+    @Test
+    func locationOnlyBackendAndProjectedVisitsShareTheirOriginalReadKey() throws {
+        let metadata = record(id: 101, author: alice, kind: "poi", ago: 20)
+        var projected = visit(id: 101, author: alice, ago: 120, media: [])
+        projected.publishedAt = metadata.publishedAt
+        let backendPage = try #require(groups(records: [metadata]).first?.pages.first)
+        let projectedPage = try #require(groups(places: [place(id: 500, visits: [projected])]).first?.pages.first)
+        let publishedAt = try #require(metadata.publishedAt)
+
+        #expect(backendPage.readKey == projectedPage.readKey)
+        #expect(backendPage.readKey == StoryReadKeys.poiVisit(poiId: uuid(500), checkInId: metadata.id,
+            timestamp: publishedAt))
+        #expect(groups(records: [metadata], viewed: [backendPage.readKey]).first?.hasUnviewed == false)
     }
 
     @Test
@@ -300,6 +319,64 @@ struct FriendStoryFeedTests {
         #expect(after.pages.map(\.id) == before.pages.map(\.id))
         #expect(after.readKeys == before.readKeys)
         #expect(after.pages.allSatisfy { $0.isMediaReady })
+    }
+
+    @Test(arguments: [false, true])
+    func backendPOIFeedbackAppearsWithoutACachedVisit(hasMedia: Bool) throws {
+        var metadata = record(id: 101, author: alice, kind: "poi", ago: 20,
+            media: hasMedia ? [backendMedia(700)] : [])
+        metadata.feedback = .init(endorsement: "hype", comment: "A lovely quiet stop")
+        let page = try #require(groups(records: [metadata]).first?.pages.first)
+        guard case let .poi(place, visit, _) = page.content else { Issue.record("Missing POI"); return }
+
+        #expect(visit.endorsement == .hype)
+        #expect(visit.comment == "A lovely quiet stop")
+        #expect(place.checkIns.first { $0.id == metadata.id }?.comment == visit.comment)
+        #expect(page.authorID == metadata.ownerId)
+        #expect(page.memoryID == metadata.id)
+        #expect(page.publishedAt == metadata.publishedAt)
+        #expect(page.isMediaReady == !hasMedia)
+    }
+
+    @Test(arguments: [false, true])
+    func backendPOIFeedbackPreservesProjectedEditsIncludingExplicitClears(cleared: Bool) throws {
+        var metadata = record(id: 101, author: alice, kind: "poi", ago: 20,
+            media: [backendMedia(700), backendMedia(701)])
+        metadata.feedback = .init(endorsement: "hype", comment: "Older server feedback")
+        var projected = visit(id: 101, author: alice, ago: 20, media: [media(700), media(701)])
+        projected.endorsement = cleared ? nil : .solid
+        projected.comment = cleared ? nil : "Newer local feedback"
+        let pages = try #require(groups(places: [place(id: 500, visits: [projected])],
+            records: [metadata]).first?.pages)
+
+        #expect(pages.count == 2)
+        #expect(pages.map(\.mediaID) == [uuid(700), uuid(701)])
+        for page in pages {
+            guard case let .poi(place, visit, _) = page.content else { Issue.record("Missing POI"); continue }
+            #expect(visit.endorsement == projected.endorsement)
+            #expect(visit.comment == projected.comment)
+            #expect(place.checkIns.first { $0.id == metadata.id }?.comment == projected.comment)
+            #expect(page.memoryID == metadata.id)
+            #expect(page.publishedAt == metadata.publishedAt)
+            #expect(page.isMediaReady)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func backendPOIFeedbackRejectsMismatchedCachedVisit(wrongAuthor: Bool) throws {
+        var metadata = record(id: 101, author: alice, kind: "poi", ago: 20)
+        metadata.feedback = .init(endorsement: "solid", comment: "The actual author's note")
+        var mismatched = visit(id: 101, author: wrongAuthor ? bob : alice, ago: 20)
+        mismatched.endorsement = .questionable
+        mismatched.comment = "Must not appear"
+        let page = try #require(groups(places: [place(id: wrongAuthor ? 500 : 501, visits: [mismatched])],
+            records: [metadata]).first?.pages.first)
+        guard case let .poi(place, visit, _) = page.content else { Issue.record("Missing POI"); return }
+
+        #expect(place.id == uuid(500))
+        #expect(visit.userId == alice)
+        #expect(visit.endorsement == .solid)
+        #expect(visit.comment == "The actual author's note")
     }
 
     @Test

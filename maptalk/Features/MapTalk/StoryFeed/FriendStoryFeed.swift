@@ -282,10 +282,21 @@ enum FriendStoryFeed {
                 }
                 let cached = Dictionary((existing?.media ?? []).map { ($0.id, $0) },
                     uniquingKeysWith: { first, _ in first })
+                let endorsement: RatedPOI.Endorsement?
+                let comment: String?
+                if let existing {
+                    // The projection may include a pending edit, including an
+                    // explicit clear. Do not revive older server feedback.
+                    endorsement = existing.endorsement
+                    comment = existing.comment
+                } else {
+                    endorsement = record.feedback?.endorsement.flatMap(RatedPOI.Endorsement.init(rawValue:))
+                    comment = record.feedback?.comment.isEmpty == false ? record.feedback?.comment : nil
+                }
                 let visit = RatedPOI.CheckIn(id: record.id, userId: record.ownerId,
-                    createdAt: record.createdAt, endorsement: existing?.endorsement,
+                    createdAt: record.createdAt, endorsement: endorsement,
                     media: descriptors.compactMap { cached[$0.id] }, tag: existing?.tag,
-                    publishedAt: record.publishedAt)
+                    publishedAt: record.publishedAt, comment: comment)
                 // Usually the shared projection is already current. Avoid a
                 // copy-on-write of the entire place's visits for every page.
                 if existing != visit {
@@ -335,7 +346,8 @@ enum FriendStoryFeed {
             return [.init(id: "poi:\(checkIn.id.uuidString):visit", authorID: checkIn.userId,
                 memoryID: checkIn.id, mediaID: nil, publishedAt: checkIn.activityDate,
                 capturedAt: checkIn.createdAt, expiresAt: expiresAt,
-                readKey: "poi-visit:\(rated.id.uuidString):\(checkIn.id.uuidString):\(Int(checkIn.activityDate.timeIntervalSinceReferenceDate))",
+                readKey: StoryReadKeys.poiVisit(poiId: rated.id, checkInId: checkIn.id,
+                    timestamp: checkIn.activityDate),
                 kind: .poiLocationOnly, expectedMedia: [], content: .poi(rated, checkIn, nil))]
         }
         let cached = Dictionary(checkIn.media.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

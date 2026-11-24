@@ -842,6 +842,7 @@ struct POIRecentSharersRow: View {
     let onSelect: (Int) -> Void
     var wraps = false
     var visitCounts: [UUID: Int] = [:]
+    var loadingUserIDs: Set<UUID> = []
     var transitionNamespace: Namespace.ID? = nil
     var transitionPlaceID: UUID? = nil
 
@@ -880,6 +881,15 @@ struct POIRecentSharersRow: View {
             } label: {
                 VStack(spacing: 6) {
                     transitionAvatar(sharer)
+                    .overlay {
+                        if loadingUserIDs.contains(sharer.userId) {
+                            ProgressView()
+                                .tint(.white)
+                                .padding(7)
+                                .background(.black.opacity(0.45), in: Circle())
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .overlay(alignment: .bottomTrailing) {
                         if let count = visitCounts[sharer.userId] {
                             Text("\(count)")
@@ -903,6 +913,7 @@ struct POIRecentSharersRow: View {
             }
             .buttonStyle(.plain)
             .accessibilityValue(visitCounts[sharer.userId].map { $0 == 1 ? "1 visit" : "\($0) visits" } ?? "")
+            .accessibilityHint(loadingUserIDs.contains(sharer.userId) ? "Media is loading" : "")
             .accessibilityIdentifier("experience.poi.sharer.\(sharer.userId.uuidString)")
     }
 

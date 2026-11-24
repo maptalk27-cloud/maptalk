@@ -225,6 +225,7 @@ extension ExperienceDetailView {
         let ratedPOI = liveMediaHydrationEnabled
             ? Self.mergingMedia(into: ratedPOI, from: hydratedPlaces[ratedPOI.id]) : ratedPOI
         guard ratedPOI.id != poiOverviewID,
+              ratedPOI.id != personalPOIOverviewID,
               let ownerID = poiBrowsingUserID,
               let visit = ratedPOI.checkInPeople().first(where: { $0.userID == ownerID })?.latest else {
             return nil
@@ -235,7 +236,7 @@ extension ExperienceDetailView {
     }
 
     private func compactPOISelection(for ratedPOI: RatedPOI) -> POIStorySelection? {
-        poiStorySelection ?? (isExpanded ? nil : browsingPOISelection(for: ratedPOI))
+        poiStorySelection ?? (isExpanded && !usesUpdatedPOIStyle ? nil : browsingPOISelection(for: ratedPOI))
     }
 
     func galleryItems(for ratedPOI: RatedPOI) -> [MediaDisplayItem] {

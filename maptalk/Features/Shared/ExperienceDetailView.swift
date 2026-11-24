@@ -39,6 +39,10 @@ struct ExperienceDetailView: View {
         let media: RatedPOI.Media?
     }
 
+    enum PersonalPOIMediaState {
+        case empty, loading, unavailable
+    }
+
     struct SequencePager {
         struct Item: Identifiable {
             let id: UUID
@@ -163,6 +167,7 @@ struct ExperienceDetailView: View {
     let sequenceContext: SequenceContext?
     let isExpanded: Bool
     let usesClassicPostPreview: Bool
+    let usesUpdatedPOIStyle: Bool
     let recordsActiveCompactViewportOnly: Bool
     let poiStorySelection: POIStorySelection?
     /// Personal browsing opens the owner's latest visit, while an explicit
@@ -181,6 +186,7 @@ struct ExperienceDetailView: View {
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
     @Environment(\.appEnv) private var environment
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.experienceLiveMediaHydrationEnabled) var liveMediaHydrationEnabled
     @Environment(\.experiencePOIVisitorSummary) var poiVisitorSummary
@@ -204,11 +210,14 @@ struct ExperienceDetailView: View {
     @State private var postEngagementRequest: PostEngagementRequest?
     @State var hydratedPosts: [UUID: RealPost] = [:]
     @State var hydratedPlaces: [UUID: RatedPOI] = [:]
+    @State var personalPOIOverviewID: UUID?
+    @State private var unavailableMediaIDs: Set<UUID> = []
 
     init(
         mode: Mode,
         isExpanded: Bool = true,
         usesClassicPostPreview: Bool = false,
+        usesUpdatedPOIStyle: Bool = false,
         recordsActiveCompactViewportOnly: Bool = false,
         poiStorySelection: POIStorySelection? = nil,
         poiBrowsingUserID: UUID? = nil,
@@ -231,6 +240,7 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.usesClassicPostPreview = usesClassicPostPreview
+        self.usesUpdatedPOIStyle = usesUpdatedPOIStyle
         self.recordsActiveCompactViewportOnly = recordsActiveCompactViewportOnly
         self.poiStorySelection = poiStorySelection
         self.poiBrowsingUserID = poiBrowsingUserID
@@ -248,6 +258,7 @@ struct ExperienceDetailView: View {
     init(
         ratedPOI: RatedPOI,
         isExpanded: Bool,
+        usesUpdatedPOIStyle: Bool = false,
         onCollapsedTap: (() -> Void)? = nil,
         onJourneyAvatarStackTap: ((JourneyPost) -> Void)? = nil,
         journeyProvider: @escaping (UUID) -> JourneyPost? = { PreviewData.journey(for: $0) },
@@ -260,6 +271,7 @@ struct ExperienceDetailView: View {
         self.sequenceContext = nil
         self.isExpanded = isExpanded
         self.usesClassicPostPreview = false
+        self.usesUpdatedPOIStyle = usesUpdatedPOIStyle
         self.recordsActiveCompactViewportOnly = false
         self.poiStorySelection = nil
         self.poiBrowsingUserID = nil
@@ -279,6 +291,7 @@ struct ExperienceDetailView: View {
         selection: Binding<UUID>,
         isExpanded: Bool,
         usesClassicPostPreview: Bool = false,
+        usesUpdatedPOIStyle: Bool = false,
         poiBrowsingUserID: UUID? = nil,
         poiOverviewID: UUID? = nil,
         onCollapsedTap: (() -> Void)? = nil,
@@ -293,6 +306,7 @@ struct ExperienceDetailView: View {
         self.sequenceContext = SequenceContext(pager: sequencePager, selection: selection)
         self.isExpanded = isExpanded
         self.usesClassicPostPreview = usesClassicPostPreview
+        self.usesUpdatedPOIStyle = usesUpdatedPOIStyle
         self.recordsActiveCompactViewportOnly = false
         self.poiStorySelection = nil
         self.poiBrowsingUserID = poiBrowsingUserID
@@ -318,16 +332,26 @@ struct ExperienceDetailView: View {
         .task(id: requestedMediaIDs) {
             let ids = requestedMediaIDs
             guard !ids.isEmpty, let backend = environment.backend else { return }
+            unavailableMediaIDs.subtract(ids)
             adoptHydratedMedia(backend.cachedSnapshot(for: ids))
             do {
                 let snapshot = try await backend.ensureMedia(for: ids)
                 guard !Task.isCancelled else { return }
                 adoptHydratedMedia(snapshot)
+                unavailableMediaIDs.formUnion(ids.filter { !backend.hasPreparedMedia(for: $0) })
             } catch {
                 // Keep the local card usable offline. Entering the card again
                 // retries its exact media scope; never preload pager neighbors.
+                guard !Task.isCancelled else { return }
+                unavailableMediaIDs.formUnion(ids.filter { !backend.hasPreparedMedia(for: $0) })
             }
         }
+    }
+
+    func personalPOIMediaState(for visitID: UUID) -> PersonalPOIMediaState {
+        guard liveMediaHydrationEnabled, let backend = environment.backend else { return .empty }
+        if backend.hasPreparedMedia(for: visitID) { return .empty }
+        return unavailableMediaIDs.contains(visitID) ? .unavailable : .loading
     }
 
     private var requestedMediaIDs: [UUID] {
@@ -400,6 +424,16 @@ struct ExperienceDetailView: View {
             }
         }
         .background((usesNeutralPreviewBackground ? postCardPalette.background : .black).ignoresSafeArea())
+        .modifier(FriendStoryCardHeader(
+            isEnabled: personalPOIBrowsingContext != nil,
+            isVisible: isMediaPlaybackActive && !hasPresentedChildContent,
+            backgroundMaterial: .regular,
+            backgroundTint: Color(white: 0.08).opacity(0.65)
+        ) {
+            personalPOINavigationHeader(onClose: dismiss.callAsFunction)
+                .environment(\.colorScheme, .dark)
+                .environment(\.appEnv, environment)
+        })
         .overlay(alignment: .topTrailing) {
             if isExpanded, let backend = environment.backend, !actionablePosts.isEmpty {
                 BackendContentSafetyMenu(store: backend, posts: actionablePosts,
@@ -418,7 +452,13 @@ struct ExperienceDetailView: View {
         .onChangeCompat(of: isExpanded) { expanded in
             // A later ordinary card open starts at its content, not at the
             // likes/comments shortcut used on the previous visit.
-            if !expanded { postEngagementRequest = nil }
+            if !expanded {
+                postEngagementRequest = nil
+                personalPOIOverviewID = nil
+            }
+        }
+        .onChangeCompat(of: sequenceContext?.selection.wrappedValue) { _ in
+            personalPOIOverviewID = nil
         }
         .onChangeCompat(of: parentPlaybackEnabled) { enabled in
             // A neighboring page can become current without another geometry
@@ -522,6 +562,7 @@ struct ExperienceDetailView: View {
             mode: item.mode,
             isExpanded: isExpanded,
             usesClassicPostPreview: true,
+            usesUpdatedPOIStyle: usesUpdatedPOIStyle,
             recordsActiveCompactViewportOnly: true,
             poiBrowsingUserID: poiBrowsingUserID,
             poiOverviewID: poiOverviewID,
