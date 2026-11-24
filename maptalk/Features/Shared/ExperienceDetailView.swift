@@ -398,6 +398,10 @@ struct ExperienceDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Personal instant cards use the same full-bleed canvas as home.
+        // Expand the parent's proposal too; extending only the child media
+        // leaves the native sheet's bottom safe-area strip exposed.
+        .ignoresSafeArea(.container, edges: personalPOIBrowsingContext != nil ? .bottom : [])
         .environment(\.postEngagementRequest, postEngagementRequest)
         .environment(\.openPostEngagement, { postID, section in
             postEngagementRequest = PostEngagementRequest(postID: postID, section: section)
