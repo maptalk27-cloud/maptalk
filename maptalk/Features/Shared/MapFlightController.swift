@@ -392,7 +392,7 @@ final class MapFlightController: ObservableObject {
         activeTransitionID = id
         stagedLandingRegion = target
         transitionEndsAt = CACurrentMediaTime() + duration
-        withAnimation(smoothAnimation(duration: duration)) {
+        withMapCameraAnimation(smoothAnimation(duration: duration)) {
             cameraPosition.wrappedValue = .region(target)
         }
         onRegionUpdate(target)
@@ -434,7 +434,7 @@ final class MapFlightController: ObservableObject {
         // Keep the original MapKit camera animation, not independently
         // interpolated keyframes. Equal endpoints/easing numbers do not give
         // those two transports the same visible zoom or phase transitions.
-        withAnimation(smoothAnimation(duration: durations.zoomOut)) {
+        withMapCameraAnimation(smoothAnimation(duration: durations.zoomOut)) {
             cameraPosition.wrappedValue = .camera(
                 MapCamera(
                     centerCoordinate: liftCenter,
@@ -460,7 +460,7 @@ final class MapFlightController: ObservableObject {
                 cameraPosition: cameraPosition,
                 onRegionUpdate: onRegionUpdate
             )
-            withAnimation(smoothAnimation(duration: durations.travel)) {
+            withMapCameraAnimation(smoothAnimation(duration: durations.travel)) {
                 cameraPosition.wrappedValue = .camera(cruiseCamera)
             }
         }
@@ -567,7 +567,7 @@ final class MapFlightController: ObservableObject {
         hasIssuedLanding = true
         let framedTarget = viewport?.framed(target) ?? target
         transitionEndsAt = CACurrentMediaTime() + duration
-        withAnimation(smoothAnimation(duration: duration)) {
+        withMapCameraAnimation(smoothAnimation(duration: duration)) {
             cameraPosition.wrappedValue = .region(framedTarget)
         }
 
@@ -614,6 +614,14 @@ private enum TransitionTempo {
             return (1.5, 1.5, 0.02, 0.2)
         }
     }
+}
+
+/// Explicit camera motion must not inherit a native pager's no-animation
+/// selection transaction. Keep the reset scoped to the camera command only.
+func withMapCameraAnimation(_ animation: Animation, _ updates: () -> Void) {
+    var transaction = Transaction(animation: animation)
+    transaction.disablesAnimations = false
+    withTransaction(transaction, updates)
 }
 
 private func smoothAnimation(duration: Double) -> Animation {

@@ -207,9 +207,11 @@ final class MyMapArchiveStore: ObservableObject {
     /// Demo feedback updates only its authored visit. Never promote a private
     /// visit into the public projection or rewrite a published Bubble snapshot.
     @discardableResult
-    func updatePOIFeedback(checkInID: UUID, endorsement: RatedPOI.Endorsement?, comment: String) -> Bool {
+    func updatePOIFeedback(checkInID: UUID, endorsement: RatedPOI.Endorsement?,
+                           customEmoji: String? = nil, comment: String) -> Bool {
         let text = comment.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.utf16.count <= 1_000,
+        guard text.utf16.count <= 1_000, !text.contains("\0"),
+              customEmoji == nil || (endorsement == nil && POICustomFeeling.normalized(customEmoji) != nil),
               let placeIndex = privatePOIs.firstIndex(where: { place in
                   place.checkIns.contains { $0.id == checkInID && $0.userId == currentUserID }
               }),
@@ -218,6 +220,7 @@ final class MyMapArchiveStore: ObservableObject {
         }
         var personalPlace = privatePOIs[placeIndex]
         personalPlace.checkIns[visitIndex].endorsement = endorsement
+        personalPlace.checkIns[visitIndex].customEmoji = customEmoji
         personalPlace.checkIns[visitIndex].comment = text.isEmpty ? nil : text
         personalPlace.refreshEndorsementSummary()
         privatePOIs[placeIndex] = personalPlace
@@ -228,6 +231,7 @@ final class MyMapArchiveStore: ObservableObject {
            }) {
             var publicPlace = publicPOIOverlays[publicIndex]
             publicPlace.checkIns[publicVisitIndex].endorsement = endorsement
+            publicPlace.checkIns[publicVisitIndex].customEmoji = customEmoji
             publicPlace.checkIns[publicVisitIndex].comment = text.isEmpty ? nil : text
             publicPlace.refreshEndorsementSummary()
             publicPOIOverlays[publicIndex] = publicPlace

@@ -16,6 +16,20 @@ enum POIFeedbackIconSet: String, CaseIterable, Identifiable {
     }
 }
 
+/// A personal expression, never a place rating or an animated reaction.
+struct POICustomFeelingIcon: View {
+    let emoji: String
+    let size: CGFloat
+
+    var body: some View {
+        Text(emoji)
+            .font(.system(size: size))
+            .fixedSize()
+            .frame(width: size, height: size)
+            .accessibilityLabel("Feeling: \(emoji)")
+    }
+}
+
 /// Only the artwork: the enclosing picker owns selection and accessibility.
 struct POIFeedbackIcon: View {
     let endorsement: RatedPOI.Endorsement

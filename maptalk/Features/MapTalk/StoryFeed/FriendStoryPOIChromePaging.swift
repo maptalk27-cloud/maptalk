@@ -1,10 +1,25 @@
 import SwiftUI
 
-/// A media page can share its fixed place information with adjacent pages.
-/// Posts and location-only cards deliberately break that shared run.
+/// Every POI visit canvas shares place information with matching adjacent
+/// pages, including location-only visits and media that has not loaded yet.
 struct FriendStoryPOIChromePage {
     let id: String
     let place: RatedPOI?
+    var authorID: UUID? = nil
+    var visitDayKey: String? = nil
+
+    static func storyPage(_ page: FriendStoryPage) -> Self {
+        let place: RatedPOI?
+        if case let .poi(rated, _, _) = page.content { place = rated }
+        else { place = nil }
+        return .init(id: page.id, place: place, authorID: page.authorID,
+                     visitDayKey: page.poiVisitDayKey)
+    }
+
+    func sharesStop(with other: Self) -> Bool {
+        guard let place, other.place?.id == place.id else { return false }
+        return authorID == other.authorID && visitDayKey == other.visitDayKey
+    }
 }
 
 struct FriendStoryPOIChromeRun {
@@ -21,8 +36,8 @@ struct FriendStoryPOIChromeRun {
               let place = pages[selected].place else { return nil }
         var lower = selected
         var upper = selected
-        while lower > 0, pages[lower - 1].place?.id == place.id { lower -= 1 }
-        while upper + 1 < pages.count, pages[upper + 1].place?.id == place.id { upper += 1 }
+        while lower > 0, pages[lower - 1].sharesStop(with: pages[selected]) { lower -= 1 }
+        while upper + 1 < pages.count, pages[upper + 1].sharesStop(with: pages[selected]) { upper += 1 }
         self.place = place
         self.selectedID = selectedID
         self.selectedIndex = selected
@@ -90,6 +105,7 @@ private struct FriendStoryFixedPOIChrome: ViewModifier {
     let pages: [FriendStoryPOIChromePage]
     let selectedID: String
     let showsPageDots: Bool
+    let playbackFooter: AnyView?
 
     func body(content: Content) -> some View {
         content.overlayPreferenceValue(FriendStoryPOIChromeAnchors.self) { anchors in
@@ -99,6 +115,13 @@ private struct FriendStoryFixedPOIChrome: ViewModifier {
                     pageFrames: anchors.mapValues { geometry[$0] },
                     viewport: CGRect(origin: .zero, size: geometry.size)) {
                     FriendStoryPOIChrome(place: run.place)
+                        .overlay(alignment: .bottom) {
+                            if let playbackFooter {
+                                playbackFooter
+                                    .padding(.horizontal, 20)
+                                    .padding(.bottom, 12)
+                            }
+                        }
                         .overlay(alignment: .bottom) {
                             if showsPageDots {
                                 FriendStoryPlacePageDots(count: run.range.count,
@@ -129,8 +152,8 @@ extension View {
     }
 
     func fixedPOIChrome(pages: [FriendStoryPOIChromePage], selectedID: String,
-                        showsPageDots: Bool = false) -> some View {
+                        showsPageDots: Bool = false, playbackFooter: AnyView? = nil) -> some View {
         modifier(FriendStoryFixedPOIChrome(pages: pages, selectedID: selectedID,
-                                          showsPageDots: showsPageDots))
+                                          showsPageDots: showsPageDots, playbackFooter: playbackFooter))
     }
 }

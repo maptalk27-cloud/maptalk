@@ -13,7 +13,7 @@ export function openDatabase(databasePath) {
     chmodSync(path, 0o600);
     db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 15) throw new Error('Database is newer than this server; refusing to open it.');
+    if (version > 19) throw new Error('Database is newer than this server; refusing to open it.');
     if (version === 0) {
       transaction(db, () => {
         db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
@@ -317,6 +317,85 @@ export function openDatabase(databasePath) {
           ALTER TABLE memories ADD COLUMN location_name TEXT
             CHECK(location_name IS NULL OR (kind = 'reel' AND length(location_name) BETWEEN 1 AND 80));
           PRAGMA user_version = 15;
+        `);
+      });
+    }
+    if (version < 16) {
+      transaction(db, () => {
+        db.exec(`
+          -- A reusable authored Post subject, NOT a places foreign key.
+          -- No backfill: unknown historical locations remain unknown.
+          ALTER TABLE memories ADD COLUMN post_location_id TEXT
+            CHECK(post_location_id IS NULL OR (kind = 'reel' AND length(post_location_id) = 36));
+          PRAGMA user_version = 16;
+        `);
+      });
+    }
+    if (version < 17) {
+      transaction(db, () => {
+        db.exec(`
+          -- Authored visit feedback belongs to its memory, never an independent
+          -- public place discussion. Parent audience and deletion apply to it.
+          CREATE TABLE IF NOT EXISTS memory_feedback (
+            memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+            endorsement TEXT CHECK(endorsement IS NULL OR endorsement IN ('hype', 'solid', 'meh', 'questionable')),
+            comment TEXT NOT NULL CHECK(length(comment) <= 1000),
+            CHECK(endorsement IS NOT NULL OR length(comment) > 0)
+          ) STRICT;
+          PRAGMA user_version = 17;
+        `);
+      });
+    }
+    if (version < 18) {
+      transaction(db, () => {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS media_likes (
+            memory_id TEXT NOT NULL,
+            media_id TEXT NOT NULL,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(memory_id, media_id, user_id),
+            FOREIGN KEY(memory_id, media_id) REFERENCES memory_media(memory_id, media_id) ON DELETE CASCADE
+          ) STRICT;
+          CREATE TABLE IF NOT EXISTS saved_places (
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            place_id TEXT NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(user_id, place_id)
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS saved_places_page ON saved_places(user_id, created_at DESC, place_id DESC);
+          CREATE TABLE IF NOT EXISTS direct_messages (
+            id TEXT PRIMARY KEY,
+            sender_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            text TEXT NOT NULL CHECK(length(text) <= 1000),
+            -- Context is revocable, not copied media. Removing its source must
+            -- not remove a conversation's text or change its retry identity.
+            context_memory_id TEXT,
+            context_media_id TEXT,
+            request_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            CHECK(sender_id != recipient_id),
+            CHECK((context_memory_id IS NULL) = (context_media_id IS NULL)),
+            CHECK(length(text) > 0 OR context_memory_id IS NOT NULL)
+          ) STRICT;
+          CREATE INDEX IF NOT EXISTS direct_messages_sent ON direct_messages(sender_id, recipient_id, created_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS direct_messages_received ON direct_messages(recipient_id, sender_id, created_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS memories_place_owner_visits ON memories(place_id, owner_id) WHERE kind = 'poi';
+          PRAGMA user_version = 18;
+        `);
+      });
+    }
+    if (version < 19) {
+      transaction(db, () => {
+        db.exec(`
+          -- Personal expression, not a fifth place-rating category. Keep the
+          -- original feedback rows and their constraints unchanged.
+          CREATE TABLE IF NOT EXISTS memory_custom_feelings (
+            memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+            emoji TEXT NOT NULL CHECK(length(emoji) BETWEEN 1 AND 16)
+          ) STRICT;
+          PRAGMA user_version = 19;
         `);
       });
     }

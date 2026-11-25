@@ -73,8 +73,25 @@ Debug 默认连接 `http://127.0.0.1:8787`，可用 App 环境变量 `MAPTALK_BA
 - 私密源记录只允许本人访问；本人明确选入公开 Reel 内容组时，仅所选快照和媒体随父 Reel 共享，源记录仍私密。beta 的公开记录发布后立即向已邀请且未互相屏蔽的成员可见，尚无好友关系限制。未获邀请／已撤销账号不能读取内容；举报下架仍会隐藏违规内容。
 - MyMap 返回自己的公开和私密记录。Feed 包含首次公开后 72 小时内的 POI 和 Reel；主地图只显示未过期的 Reel，同时保留视野内公开 POI 的历史足迹。到期不会删除记录，个人主页和 MyMap 仍可回看历史。
 - 请求里的兼容字段 `capturedAt` 表示用户第一次点发布／私密保存的时间，不是照片或视频的拍摄时间；它写入 `createdAt`，首次直接公开也使用同一时间作为 `publishedAt`。离线、补传或重试不从上传完成重新计时；超过 72 小时才传完的内容仍留在历史中，但不进入活跃 Feed。私密记录日后首次公开，从那次明确公开时计算 72 小时；反复切换隐私、编辑文案不会刷新动态时间。Feed、MyMap、地图和历史列表统一按 `publishedAt ?? createdAt` 排序及计算 `expiresAt`。旧客户端未传时间时使用服务器接收时间；已有记录不改写，也不需要升级 schema。
-- 普通／自建地标仍要求提交坐标在地标 150 米内；目录明确标记的机场允许距中心 2 公里。引用既有地标使用数据库保存的类型和中心，不能用本次请求扩大范围或搬动地标。这只校验坐标距离，不能证明用户的真实位置。
+- POI 简化规则（2026-11-16 已上线）：默认推荐 150 米，主动搜索及新打卡只允许首次发布时的当前 GPS 500 米内，机场也不额外扩大范围。Create new 使用当前 GPS；照片、视频只作内容，不再使用其拍摄位置或历史 GPS 补打卡。`/health` 返回 `poiCheckInRadiusMeters: 500` 和 `supportsMediaPlaceVisits: false`，即使旧客户端缓存了媒体能力，后端也会拒绝新的远程打卡。保留首次发布时记录的 GPS、时间和内容用于离线补传，不把上传完成时间当成重新打卡；旧 `placeVisit`／`photoVisit`／`videoVisit` 仅保留解析及原请求摘要，已经成功发布的记录仍可按原请求幂等重试，但换新 ID 不再享有媒体备用。既有地标中心、旧数据、待上传请求和 Post 地点逻辑不变；定位规则本身不改库，本次心情功能另新增 schema17 存储。
+- POI 发布后可跳过，或单独保存四种心情之一与最多 1000 UTF-16 单元的可选评论。`PUT /v1/memories/:id/feedback` 仅允许记录本人操作，反馈跟随原记录的权限与删除，不改原发布时间或发布重试摘要。客户端先本地保存，再同步；`/health` 的 `features.poiFeedback` 表示服务是否支持。2026-11-16 已在现有后端上线，手机端体验仍由用户验收。
 - 相同记录 UUID 和相同内容的重试不会重复创建。永久删除后保留 ID 墓碑，旧请求不能恢复已删除记录。
+
+### 自定义心情（schema 19）
+
+D 原地展开默认点四种标准心情即可保存；点小加号后在原玻璃面板内选择更多 emoji、填写可选留言，再明确发送。展开后即使删光文字也不会自动发送。保存先进入账号独立的本地持久队列，不重复发布打卡。
+
+`PUT /v1/memories/:id/feedback` 接受 `{ endorsement, customEmoji, comment }`：标准评分与自定义心情互斥，`customEmoji` 为客户端提供的 18 个文字 emoji 之一或 `null`，不接受图片/GIF。`features.poiCustomFeelings` 表示支持。新客户端显式传 `null` 清除；旧客户端遗漏该字段时保留原自定义心情，明确选择标准评分会替换它。自定义心情独立存于 `memory_custom_feelings`，跟随原打卡权限和删除，不进入四档地点评分，不修改时间、媒体、发布摘要或已有 Bubble 快照。
+
+迁移验证仅用独立快照，不能指向正式数据库：
+
+```sh
+node scripts/verify-schema19.mjs backup /absolute/frozen-v18.sqlite /absolute/restored-v18.sqlite
+node scripts/verify-schema19.mjs migration /absolute/frozen-v18.sqlite /absolute/migrated-v19.sqlite
+node scripts/verify-schema19.mjs same-schema /absolute/migrated-v19.sqlite /absolute/post-start-v19.sqlite
+```
+
+验证原 31 张表的全部行和媒体/待上传字节、原 schema 定义，迁移只允许一个空新表及其主键索引；启动后比较全部 32 张表。最新部署证据见 `deploy/aws/deployed-resources.json`，不以代码存在代替上线证明。
 
 ## 接口
 
@@ -125,6 +142,39 @@ Debug 默认连接 `http://127.0.0.1:8787`，可用 App 环境变量 `MAPTALK_BA
 | `GET /v1/users/:id/memories` | 该用户的公开历史，包括已退出 Feed 的记录 |
 | `GET /v1/feed` | 当前公开动态 |
 | `GET /v1/map/memories` | 视野内的公开历史记录 |
+
+### POI 累计到访与互动（schema 18，2026-11-24 已部署）
+
+以下认证接口已部署到现有 AWS 后端；`/health.features` 分别用 `poiVisitCounts`、`mediaLikes`、`placeSaves`、`directMessages` 声明能力，公网已验证。旧服务不支持时客户端不得显示发送或保存成功；真实账号端到端验收仍需用户操作。
+
+| 接口 | 请求与响应 |
+| --- | --- |
+| `POST /v1/places/visit-counts` | `{items:[{placeId,ownerId}]}`，1–100 对 UUID，重复对合并；返回 `{items:[{placeId,ownerId,count}],dayPolicy:"place-iana-v1"}` |
+| `GET /v1/memories/:memoryId/media/:mediaId/like` | 返回当前用户 `{liked,count}`，必须是该记录的实际附件 |
+| `PUT /v1/memories/:memoryId/media/:mediaId/like` | `{liked:Bool}`，幂等设置，返回相同结构 |
+| `GET /v1/places/:id/saved` / `PUT /v1/places/:id/saved` | 返回 `{saved}`；PUT 请求 `{saved:Bool}`，私密收藏地点，不是一次新到访 |
+| `GET /v1/me/saved-places` | `{items:[{place,savedAt}],nextCursor}`，仅本人可见，支持 `limit` / `cursor` |
+| `GET /v1/messages/:peer` | `{items:[Message],nextCursor}`，双方私信按时间倒序分页 |
+| `POST /v1/messages/:peer` | `{id,text,context?:{memoryId,mediaId}}`，首次返回 201 Message，同 ID 同内容重试返回 200；文字最多 1000 UTF-16 单元，无文字时必须有媒体引用 |
+| `GET /v1/messages` | `{items:[{peer,lastMessage,updatedAt}],nextCursor}`，仅本人的会话列表，支持 `limit` / `cursor` |
+
+`Message = {id,senderId,recipientId,text,createdAt,context:{memoryId,mediaId}|null}`。媒体引用必须属于收件人的该条可见记录；每次读取重新检查来源权限，私密化、下架、删除或失去访问权后隐藏引用，但保留私信文字。双方屏蔽、账号删除中或 beta 撤权时不可读取或发送；没有新增好友关系、推送、已读回执或实时服务，使用前台读取／刷新。每人每分钟最多新发 30 条，另受 beta 原有写入限流约束。
+
+累计到访按 `(place,owner)` 在所有当前有权读取的 POI 历史中按天去重，不取近期页数、媒体数或记录条数；本人使用现有私密档案权限（含本人仍可查看的 pending/rejected），其他人只含公开且已批准的记录。删除、可见性、屏蔽和 beta 权限即时影响结果；不存在／不可见的组合统一返回 0，隐藏自己的 MyMap 条目不删除其历史。计数为单个批量 SQL 查询，使用新的 `memories_place_owner_visits` 部分索引，不逐媒体下载或逐对读取完整档案。
+
+POI 响应增加 `visitDay`（`yyyy-MM-dd`），按 `publishedAt ?? createdAt` 和原地点坐标解析地点 IANA 时区，再由 Intl 计算历史民用日期／夏令时；与查看者时区无关，不改已有 ID、坐标、时间、重试摘要或媒体。离线地理时区使用 `@photostructure/tz-lookup` 11.8.0 的固定上游提交和 lockfile 完整性校验；压缩边界数据在时区边缘是近似，不能声称精确地理测绘，也不是经度太阳时近似。地点尚无单独的权威时区字段；旧客户端／mock 自行推算的日期不是服务端 canonical 日期。
+
+schema 17→18 只新增 `media_likes`、`saved_places`、`direct_messages` 及索引，旧数据不回填或重写。2026-11-24 按用户授权上线：671 项本机、165 项目标 ARM64 隔离测试通过，加密 S3 备份实际下载／认证恢复、28 张旧表完整比较、31 张表启动后比较全部通过。资源、密钥、1 GiB 额度和费用方案不变。详见 `deploy/aws/deployed-resources.json` 的 `poiSocialRelease`；既有 schema17 验证脚本保留其历史用途。
+
+本轮只读验证器使用独立、已冻结的数据库副本；不接受在线库路径、软链接或硬链接，不执行迁移。三个阶段分别执行：
+
+```sh
+node scripts/verify-schema18.mjs backup /absolute/frozen-v17.sqlite /absolute/restored-v17.sqlite
+node scripts/verify-schema18.mjs migration /absolute/frozen-v17.sqlite /absolute/migrated-v18.sqlite
+node scripts/verify-schema18.mjs same-schema /absolute/migrated-v18.sqlite /absolute/post-start-v18.sqlite
+```
+
+`backup` 精确比较 schema17 的 28 张表；`migration` 要求全部旧表、原 schema 对象和每列值不变，只允许三个空新表及七个新索引（含自动索引）；`same-schema` 比较 schema18 全部 31 张表，包含点赞、收藏、私信及引用。均检查 SQLite integrity/FK、媒体和待上传 BLOB、64 位整数、时间、重试摘要，并对 canonical `visitDay` 派生结果生成一致性摘要。输出仅固定表名、数量及 SHA-256，不输出原始行、坐标、日期或路径。容器运行时需把此脚本只读挂到新镜像 `/app/scripts/verify-schema18.mjs`，使用镜像内的 `src/poi-visit-day.mjs` 和已锁定时区依赖；当前 Dockerfile 不自动打包发布验证脚本。
 
 ### Reel 附加内容组（schema 13，仅本地代码，尚未部署）
 
@@ -201,6 +251,6 @@ MAPTALK_DATABASE=/absolute/path/to/new-backup.sqlite npm start
 
 本地闭环不等于全部产品功能完成。照片读取使用授权请求，不提供永久公开链接；账户恢复仍依赖本机保存的会话，没有忘记密码流程。
 
-Collection 已做本机按账号保存，Bubble 仍是发布时附带的内容，尚无服务端实现，没有将两者变成另一类公开帖子。用户名和头像支持真实账号保存；schema 12 增加公开帖子／地点的纯文字评论，部署状态见 DEPLOYMENT.md。客户端在原展开卡片中展示最近 100 条；更早评论分页、评论通知及回复层级尚未接入。好友、聊天、点赞、推送仍未接入，真实模式隐藏 Chats 和其他未连接的社交入口。原卡片中的其他演示操作不代表服务器已经支持，不能纳入亲友验收承诺。
+Collection 已做本机按账号保存，Bubble 仍是发布时附带的内容，没有将两者变成另一类公开帖子。用户名和头像支持真实账号保存；schema 12 增加公开帖子／地点的纯文字评论，部署状态见 DEPLOYMENT.md。客户端在原展开卡片中展示最近 100 条；更早评论分页、评论通知及回复层级尚未接入。累计到访、媒体点赞、地点收藏和基础私信的 schema18 接口已部署，合同见上节；好友关系和推送未接入。原卡片中的其他演示操作不代表服务器已经支持，不能纳入亲友验收承诺。
 
 上传图片先完整解码再转为最大长边 2048 的 JPEG，移除 EXIF/GPS 等元数据；拒绝损坏／动画／过大图片，限制处理并发。输入单张最多 10 MiB，每账号媒体限额 50 MiB。短视频处理并发为 1，解码 / 探测均有时限，下载按 64 KiB 分块与背压读取，不会为每次播放范围请求复制整段视频。照片和短视频字节仍随 SQLite 持久化，只面向小规模内测，不是无限视频／大规模对象存储方案。上线仍需平台凭证、实际 HTTPS 部署、隐私及支持页面、审核负责人、异地备份和真机网络验收；美国、中国大陆和欧洲不能仅凭本机通过就承诺可用。

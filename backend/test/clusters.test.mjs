@@ -14,7 +14,7 @@ import { digest, issueSession } from '../src/security.mjs';
 // Existing migration fixtures compare only the expected new nullable field.
 function withLocationName(table, rows) {
   return table === 'memories'
-    ? rows.map(row => Object.assign(Object.create(null), row, { location_name: null })) : rows;
+    ? rows.map(row => Object.assign(Object.create(null), row, { location_name: null, post_location_id: null })) : rows;
 }
 
 const LOCATION = { latitude: 37.37, longitude: -122.04 };
@@ -246,7 +246,7 @@ test('schema12 migration and independent backup preserve all old rows and old ab
   api.db(db => {
     assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(legacy.id).request_hash, oldHash);
     db.prepare('INSERT INTO comments VALUES (?, ?, ?, NULL, ?, ?)').run(randomUUID(), owner.id, legacy.id, 'Old reply', 1);
-    db.exec('DROP TABLE cluster_media; DROP TABLE memory_clusters; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 12;');
+    db.exec('DROP TABLE cluster_media; DROP TABLE memory_clusters; ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 12;');
     db.prepare('INSERT INTO media_upload_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(owner.id, randomUUID(), 'video/mp4', 5, '0'.repeat(64), 2, 1, 2);
     const pending = db.prepare('SELECT request_id FROM media_upload_sessions').get().request_id;
@@ -259,7 +259,7 @@ test('schema12 migration and independent backup preserve all old rows and old ab
   for (const path of [api.databasePath, backupPath]) {
     const migrated = openDatabase(path);
     try {
-      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 15);
+      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 19);
       for (const [table, rows] of Object.entries(before)) assert.deepEqual(migrated.prepare(`SELECT * FROM ${table}`).all(), rows, table);
       for (const table of ['memory_clusters', 'cluster_media']) assert.equal(migrated.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
       assert.deepEqual(migrated.prepare('PRAGMA foreign_key_check').all(), []);

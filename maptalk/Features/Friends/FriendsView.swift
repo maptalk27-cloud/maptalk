@@ -42,16 +42,33 @@ struct FriendsView: View {
                                 }
 
                             LazyVStack(alignment: .leading, spacing: 14) {
+                                if viewModel.isLoading { ProgressView().frame(maxWidth: .infinity) }
+                                if let issue = viewModel.issue {
+                                    Text(issue)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                    Button("Try again") { Task { await viewModel.loadConversations() } }
+                                        .disabled(viewModel.isLoading)
+                                }
                                 if viewModel.filteredConversations.isEmpty == false {
                                     conversationsCard
+                                }
+
+                                if viewModel.hasMoreConversations {
+                                    Button("Load older chats") {
+                                        Task { await viewModel.loadConversations(more: true) }
+                                    }
+                                    .disabled(viewModel.isLoading)
+                                    .frame(maxWidth: .infinity)
                                 }
 
                                 if viewModel.matchedPeople.isEmpty == false {
                                     peopleSection
                                 }
 
-                                if viewModel.filteredConversations.isEmpty && viewModel.matchedPeople.isEmpty {
-                                    Text("No chats or people found.")
+                                if viewModel.filteredConversations.isEmpty && viewModel.matchedPeople.isEmpty
+                                    && !viewModel.isLoading && viewModel.issue == nil {
+                                    Text(viewModel.searchText.isEmpty ? "No chats yet." : "No chats or people found.")
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity)
@@ -66,6 +83,7 @@ struct FriendsView: View {
                         )
                     }
                     .scrollDismissesKeyboard(.interactively)
+                    .refreshable { await viewModel.loadConversations() }
                     .scrollIndicators(.hidden)
                     .background(Color(.systemGroupedBackground))
                     .opacity(didPositionChatList ? 1 : 0)
@@ -79,6 +97,7 @@ struct FriendsView: View {
             }
             .toolbarBackground(Color(.systemGroupedBackground), for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .task { await viewModel.loadConversations() }
             .navigationDestination(item: $selectedChatUser) { user in
                 ChatThreadView(user: user)
             }
@@ -206,10 +225,12 @@ struct FriendsView: View {
                 Label("New chat", systemImage: "square.and.pencil")
             }
 
-            Button {
-                composerDestination = .addFriend
-            } label: {
-                Label("Add friend", systemImage: "person.badge.plus")
+            if !viewModel.usesBackend {
+                Button {
+                    composerDestination = .addFriend
+                } label: {
+                    Label("Add friend", systemImage: "person.badge.plus")
+                }
             }
         } label: {
             Image(systemName: "square.and.pencil")

@@ -15,11 +15,17 @@ struct BackendPOIFeedbackTests {
         let decoded = try JSONDecoder().decode(BackendLocalState.self, from: data)
         #expect(decoded.poiFeedbackQueue == nil)
         #expect(decoded.supportsPOIFeedback == nil)
+        #expect(decoded.supportsPOICustomFeelings == nil)
         let feedback = BackendPOIFeedback(endorsement: nil, comment: "Just a comment")
         let encoded = try JSONEncoder().encode(feedback)
         let json = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         #expect(json["endorsement"] is NSNull)
+        #expect(json["customEmoji"] is NSNull)
         #expect(try JSONDecoder().decode(BackendPOIFeedback.self, from: encoded) == feedback)
+        let legacy = try JSONDecoder().decode(BackendPOIFeedback.self,
+            from: Data("{\"endorsement\":null,\"comment\":\"Old note\"}".utf8))
+        #expect(legacy.customEmoji == nil)
+        #expect(legacy.comment == "Old note")
     }
 
     @Test
@@ -33,6 +39,149 @@ struct BackendPOIFeedbackTests {
         try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: nil, comment: " \n ")
         #expect((try await fixture.savedState()).poiFeedbackQueue == nil)
         #expect(fixture.server.requests.isEmpty)
+    }
+
+    @Test
+    func customFeelingSurvivesOfflineRestartWithoutBecomingARating() async throws {
+        let fixture = try POIFeedbackFixture(visibility: "private")
+        defer { fixture.finish() }
+        try await fixture.seed(queued: true)
+        let before = try await fixture.savedState()
+        try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: nil,
+            customEmoji: "🫠", comment: "  A long day  ")
+        let queued = try await fixture.savedState()
+        #expect(try fixture.sortedJSON(queued.queued[0].input) == fixture.sortedJSON(before.queued[0].input))
+        #expect(queued.queued[0].record.feedback == nil)
+        #expect(queued.poiFeedbackQueue?.first?.feedback.customEmoji == "🫠")
+        let restored = fixture.makeStore()
+        defer { restored.clearLocalMedia() }
+        #expect(await restored.restoreCachedState())
+        let place = try #require(restored.archive.privatePOIs.first)
+        let visit = try #require(place.checkIns.first)
+        #expect(visit.customEmoji == "🫠")
+        #expect(visit.endorsement == nil)
+        #expect(visit.comment == "A long day")
+        #expect(visit.createdAt == fixture.record.createdAt)
+        #expect(place.endorsements == .init(hype: 0, solid: 0, meh: 0, questionable: 0))
+        #expect(restored.feedPOIs.value.isEmpty)
+        #expect(fixture.server.requests.isEmpty)
+    }
+
+    @Test
+    func customStandardAndClearReplaceTheSameFeedbackWithoutRepublishing() async throws {
+        let fixture = try POIFeedbackFixture()
+        defer { fixture.finish() }
+        try await fixture.seed(queued: false)
+        fixture.store.resumeVerifiedConnection()
+        try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: nil,
+            customEmoji: "🥹", comment: "Keep this note")
+        await fixture.store.syncPendingPublications()
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.feedback?.customEmoji == "🥹")
+        try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: .solid,
+            comment: "Keep this note")
+        await fixture.store.syncPendingPublications()
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.feedback?.customEmoji == nil)
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.feedback?.endorsement == "solid")
+        try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: nil,
+            customEmoji: "☕️", comment: "")
+        await fixture.store.syncPendingPublications()
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.feedback?.customEmoji == "☕️")
+        try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: nil, comment: "")
+        await fixture.store.syncPendingPublications()
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.feedback == nil)
+        #expect(fixture.store.pendingPOIFeedbackIDs.isEmpty)
+        #expect(fixture.server.requests.count == 4)
+        #expect(fixture.server.requests.allSatisfy { $0.hasPrefix("PUT ") })
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.publishedAt == fixture.record.publishedAt)
+        let clearedBody = try #require(fixture.server.feedbackBodies.last)
+        let clearedObject = try JSONSerialization.jsonObject(with: Data(clearedBody.utf8))
+        let cleared = try #require(clearedObject as? [String: Any])
+        #expect(cleared["customEmoji"] is NSNull)
+    }
+
+    @Test
+    func oldFeedbackServerHoldsCustomLocallyAndSyncsAfterCapabilityUpgrade() async throws {
+        let fixture = try POIFeedbackFixture()
+        defer { fixture.finish() }
+        fixture.server.supportsCustomFeelings = false
+        try await fixture.seed(queued: false, customCapability: nil)
+        try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: nil,
+            customEmoji: "🌧️", comment: "Rainy")
+        fixture.store.resumeVerifiedConnection()
+        await fixture.store.syncPendingPublications()
+        await fixture.store.syncPendingPublications()
+        #expect(fixture.server.requests == ["GET /health"])
+        #expect(fixture.store.pendingPOIFeedbackIDs == [fixture.record.id])
+        #expect(fixture.store.archive.privatePOIs.first?.checkIns.first?.customEmoji == "🌧️")
+        fixture.server.supportsCustomFeelings = true
+        try await fixture.store.refresh()
+        await fixture.store.syncPendingPublications()
+        #expect(fixture.store.pendingPOIFeedbackIDs.isEmpty)
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.feedback?.customEmoji == "🌧️")
+    }
+
+    @Test
+    func standardFeedbackStillSyncsToServerWithoutCustomCapability() async throws {
+        let fixture = try POIFeedbackFixture()
+        defer { fixture.finish() }
+        fixture.server.supportsCustomFeelings = false
+        try await fixture.seed(queued: false, customCapability: false)
+        try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: .hype, comment: "")
+        fixture.store.resumeVerifiedConnection()
+        await fixture.store.syncPendingPublications()
+        #expect(fixture.store.pendingPOIFeedbackIDs.isEmpty)
+        let body = try #require(fixture.server.feedbackBodies.first)
+        #expect(!body.contains("customEmoji"))
+        #expect(fixture.store.ownedMemories[fixture.record.id]?.feedback?.endorsement == "hype")
+    }
+
+    @Test(arguments: ["not-an-emoji", "😍", "🫠🫠", "🫠\0"])
+    func invalidCustomFeelingsCannotEnterQueue(emoji: String) async throws {
+        let fixture = try POIFeedbackFixture()
+        defer { fixture.finish() }
+        try await fixture.seed(queued: false)
+        await #expect(throws: (any Error).self) {
+            try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: nil,
+                customEmoji: emoji, comment: "A note")
+        }
+        #expect(fixture.store.pendingPOIFeedbackIDs.isEmpty)
+        #expect(fixture.server.requests.isEmpty)
+    }
+
+    @Test
+    func standardAndCustomCannotBeSubmittedTogether() async throws {
+        let fixture = try POIFeedbackFixture()
+        defer { fixture.finish() }
+        try await fixture.seed(queued: false)
+        await #expect(throws: (any Error).self) {
+            try await fixture.store.savePOIFeedback(memoryID: fixture.record.id, endorsement: .hype,
+                customEmoji: "🫠", comment: "A note")
+        }
+        #expect(fixture.store.pendingPOIFeedbackIDs.isEmpty)
+    }
+
+    @Test
+    func localArchiveCustomFeelingKeepsVisibilityAndCanBeReplaced() throws {
+        let ownerID = UUID()
+        let archive = MyMapArchiveStore(currentUserID: ownerID, startsEmpty: true)
+        let visit = RatedPOI.CheckIn(userId: ownerID)
+        var place = PreviewData.sampleRatedPOIs[0]
+        place.checkIns = [visit]
+        place.refreshEndorsementSummary()
+        archive.savePOI(place, publicVersion: nil, audience: .privateMyMap)
+        #expect(archive.updatePOIFeedback(checkInID: visit.id, endorsement: nil,
+            customEmoji: "🥹", comment: "  A memory  "))
+        let saved = try #require(archive.privatePOIs.first?.checkIns.first)
+        #expect(saved.customEmoji == "🥹")
+        #expect(saved.comment == "A memory")
+        #expect(saved.activityDate == visit.activityDate)
+        #expect(archive.publicPOIOverlays.isEmpty)
+        #expect(archive.updatePOIFeedback(checkInID: visit.id, endorsement: .solid, comment: "A memory"))
+        #expect(archive.privatePOIs.first?.checkIns.first?.customEmoji == nil)
+        #expect(archive.privatePOIs.first?.endorsements.solid == 1)
+        #expect(!archive.updatePOIFeedback(checkInID: visit.id, endorsement: .solid,
+            customEmoji: "🥹", comment: "Invalid"))
+        #expect(archive.privatePOIs.first?.checkIns.first?.comment == "A memory")
     }
 
     @Test
@@ -207,7 +356,7 @@ struct BackendPOIFeedbackTests {
         let fixture = try POIFeedbackFixture()
         defer { fixture.finish() }
         var newestUnrated = fixture.memory(id: UUID(), createdAt: Date(timeIntervalSince1970: 300))
-        newestUnrated.feedback = .init(endorsement: nil, comment: "No rating")
+        newestUnrated.feedback = .init(endorsement: nil, comment: "No rating", customEmoji: "🌅")
         var latestRated = fixture.memory(id: UUID(), createdAt: Date(timeIntervalSince1970: 200))
         latestRated.feedback = .init(endorsement: "solid", comment: "")
         var oldestRated = fixture.memory(id: UUID(), createdAt: Date(timeIntervalSince1970: 100))
@@ -227,6 +376,7 @@ struct BackendPOIFeedbackTests {
         #expect(place.endorsements.questionable == 0)
         #expect(place.checkIns.first?.comment == "No rating")
         #expect(place.checkIns.first?.endorsement == nil)
+        #expect(place.checkIns.first?.customEmoji == "🌅")
     }
 
     @Test(.timeLimit(.minutes(1)))
@@ -351,11 +501,12 @@ private final class POIFeedbackFixture {
             automaticallySync: false, observesConnectivity: false)
     }
 
-    func seed(queued: Bool, capability: Bool? = true) async throws {
+    func seed(queued: Bool, capability: Bool? = true, customCapability: Bool? = true) async throws {
         var state = BackendLocalState(ownerID: record.ownerId, server: api.baseURL.absoluteString,
             user: record.owner, mine: queued ? [] : [record], profile: queued ? [] : [record],
             feed: queued ? [] : [record])
         state.supportsPOIFeedback = capability
+        state.supportsPOICustomFeelings = customCapability
         if queued {
             let input = BackendMemoryInput(id: record.id, kind: "poi", visibility: record.visibility,
                 location: record.location, caption: "", placeId: record.place?.id,
@@ -406,6 +557,8 @@ private final class POIFeedbackServer: @unchecked Sendable {
     private var bodyLog: [String] = []
     private var failing = false
     private var supported = true
+    private var customSupported = true
+    private var feedbackBodyLog: [String] = []
     init(record: BackendMemory) { memory = record }
     var failPublication: Bool {
         get { lock.withLock { failing } }
@@ -415,18 +568,26 @@ private final class POIFeedbackServer: @unchecked Sendable {
         get { lock.withLock { supported } }
         set { lock.withLock { supported = newValue } }
     }
+    var supportsCustomFeelings: Bool {
+        get { lock.withLock { customSupported } }
+        set { lock.withLock { customSupported = newValue } }
+    }
     var requests: [String] { lock.withLock { requestLog } }
     var publicationBodies: [String] { lock.withLock { bodyLog } }
+    var feedbackBodies: [String] { lock.withLock { feedbackBodyLog } }
 
     func handle(_ operation: POIFeedbackProtocol) {
         let method = operation.request.httpMethod ?? "GET"
         let path = operation.request.url!.path
         lock.withLock { requestLog.append("\(method) \(path)") }
         if path == "/health" {
-            operation.respond(Data((supportsFeedback ? "{\"features\":{\"poiFeedback\":true}}" : "{}").utf8))
+            operation.respond(Data((supportsFeedback
+                ? "{\"features\":{\"poiFeedback\":true,\"poiCustomFeelings\":\(supportsCustomFeelings)}}" : "{}").utf8))
         } else if method == "PUT", path.hasSuffix("/feedback") {
             do {
-                let feedback = try JSONDecoder().decode(BackendPOIFeedback.self, from: operation.body())
+                let body = try operation.body()
+                lock.withLock { feedbackBodyLog.append(String(decoding: body, as: UTF8.self)) }
+                let feedback = try JSONDecoder().decode(BackendPOIFeedback.self, from: body)
                 let response = lock.withLock {
                     memory.feedback = feedback.isEmpty ? nil : feedback
                     return memory

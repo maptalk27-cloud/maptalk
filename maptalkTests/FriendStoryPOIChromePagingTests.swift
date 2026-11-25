@@ -11,6 +11,48 @@ import UIKit
 @Suite(.serialized)
 struct FriendStoryPOIChromePagingTests {
     @Test
+    func emptyAndColdVisitsKeepTheSamePersonPlaceDayChromeRun() throws {
+        let owner = UUID()
+        let now = Date(timeIntervalSince1970: 1_795_521_600)
+        let photo = RatedPOI.Media(kind: .photo(URL(fileURLWithPath: "/tmp/chrome-photo.jpg")))
+        let first = RatedPOI.CheckIn(userId: owner, createdAt: now, media: [photo], visitDay: "2026-11-24")
+        let empty = RatedPOI.CheckIn(userId: owner, createdAt: now.addingTimeInterval(-1),
+            endorsement: .solid, comment: "Still a real visit", visitDay: "2026-11-24")
+        let cold = RatedPOI.CheckIn(userId: owner, createdAt: now.addingTimeInterval(-2), visitDay: "2026-11-24")
+        let other = RatedPOI.CheckIn(userId: UUID(), createdAt: now, visitDay: "2026-11-24")
+        let place = RatedPOI(poi: .init(id: UUID(), name: "One place", coordinate: .init(latitude: 47.6, longitude: -122.3),
+            category: .viewpoint), media: [photo], checkIns: [first, empty, cold, other], comments: [],
+            endorsements: .init(hype: 0, solid: 1, meh: 0, questionable: 0), tags: [],
+            isFavoritedByCurrentUser: false, favoritesCount: 0)
+        func page(_ visit: RatedPOI.CheckIn, media: RatedPOI.Media? = nil,
+                  descriptor: FriendStoryMediaDescriptor? = nil) -> FriendStoryPage {
+            .init(id: visit.id.uuidString, authorID: visit.userId, memoryID: visit.id,
+                mediaID: descriptor?.id, publishedAt: visit.activityDate, capturedAt: visit.createdAt,
+                expiresAt: .distantFuture, readKey: visit.id.uuidString,
+                kind: descriptor == nil ? .poiLocationOnly : .poiMedia,
+                expectedMedia: descriptor.map { [$0] } ?? [], content: .poi(place, visit, media))
+        }
+        let pages = [page(first, media: photo, descriptor: .init(id: photo.id, kind: .photo)),
+                     page(empty), page(cold, descriptor: .init(id: UUID(), kind: .video)), page(other)]
+        let chrome = pages.map(FriendStoryPOIChromePage.storyPage)
+        for selected in pages.prefix(3) {
+            let run = try #require(FriendStoryPOIChromeRun(pages: chrome, selectedID: selected.id))
+            #expect(run.range == 0...2)
+            #expect(run.offset(position: 0.5, width: 390) == 0)
+            #expect(run.offset(position: 1.5, width: 390) == 0)
+            #expect(!run.contains(pages[3].id), "Another person's information remains a separate run")
+        }
+        #expect(pages[1].kind == .poiLocationOnly && pages[1].isMediaReady)
+        #expect(pages[2].kind == .poiMedia && !pages[2].isMediaReady,
+                "A cold descriptor remains a loading media slot, not an empty visit")
+        guard case let .poi(_, retained, nil) = pages[1].content else {
+            Issue.record("The legitimate empty visit must remain in the pager")
+            return
+        }
+        #expect(retained.comment == empty.comment && retained.endorsement == empty.endorsement)
+    }
+
+    @Test
     func onePlaceKeepsChromeStillAcrossItsWholePhotoAndVideoRun() throws {
         let data = try POIChromeFixtureData()
         defer { data.dispose() }

@@ -117,6 +117,7 @@ nonisolated struct BackendMemory: Codable, Sendable {
     var locationName: String? = nil
     var locationId: UUID? = nil
     var feedback: BackendPOIFeedback? = nil
+    var visitDay: String? = nil
 
     /// One clock for archive, feed and history; transport completion is not a publication.
     var activityDate: Date { publishedAt ?? createdAt }
@@ -132,16 +133,24 @@ nonisolated struct BackendMemory: Codable, Sendable {
 nonisolated struct BackendPOIFeedback: Codable, Sendable, Equatable {
     let endorsement: String?
     let comment: String
+    let customEmoji: String?
 
-    var isEmpty: Bool { endorsement == nil && comment.isEmpty }
+    init(endorsement: String?, comment: String, customEmoji: String? = nil) {
+        self.endorsement = endorsement
+        self.comment = comment
+        self.customEmoji = customEmoji
+    }
 
-    enum CodingKeys: String, CodingKey { case endorsement, comment }
+    var isEmpty: Bool { endorsement == nil && customEmoji == nil && comment.isEmpty }
+
+    enum CodingKeys: String, CodingKey { case endorsement, comment, customEmoji }
 
     func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         // Explicit null permits comment-only feedback and clearing a rating.
         try values.encode(endorsement, forKey: .endorsement)
         try values.encode(comment, forKey: .comment)
+        try values.encode(customEmoji, forKey: .customEmoji)
     }
 }
 
@@ -222,6 +231,74 @@ nonisolated struct BackendComment: Codable, Identifiable, Sendable {
     let author: BackendUser
 }
 
+nonisolated struct BackendPOIVisitCountKey: Codable, Hashable, Sendable {
+    let placeId: UUID
+    let ownerId: UUID
+}
+
+nonisolated struct BackendPOIVisitCount: Decodable, Sendable {
+    let placeId: UUID
+    let ownerId: UUID
+    let count: Int
+    var key: BackendPOIVisitCountKey { .init(placeId: placeId, ownerId: ownerId) }
+}
+
+nonisolated struct BackendMediaLikeKey: Hashable, Sendable {
+    let memoryID: UUID
+    let mediaID: UUID
+}
+
+nonisolated struct BackendMediaLike: Decodable, Sendable {
+    let liked: Bool
+    let count: Int
+}
+
+nonisolated struct BackendPlaceSaved: Decodable, Sendable {
+    let saved: Bool
+}
+
+nonisolated struct BackendMessageContext: Codable, Hashable, Sendable {
+    let memoryId: UUID
+    let mediaId: UUID
+}
+
+nonisolated struct BackendDirectMessage: Codable, Identifiable, Sendable {
+    let id: UUID
+    let senderId: UUID
+    let recipientId: UUID
+    let text: String
+    let createdAt: Date
+    let context: BackendMessageContext?
+}
+
+nonisolated struct BackendMessagePage: Decodable, Sendable {
+    let items: [BackendDirectMessage]
+    let nextCursor: String?
+}
+
+nonisolated struct BackendConversation: Decodable, Identifiable, Sendable {
+    let peer: BackendUser
+    let lastMessage: BackendDirectMessage
+    let updatedAt: Date
+    var id: UUID { peer.id }
+}
+
+nonisolated struct BackendConversationPage: Decodable, Sendable {
+    let items: [BackendConversation]
+    let nextCursor: String?
+}
+
+nonisolated struct BackendSavedPlace: Decodable, Identifiable, Sendable {
+    let place: BackendPlace
+    let savedAt: Date
+    var id: UUID { place.id }
+}
+
+nonisolated struct BackendSavedPlacePage: Decodable, Sendable {
+    let items: [BackendSavedPlace]
+    let nextCursor: String?
+}
+
 /// HTTPS-only outside explicit Debug loopback development. Never follows redirects.
 @MainActor
 final class BackendAPI {
@@ -282,7 +359,10 @@ final class BackendAPI {
     }
 
     nonisolated struct PostLocationCapabilities: Decodable, Sendable {
-        struct Features: Decodable, Sendable { let poiFeedback: Bool? }
+        struct Features: Decodable, Sendable {
+            let poiFeedback: Bool?
+            let poiCustomFeelings: Bool?
+        }
         let supportsPostLocationNames: Bool?
         let supportsPostLocationIdentity: Bool?
         var poiCheckInRadiusMeters: Double? = nil
@@ -406,6 +486,66 @@ final class BackendAPI {
 
     func publish(_ input: BackendMemoryInput) async throws -> BackendMemory {
         try await json("/v1/memories", method: "POST", body: JSONEncoder().encode(input))
+    }
+
+    func poiVisitCounts(_ keys: [BackendPOIVisitCountKey]) async throws -> [BackendPOIVisitCount] {
+        struct Input: Encodable { let items: [BackendPOIVisitCountKey] }
+        nonisolated struct Result: Decodable, Sendable { let items: [BackendPOIVisitCount]; let dayPolicy: String }
+        guard !keys.isEmpty, keys.count <= 100 else { return [] }
+        let result: Result = try await json("/v1/places/visit-counts", method: "POST",
+            body: JSONEncoder().encode(Input(items: keys)))
+        let expected = Set(keys)
+        guard result.dayPolicy == "place-iana-v1", result.items.count == expected.count,
+              Set(result.items.map(\.key)) == expected, result.items.allSatisfy({ $0.count >= 0 }) else {
+            throw BackendClientError.message("Visit totals couldn't be verified.")
+        }
+        return result.items
+    }
+
+    func mediaLike(_ key: BackendMediaLikeKey) async throws -> BackendMediaLike {
+        try await json("/v1/memories/\(key.memoryID)/media/\(key.mediaID)/like")
+    }
+
+    func setMediaLike(_ key: BackendMediaLikeKey, liked: Bool) async throws -> BackendMediaLike {
+        struct Input: Encodable { let liked: Bool }
+        return try await json("/v1/memories/\(key.memoryID)/media/\(key.mediaID)/like", method: "PUT",
+            body: JSONEncoder().encode(Input(liked: liked)))
+    }
+
+    func placeSaved(_ id: UUID) async throws -> BackendPlaceSaved {
+        try await json("/v1/places/\(id)/saved")
+    }
+
+    func setPlaceSaved(_ id: UUID, saved: Bool) async throws -> BackendPlaceSaved {
+        struct Input: Encodable { let saved: Bool }
+        return try await json("/v1/places/\(id)/saved", method: "PUT",
+            body: JSONEncoder().encode(Input(saved: saved)))
+    }
+
+    func savedPlaces(cursor: String? = nil) async throws -> BackendSavedPlacePage {
+        try await json(Self.socialPagePath("/v1/me/saved-places", cursor: cursor))
+    }
+
+    func conversations(cursor: String? = nil) async throws -> BackendConversationPage {
+        try await json(Self.socialPagePath("/v1/messages", cursor: cursor))
+    }
+
+    func directMessages(with peer: UUID, cursor: String? = nil) async throws -> BackendMessagePage {
+        try await json(Self.socialPagePath("/v1/messages/\(peer)", cursor: cursor))
+    }
+
+    func sendDirectMessage(to peer: UUID, id: UUID, text: String,
+                           context: BackendMessageContext?) async throws -> BackendDirectMessage {
+        struct Input: Encodable { let id: UUID; let text: String; let context: BackendMessageContext? }
+        return try await json("/v1/messages/\(peer)", method: "POST",
+            body: JSONEncoder().encode(Input(id: id, text: text, context: context)))
+    }
+
+    private static func socialPagePath(_ path: String, cursor: String?) -> String {
+        var components = URLComponents(string: path)!
+        components.queryItems = [URLQueryItem(name: "limit", value: "50")]
+        if let cursor { components.queryItems?.append(.init(name: "cursor", value: cursor)) }
+        return components.string!
     }
 
     func uploadPhoto(_ data: Data, mimeType: String = "image/jpeg", idempotencyKey: UUID? = nil) async throws -> BackendMedia {
@@ -541,9 +681,28 @@ final class BackendAPI {
                               body: JSONEncoder().encode(Input(caption: caption)))
     }
 
-    func updatePOIFeedback(id: UUID, feedback: BackendPOIFeedback) async throws -> BackendMemory {
-        try await json("/v1/memories/\(id.uuidString)/feedback", method: "PUT",
-                       body: JSONEncoder().encode(feedback))
+    func updatePOIFeedback(id: UUID, feedback: BackendPOIFeedback,
+                           includeCustomEmoji: Bool = true) async throws -> BackendMemory {
+        let body: Data
+        if includeCustomEmoji {
+            body = try JSONEncoder().encode(feedback)
+        } else {
+            // Older servers reject unknown keys. Never discard a custom mood
+            // to make a request acceptable to an older deployment.
+            guard feedback.customEmoji == nil else {
+                throw BackendClientError.message("Your feeling is saved on this phone until the server is ready.")
+            }
+            nonisolated struct LegacyFeedback: Encodable {
+                let feedback: BackendPOIFeedback
+                func encode(to encoder: Encoder) throws {
+                    var values = encoder.container(keyedBy: BackendPOIFeedback.CodingKeys.self)
+                    try values.encode(feedback.endorsement, forKey: .endorsement)
+                    try values.encode(feedback.comment, forKey: .comment)
+                }
+            }
+            body = try JSONEncoder().encode(LegacyFeedback(feedback: feedback))
+        }
+        return try await json("/v1/memories/\(id.uuidString)/feedback", method: "PUT", body: body)
     }
 
     func comments(for target: BackendCommentTarget) async throws -> [BackendComment] {

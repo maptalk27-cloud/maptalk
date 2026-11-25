@@ -7,6 +7,7 @@ extension RatedPOI {
         let userID: UUID
         let latest: CheckIn
         let checkIns: [CheckIn]
+        let visitDayCount: Int
     }
 
     var checkInPersonCount: Int { Set(checkIns.map(\.userId)).count }
@@ -22,7 +23,11 @@ extension RatedPOI {
                 return $0.id.uuidString < $1.id.uuidString
             }
             guard let latest = ordered.last else { return nil }
-            return CheckInPerson(userID: userID, latest: latest, checkIns: ordered)
+            let dayCount = Set(ordered.map {
+                POIVisitDay.key(for: $0, coordinate: poi.coordinate)
+            }).count
+            return CheckInPerson(userID: userID, latest: latest, checkIns: ordered,
+                                 visitDayCount: dayCount)
         }.sorted {
             if $0.latest.activityDate != $1.latest.activityDate {
                 return $0.latest.activityDate > $1.latest.activityDate

@@ -36,7 +36,7 @@ final class MyMapFlightController: ObservableObject {
         let clampedTarget = cityClamp(targetRegion)
         guard let existingRegion = currentRegion else {
             let framedTarget = viewport?.framed(clampedTarget) ?? clampedTarget
-            withAnimation(myMapSmoothAnimation(duration: 0.5)) {
+            withMapCameraAnimation(myMapSmoothAnimation(duration: 0.5)) {
                 cameraPosition.wrappedValue = .region(framedTarget)
             }
             onRegionUpdate(framedTarget)
@@ -53,7 +53,7 @@ final class MyMapFlightController: ObservableObject {
             let preserved = MKCoordinateRegion(center: targetRegion.center, span: existingRegion.span)
             let framedPreserved = viewport?.framed(preserved) ?? preserved
             let duration = min(0.25 + (travelDistance / 180_000.0), 0.45)
-            withAnimation(myMapSmoothAnimation(duration: duration)) {
+            withMapCameraAnimation(myMapSmoothAnimation(duration: duration)) {
                 cameraPosition.wrappedValue = .region(framedPreserved)
             }
             onRegionUpdate(framedPreserved)
@@ -69,7 +69,7 @@ final class MyMapFlightController: ObservableObject {
             let preserved = MKCoordinateRegion(center: targetRegion.center, span: existingRegion.span)
             let framedPreserved = viewport?.framed(preserved) ?? preserved
             let duration = min(0.25 + (travelDistance / 180_000.0), 0.45)
-            withAnimation(myMapSmoothAnimation(duration: duration)) {
+            withMapCameraAnimation(myMapSmoothAnimation(duration: duration)) {
                 cameraPosition.wrappedValue = .region(framedPreserved)
             }
             onRegionUpdate(framedPreserved)
@@ -80,7 +80,7 @@ final class MyMapFlightController: ObservableObject {
             activeTransitionID = nil
             let d = min(0.30 + (travelDistance / 150_000.0), 0.45)
             let framedTarget = viewport?.framed(clampedTarget) ?? clampedTarget
-            withAnimation(myMapSmoothAnimation(duration: d)) {
+            withMapCameraAnimation(myMapSmoothAnimation(duration: d)) {
                 cameraPosition.wrappedValue = .region(framedTarget)
             }
             onRegionUpdate(framedTarget)
@@ -157,7 +157,7 @@ final class MyMapFlightController: ObservableObject {
             let duration = min(0.35 + (travelDistance / 120_000.0), 0.55)
             let clamped = cityClamp(target)
             let framedTarget = viewport?.framed(clamped) ?? clamped
-            withAnimation(myMapSmoothAnimation(duration: duration)) {
+            withMapCameraAnimation(myMapSmoothAnimation(duration: duration)) {
                 cameraPosition.wrappedValue = .region(framedTarget)
             }
             onRegionUpdate(framedTarget)
@@ -194,7 +194,7 @@ final class MyMapFlightController: ObservableObject {
         let liftPitch: CGFloat = tempo == .cinematic ? 36 : 0
         let cruisePitch: CGFloat = tempo == .cinematic ? 36 : 0
 
-        withAnimation(myMapSmoothAnimation(duration: durations.zoomOut)) {
+        withMapCameraAnimation(myMapSmoothAnimation(duration: durations.zoomOut)) {
             cameraPosition.wrappedValue = .camera(
                 MapCamera(
                     centerCoordinate: liftCenter,
@@ -207,7 +207,7 @@ final class MyMapFlightController: ObservableObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + durations.zoomOut) { [weak self] in
             guard let self, self.activeTransitionID == id else { return }
-            withAnimation(myMapSmoothAnimation(duration: durations.travel)) {
+            withMapCameraAnimation(myMapSmoothAnimation(duration: durations.travel)) {
                 cameraPosition.wrappedValue = .camera(
                     MapCamera(
                         centerCoordinate: target.center,
@@ -261,7 +261,7 @@ final class MyMapFlightController: ObservableObject {
     ) {
         let clamped = cityClamp(target)
         let framedTarget = viewport?.framed(clamped) ?? clamped
-        withAnimation(myMapSmoothAnimation(duration: duration)) {
+        withMapCameraAnimation(myMapSmoothAnimation(duration: duration)) {
             cameraPosition.wrappedValue = .region(framedTarget)
         }
 

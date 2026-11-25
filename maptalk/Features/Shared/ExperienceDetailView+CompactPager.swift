@@ -1736,6 +1736,8 @@ struct FriendEngagementRow: View {
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(ExperienceDetailView.endorsementColor(for: endorsement))
                 }
+        } else if let emoji = entry.customEmoji {
+            POICustomFeelingIcon(emoji: emoji, size: 20)
         } else {
             Circle()
                 .fill(Color.black.opacity(0.75))

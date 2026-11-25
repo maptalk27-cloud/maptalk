@@ -1,5 +1,17 @@
 import Foundation
 
+/// A small, text-only palette. These express a visit, not a place rating.
+nonisolated enum POICustomFeeling {
+    static let choices = ["🫠", "🥹", "😂", "😎", "🥱", "🤯", "🤤", "🤩", "🥲", "😌", "🙃", "🫶",
+                          "☕️", "🍜", "🌧️", "🌅", "✨", "💀"]
+    private static let supported = Set(choices)
+
+    static func normalized(_ value: String?) -> String? {
+        guard let value, supported.contains(value) else { return nil }
+        return value
+    }
+}
+
 enum VisitTag: String, CaseIterable, Codable, Hashable {
     case dine
     case social
@@ -95,6 +107,9 @@ struct RatedPOI: Identifiable, Hashable {
         var tag: VisitTag?
         var publishedAt: Date?
         var comment: String?
+        var customEmoji: String?
+        /// Server-resolved calendar day at the place, independent of the viewer.
+        var visitDay: String?
         var activityDate: Date { publishedAt ?? createdAt }
 
         init(
@@ -105,7 +120,9 @@ struct RatedPOI: Identifiable, Hashable {
             media: [Media] = [],
             tag: VisitTag? = nil,
             publishedAt: Date? = nil,
-            comment: String? = nil
+            comment: String? = nil,
+            visitDay: String? = nil,
+            customEmoji: String? = nil
         ) {
             self.id = id
             self.userId = userId
@@ -115,6 +132,8 @@ struct RatedPOI: Identifiable, Hashable {
             self.tag = tag
             self.publishedAt = publishedAt
             self.comment = comment
+            self.visitDay = visitDay
+            self.customEmoji = endorsement == nil ? POICustomFeeling.normalized(customEmoji) : nil
         }
     }
 

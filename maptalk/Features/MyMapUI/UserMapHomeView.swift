@@ -42,6 +42,27 @@ struct UserMapRecord: Identifiable {
         }
     }
 
+    /// A date filter selects visits, not a place's most recent timestamp.
+    /// Keep the landmark identity so map pins remain grouped by place.
+    func filteringDates(_ includes: (Date) -> Bool) -> UserMapRecord? {
+        guard case let .poi(place) = kind else { return includes(timestamp) ? self : nil }
+        let visits = place.checkIns.filter { includes($0.activityDate) }
+        guard let latest = visits.map(\.activityDate).max() else { return nil }
+        guard visits.count != place.checkIns.count else { return self }
+        var filtered = place
+        filtered.checkIns = visits
+        filtered.media = visits.flatMap(\.media)
+        filtered.tags = Dictionary(grouping: visits.compactMap(\.tag), by: { $0 })
+            .map { .init(tag: $0.key, count: $0.value.count) }
+            .sorted { $0.count > $1.count }
+        filtered.endorsements = .init(
+            hype: visits.filter { $0.endorsement == .hype }.count,
+            solid: visits.filter { $0.endorsement == .solid }.count,
+            meh: visits.filter { $0.endorsement == .meh }.count,
+            questionable: visits.filter { $0.endorsement == .questionable }.count)
+        return UserMapRecord(id: id, timestamp: latest, kind: .poi(filtered))
+    }
+
     func publicationStatus(in pending: [UUID: PendingPublicationStatus]) -> PendingPublicationStatus? {
         pendingPublication(in: pending)?.status
     }
@@ -284,21 +305,14 @@ private struct MapMemoryHitCluster: Identifiable {
     }
 }
 
-/// The parent owns this reference without observing it. Only the map canvas
-/// observes camera-position writes; its continuously sampled region remains
-/// available to navigation/return actions without invalidating the archive.
+/// Keep native camera samples available to navigation/return actions without
+/// invalidating the archive. Camera commands use SwiftUI's native State binding.
 @MainActor
-private final class MyMapCameraState: ObservableObject {
-    @Published var position: MapCameraPosition
+private final class MyMapRegionState {
     var region: MKCoordinateRegion
 
     init(region: MKCoordinateRegion) {
-        position = .region(region)
         self.region = region
-    }
-
-    var binding: Binding<MapCameraPosition> {
-        Binding(get: { self.position }, set: { self.position = $0 })
     }
 }
 
@@ -401,7 +415,8 @@ private struct MyMapMemoryHitLayer<Target: View>: View {
 
 @MainActor
 private struct MyMapMemoryCanvas<Marker: View, Target: View>: View {
-    @ObservedObject var camera: MyMapCameraState
+    @Binding var cameraPosition: MapCameraPosition
+    let regionState: MyMapRegionState
     let data: MapMemoryCanvasData
     let isPresented: Bool
     let isOrganizing: Bool
@@ -422,7 +437,7 @@ private struct MyMapMemoryCanvas<Marker: View, Target: View>: View {
     var body: some View {
         MapReader { mapProxy in
             GeometryReader { geometry in
-                Map(position: camera.binding, interactionModes: freezesInteraction ? [] : .all) {
+                Map(position: $cameraPosition, interactionModes: freezesInteraction ? [] : .all) {
                     // Keep the native camera alive beneath List, but not its
                     // invisible annotation views and thumbnail-loading tasks.
                     ForEach(isPresented ? data.renderingRecords : []) { record in
@@ -443,11 +458,11 @@ private struct MyMapMemoryCanvas<Marker: View, Target: View>: View {
                 }
                 .ignoresSafeArea(edges: .bottom)
                 .onMapCameraChange(frequency: .continuous) { context in
-                    camera.region = context.region
+                    regionState.region = context.region
                     if isActive { hitUpdates.refresh() }
                 }
                 .onMapCameraChange(frequency: .onEnd) { context in
-                    camera.region = context.region
+                    regionState.region = context.region
                     if isActive { hitUpdates.refresh(final: true) }
                 }
                 .onAppear {
@@ -463,7 +478,7 @@ private struct MyMapMemoryCanvas<Marker: View, Target: View>: View {
         .onChangeCompat(of: isActive) { active in
             if active { hitUpdates.refresh(final: true) }
         }
-        .onChangeCompat(of: camera.position.positionedByUser) { positionedByUser in
+        .onChangeCompat(of: cameraPosition.positionedByUser) { positionedByUser in
             if positionedByUser { onUserNavigation() }
         }
     }
@@ -779,7 +794,8 @@ struct UserMapHomeView: View {
     @State private var mapJourneyEntryRegion: MKCoordinateRegion?
     @StateObject private var mapCapsulePresentation: MapExperiencePresentation
     @State private var mapFlightController = MyMapFlightController()
-    @State private var mapCamera: MyMapCameraState
+    @State private var cameraPosition: MapCameraPosition
+    @State private var mapRegionState: MyMapRegionState
     @State private var mapSize: CGSize = .zero
     @State private var mapSafeAreaBottom: CGFloat = 0
     @State private var mapReelAlignTrigger = 0
@@ -860,20 +876,16 @@ struct UserMapHomeView: View {
         self.onRemoveFromMyMap = onRemoveFromMyMap
         self.onMapUserNavigation = onMapUserNavigation
         self.userProvider = userProvider
-        _mapCamera = State(initialValue: MyMapCameraState(region: region))
+        _cameraPosition = State(initialValue: .region(region))
+        _mapRegionState = State(initialValue: MyMapRegionState(region: region))
         _mapCapsulePresentation = StateObject(
             wrappedValue: MapExperiencePresentation(compactDetent: Self.mapCapsuleCompactDetent)
         )
     }
 
-    private var cameraPosition: MapCameraPosition {
-        get { mapCamera.position }
-        nonmutating set { mapCamera.position = newValue }
-    }
-
     private var currentMapRegion: MKCoordinateRegion {
-        get { mapCamera.region }
-        nonmutating set { mapCamera.region = newValue }
+        get { mapRegionState.region }
+        nonmutating set { mapRegionState.region = newValue }
     }
 
     var body: some View {
@@ -1227,14 +1239,13 @@ struct UserMapHomeView: View {
     }
 
     private func filteredRecords(using filter: FilterState) -> [UserMapRecord] {
-        records.filter { record in
-            guard let type = recordType(for: record), filter.types.contains(type) else { return false }
-            guard filter.cities.isEmpty || filter.cities.contains(record.cityName) else { return false }
-            guard matchesDate(record.timestamp, using: filter) else { return false }
-            guard searchText.isEmpty == false else { return true }
-            return record.title.localizedCaseInsensitiveContains(searchText)
-                || record.cityName.localizedCaseInsensitiveContains(searchText)
-        }
+        records.compactMap { record -> UserMapRecord? in
+            guard let type = recordType(for: record), filter.types.contains(type) else { return nil }
+            guard filter.cities.isEmpty || filter.cities.contains(record.cityName) else { return nil }
+            guard searchText.isEmpty || record.title.localizedCaseInsensitiveContains(searchText)
+                || record.cityName.localizedCaseInsensitiveContains(searchText) else { return nil }
+            return record.filteringDates { matchesDate($0, using: filter) }
+        }.sorted { $0.timestamp > $1.timestamp }
     }
 
     private var availableCities: [String] {
@@ -2924,7 +2935,7 @@ struct UserMapHomeView: View {
                 group.posts.map { ($0.id, group) }
             }))
 
-        return MyMapMemoryCanvas(camera: mapCamera, data: data,
+        return MyMapMemoryCanvas(cameraPosition: $cameraPosition, regionState: mapRegionState, data: data,
             isPresented: display == .map, isOrganizing: isOrganizingMapJourneys,
             freezesInteraction: isJourneyOrganizerTransactionActive,
             accessibilityValue: mapScopeAccessibilityValue,
@@ -3553,7 +3564,12 @@ struct UserMapHomeView: View {
     private func applyFilters(_ newFilters: FilterState) {
         filters = newFilters
         if display == .map, mapFocusedJourney == nil {
-            focusMap(on: filteredRecords(using: newFilters))
+            let filtered = filteredRecords(using: newFilters)
+            if let selected = mapSelectedRecord {
+                mapSelectedRecord = filtered.first { $0.id == selected.id }
+                if mapSelectedRecord == nil { mapCapsulePresentation.dismiss() }
+            }
+            focusMap(on: filtered)
         }
     }
 
@@ -3919,14 +3935,16 @@ struct UserMapHomeView: View {
                 selection: mapSequenceSelection,
                 isExpanded: mapCapsulePresentation.isExpanded,
                 usesUpdatedPOIStyle: true,
+                // Personal entries share the media-slice presentation, without
+                // a people bar. The place still owns its aggregated history.
                 poiBrowsingUserID: user.id,
-                poiOverviewID: mapOverviewPOIID,
                 onCollapsedTap: mapCapsulePresentation.expand,
                 journeyProvider: privateJourney(for:),
                 userProvider: userProvider,
                 onJourneyAvatarStackTap: openAttachedJourney,
                 postPlaceGroups: mapPostPlaceGroups
             )
+            .environment(\.personalPOIHistoryChronological, mapFocusedJourney == nil)
             .environment(\.experienceLiveMediaHydrationEnabled,
                          mapFocusedJourney?.isPublishedSnapshot != true)
             .task(id: publishedMapBubbleID) {
@@ -4043,7 +4061,7 @@ struct UserMapHomeView: View {
             targetRegion: storyRegion(for: record),
             cause: mapFlightCause(for: record),
             viewport: mapStoryViewport,
-            cameraPosition: mapCamera.binding
+            cameraPosition: $cameraPosition
         ) { region in
             currentMapRegion = region
         }

@@ -1055,7 +1055,7 @@ test('durable posts keep older public reels without changing the active feed or 
   assert.equal(stored.publishedAt, post.publishedAt);
   assert.equal(stored.expiresAt, post.expiresAt, 'durable Posts does not rewrite the active-map expiry');
   const db = new DatabaseSync(api.databasePath);
-  try { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15); }
+  try { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 19); }
   finally { db.close(); }
 });
 
@@ -1460,7 +1460,7 @@ test('orphaned source IDs retain ordinary and airport proximity checks and requi
       place: { name: 'Unchanged landmark', category: 'other', sourceId: randomUUID(), coordinate: LOCATION,
         ...(directoryKind ? { directoryKind } : {}) } });
     expectStatus(await api.call(`/v1/memories/${original.id}`, { method: 'DELETE', token: alice.token }), 204);
-    const radius = directoryKind ? 2000 : 150;
+    const radius = 500;
     const draft = { id: randomUUID(), kind: 'poi', visibility: 'private', location: atDistance(radius + 10),
       placeId: original.place.id };
     expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 422);
@@ -1512,11 +1512,11 @@ test('new and reused Apple places must remain near the submitted location', asyn
   assert.equal((await listAll(api, alice, '/v1/me/memories')).length, 1);
 });
 
-test('airport directory centers allow terminal check-ins while preserving the actual GPS location', async (t) => {
+test('airport directory centers preserve the actual GPS location for nearby check-ins', async (t) => {
   const api = await fixture(t);
   const alice = await register(api, 'alice');
   const center = { latitude: 47.4502, longitude: -122.3088 };
-  const terminalGPS = { latitude: center.latitude + 0.011, longitude: center.longitude };
+  const terminalGPS = { latitude: center.latitude + 0.003, longitude: center.longitude };
   const airport = { name: 'Seattle–Tacoma International Airport', category: 'other', sourceId: randomUUID(),
     coordinate: center, directoryKind: 'airport' };
   const draft = { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS, place: airport };
@@ -1534,7 +1534,7 @@ test('airport directory centers allow terminal check-ins while preserving the ac
   assert.deepEqual((await listAll(api, alice, '/v1/feed'))[0].place, published.place);
 });
 
-test('only explicit directory airports get 2km; ordinary and custom places keep 150m', async (t) => {
+test('directory airports, ordinary and custom places share the 500m check-in radius', async (t) => {
   const api = await fixture(t);
   const alice = await register(api, 'alice');
   const center = { latitude: 47.4502, longitude: -122.3088 };
@@ -1553,12 +1553,12 @@ test('only explicit directory airports get 2km; ordinary and custom places keep 
     expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: post(place) }), 422);
   }
   const airport = { ...directory, directoryKind: 'airport' };
-  await publish(api, alice, { ...post(airport), location: gpsAt(1990) });
+  await publish(api, alice, { ...post(airport), location: gpsAt(499) });
   expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token,
-    json: { ...post({ ...airport, sourceId: randomUUID() }), location: gpsAt(2010) } }), 422);
-  await publish(api, alice, { ...post(directory), location: gpsAt(149), place: { ...directory, sourceId: randomUUID() } });
+    json: { ...post({ ...airport, sourceId: randomUUID() }), location: gpsAt(501) } }), 422);
+  await publish(api, alice, { ...post(directory), location: gpsAt(499), place: { ...directory, sourceId: randomUUID() } });
   expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token,
-    json: { ...post(directory), location: gpsAt(151), place: { ...directory, sourceId: randomUUID() } } }), 422);
+    json: { ...post(directory), location: gpsAt(501), place: { ...directory, sourceId: randomUUID() } } }), 422);
 });
 
 test('canonical airport reuse uses stored type and center; check-ins cannot upgrade or relocate ordinary places', async (t) => {
@@ -1566,11 +1566,11 @@ test('canonical airport reuse uses stored type and center; check-ins cannot upgr
   const alice = await register(api, 'alice');
   const bob = await register(api, 'bob');
   const center = { latitude: 47.4502, longitude: -122.3088 };
-  const terminalGPS = { latitude: center.latitude + 0.01, longitude: center.longitude };
+  const terminalGPS = { latitude: center.latitude + 0.003, longitude: center.longitude };
   const directory = { name: 'Seattle–Tacoma International Airport', category: 'other', sourceId: randomUUID(),
     coordinate: center, directoryKind: 'airport' };
   const airport = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: center, place: directory });
-  // Old clients omit directoryKind; canonical metadata still permits the terminal.
+  // Old clients omit directoryKind; canonical metadata and center remain intact.
   const bySource = await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS,
     place: { name: 'Must not rename', category: 'coffee', sourceId: directory.sourceId, coordinate: terminalGPS } });
   const byID = await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS, placeId: airport.place.id });
@@ -1594,7 +1594,7 @@ test('canonical airport reuse uses stored type and center; check-ins cannot upgr
         place: { ...caféDirectory, directoryKind: 'airport' } } }), 422);
   }
   expectStatus(await api.call('/v1/memories', { method: 'POST', token: bob.token,
-    json: { id: randomUUID(), kind: 'poi', visibility: 'public', location: terminalGPS, placeId: café.place.id } }), 422);
+    json: { id: randomUUID(), kind: 'poi', visibility: 'public', location: farGPS, placeId: café.place.id } }), 422);
   const preserved = expectStatus(await api.call(`/v1/memories/${café.id}`, { token: alice.token }), 200);
   assert.deepEqual(preserved.place, café.place);
   assert.equal(Object.hasOwn(preserved.place, 'directoryKind'), false);
@@ -1611,13 +1611,13 @@ test('legacy place payloads keep their pre-airport idempotency hashes', async (t
   let db = new DatabaseSync(api.databasePath);
   assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
   // Reopen a genuine v10 shape, then retry the saved original request.
-  db.exec('DROP TABLE comments; ALTER TABLE places DROP COLUMN directory_kind; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 10;');
+  db.exec('DROP TABLE comments; ALTER TABLE places DROP COLUMN directory_kind; ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 10;');
   db.close();
   await api.restart();
   const retried = expectStatus(await api.call('/v1/memories', { method: 'POST', token: alice.token, json: draft }), 200);
   assert.deepEqual(retried, original);
   db = new DatabaseSync(api.databasePath);
-  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15);
+  assert.equal(db.prepare('PRAGMA user_version').get().user_version, 19);
   assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(original.id).request_hash, digest(JSON.stringify(oldNormalized)));
   db.close();
 });
@@ -1682,7 +1682,7 @@ test('place history is complete across time and authors, paginated and independe
   const alice = await register(api, 'place_alice'), bob = await register(api, 'place_bob');
   const first = await publish(api, alice, { id: randomUUID(), kind: 'poi', visibility: 'public', location: LOCATION,
     place: { name: 'Shared airport', category: 'other', sourceId: randomUUID(),
-      coordinate: { latitude: LOCATION.latitude + 0.01, longitude: LOCATION.longitude }, directoryKind: 'airport' } });
+      coordinate: { latitude: LOCATION.latitude + 0.003, longitude: LOCATION.longitude }, directoryKind: 'airport' } });
   time += 4 * 24 * 60 * 60 * 1000;
   const second = await publish(api, bob, { id: randomUUID(), kind: 'poi', visibility: 'public',
     location: LOCATION, placeId: first.place.id });

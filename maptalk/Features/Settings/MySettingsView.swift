@@ -16,6 +16,15 @@ struct MySettingsView: View {
 
     var body: some View {
         List {
+            if let backend = environment.backend {
+                Section {
+                    NavigationLink {
+                        BackendSavedPlacesView(store: backend)
+                    } label: {
+                        Label("Saved places", systemImage: "bookmark")
+                    }
+                }
+            }
             if environment.backend == nil {
                 Section {
                     SettingRow(icon: "person.crop.circle", title: "Account & Security")

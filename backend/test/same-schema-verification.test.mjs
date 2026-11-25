@@ -11,13 +11,16 @@ import { openDatabase } from '../src/database.mjs';
 import { backupDatabase } from '../src/backup.mjs';
 import { verifySameSchemaCopies } from '../scripts/verify-same-schema.mjs';
 
-async function fixture(t) {
+async function fixture(t, schemaVersion = 16) {
   const directory = await mkdtemp(join(tmpdir(), 'maptalk-same-schema-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const sourcePath = join(directory, 'snapshot.sqlite'), targetPath = join(directory, 'restored.sqlite');
   const db = openDatabase(sourcePath);
-  // Keep this historical verifier's fixture at its original schema.
-  db.exec('ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
+  // These copy-verifier fixtures intentionally remain historical schemas.
+  db.exec('DROP TABLE IF EXISTS memory_custom_feelings; DROP TABLE direct_messages; DROP TABLE media_likes; DROP TABLE saved_places; DROP INDEX memories_place_owner_visits; DROP TABLE memory_feedback; PRAGMA user_version = 16;');
+  if (schemaVersion === 14) {
+    db.exec('ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
+  }
   db.exec(`
     INSERT INTO users(id, handle, password_hash, created_at) VALUES ('owner', 'alice', 'kept-secret-hash', 1);
     INSERT INTO places VALUES ('place', 'Private Airport Café', 'airport', 47.45, -122.31, 'airport');
@@ -39,6 +42,12 @@ async function fixture(t) {
     INSERT INTO sessions VALUES ('session-hash', 'owner', 9223372036854775806);
     INSERT INTO server_metadata VALUES ('deployment_mode', 'beta');
   `);
+  if (schemaVersion === 16) {
+    db.exec(`INSERT INTO memories(id, owner_id, kind, visibility, latitude, longitude, caption,
+      created_at, expires_at, request_hash, published_at, location_name, post_location_id)
+      VALUES ('post', 'owner', 'reel', 'public', 47.4501, -122.31, '', 3, 259200004,
+        'post-original-hash', 4, 'Private saved name', '11111111-1111-4111-8111-111111111111')`);
+  }
   db.close();
   await backupDatabase(sourcePath, targetPath);
   return { directory, sourcePath, targetPath };
@@ -49,14 +58,15 @@ function edit(path, sql) {
 }
 const script = fileURLToPath(new URL('../scripts/verify-same-schema.mjs', import.meta.url));
 
-test('same-schema verifier preserves populated schema14 copies and only reports safe summaries', async t => {
-  const paths = await fixture(t);
+for (const schemaVersion of [14, 16]) {
+test(`same-schema verifier preserves populated schema${schemaVersion} copies and only reports safe summaries`, async t => {
+  const paths = await fixture(t, schemaVersion);
   const hash = async path => createHash('sha256').update(await readFile(path)).digest('hex');
   const sourceHash = await hash(paths.sourcePath), targetHash = await hash(paths.targetPath);
   const result = verifySameSchemaCopies(paths);
   assert.equal(result.ok, true);
-  assert.equal(result.sourceSchema, 14);
-  assert.equal(result.targetSchema, 14);
+  assert.equal(result.sourceSchema, schemaVersion);
+  assert.equal(result.targetSchema, schemaVersion);
   assert.equal(result.tableCount, 27);
   assert.equal(result.tables.find(table => table.table === 'memory_clusters').count, 1);
   assert.equal(result.tables.find(table => table.table === 'cluster_media').count, 2);
@@ -68,13 +78,14 @@ test('same-schema verifier preserves populated schema14 copies and only reports 
   assert.equal(cli.status, 0, cli.stderr);
   assert.deepEqual(JSON.parse(cli.stdout), result);
   for (const privateValue of ['kept-secret-hash', 'Private Airport Café', 'original-hash', 'Private cluster title',
-    'Private member caption', 'session-hash', 'upload-fingerprint', '9223372036854775806', paths.directory]) {
+    'Private member caption', 'Private saved name', '11111111-1111-4111-8111-111111111111', 'session-hash',
+    'upload-fingerprint', '9223372036854775806', paths.directory]) {
     assert.equal(JSON.stringify(result).includes(privateValue), false);
     assert.equal(cli.stdout.includes(privateValue), false);
   }
 });
 
-test('same-schema verifier detects old and populated-cluster row, timestamp, integer and BLOB changes', async t => {
+test(`schema${schemaVersion} same-schema verifier detects row, timestamp, integer and BLOB changes`, async t => {
   const cases = [
     ["UPDATE media SET bytes = X'05060709' WHERE id = 'video'", 'media'],
     ["UPDATE media_upload_chunks SET bytes = X'090B'", 'media_upload_chunks'],
@@ -87,15 +98,19 @@ test('same-schema verifier detects old and populated-cluster row, timestamp, int
     ["UPDATE memory_clusters SET members_json = '[{}]'", 'memory_clusters'],
     ["DELETE FROM cluster_media WHERE media_id = 'video'", 'cluster_media'],
     ["DELETE FROM comments", 'comments'],
+    ...(schemaVersion === 16 ? [
+      ["UPDATE memories SET location_name = 'Changed name' WHERE kind = 'reel'", 'memories'],
+      ["UPDATE memories SET post_location_id = '22222222-2222-4222-8222-222222222222' WHERE kind = 'reel'", 'memories'],
+    ] : []),
   ];
   for (const [sql, table] of cases) await t.test(sql.split(' ').slice(0, 3).join(' '), async subtest => {
-    const paths = await fixture(subtest);
+    const paths = await fixture(subtest, schemaVersion);
     edit(paths.targetPath, sql);
     assert.throws(() => verifySameSchemaCopies(paths), new RegExp(`Stored rows changed: ${table}\\.`));
   });
 });
 
-test('same-schema verifier rejects changed objects, indexes, columns and SQL literal whitespace', async t => {
+test(`schema${schemaVersion} same-schema verifier rejects changed objects, indexes, columns and SQL literal whitespace`, async t => {
   const cases = [
     ['CREATE TABLE unexpected(id TEXT PRIMARY KEY)', /all 27/],
     ['DROP TABLE cluster_media', /all 27/],
@@ -106,18 +121,18 @@ test('same-schema verifier rejects changed objects, indexes, columns and SQL lit
     ["CREATE TRIGGER changed AFTER INSERT ON server_metadata BEGIN SELECT 'private  value'; END", /Schema objects/],
   ];
   for (const [sql, expected] of cases) await t.test(sql.split(';')[0], async subtest => {
-    const paths = await fixture(subtest);
+    const paths = await fixture(subtest, schemaVersion);
     edit(paths.targetPath, sql);
     assert.throws(() => verifySameSchemaCopies(paths), expected);
   });
-  const paths = await fixture(t);
+  const paths = await fixture(t, schemaVersion);
   edit(paths.sourcePath, "CREATE TRIGGER literal_check AFTER INSERT ON server_metadata BEGIN SELECT 'private  value'; END");
   edit(paths.targetPath, "CREATE TRIGGER literal_check AFTER INSERT ON server_metadata BEGIN SELECT 'private value'; END");
   assert.throws(() => verifySameSchemaCopies(paths), /Schema objects/);
 });
 
-test('same-schema verifier rejects non-independent files, symlinks, live paths and invalid versions', async t => {
-  const paths = await fixture(t);
+test(`schema${schemaVersion} same-schema verifier rejects non-independent files, symlinks, live paths and invalid versions`, async t => {
+  const paths = await fixture(t, schemaVersion);
   assert.throws(() => verifySameSchemaCopies({ ...paths, targetPath: paths.sourcePath }), /independent/);
   const hardlink = join(paths.directory, 'hardlink.sqlite'), softlink = join(paths.directory, 'symlink.sqlite');
   await link(paths.sourcePath, hardlink);
@@ -133,19 +148,22 @@ test('same-schema verifier rejects non-independent files, symlinks, live paths a
   }
   for (const key of ['sourcePath', 'targetPath']) {
     edit(paths[key], 'PRAGMA user_version = 12');
-    assert.throws(() => verifySameSchemaCopies(paths), /Expected schema 14/);
-    edit(paths[key], 'PRAGMA user_version = 14');
+    assert.throws(() => verifySameSchemaCopies(paths), /Expected schema 14 or 16/);
+    edit(paths[key], `PRAGMA user_version = ${schemaVersion}`);
+    edit(paths[key], `PRAGMA user_version = ${schemaVersion === 14 ? 16 : 14}`);
+    assert.throws(() => verifySameSchemaCopies(paths), /schema versions must match/);
+    edit(paths[key], `PRAGMA user_version = ${schemaVersion}`);
   }
 });
 
-test('same-schema verifier requires all27 tables even if both copies share the same unexpected table', async t => {
-  const paths = await fixture(t);
+test(`schema${schemaVersion} same-schema verifier requires all27 tables even if both copies share the same unexpected table`, async t => {
+  const paths = await fixture(t, schemaVersion);
   for (const path of [paths.sourcePath, paths.targetPath]) edit(path, 'CREATE TABLE unexpected(id TEXT PRIMARY KEY)');
   assert.throws(() => verifySameSchemaCopies(paths), /all 27/);
 });
 
-test('same-schema verifier checks FK and integrity and CLI suppresses native details and paths', async t => {
-  const paths = await fixture(t);
+test(`schema${schemaVersion} same-schema verifier checks FK and integrity and CLI suppresses native details and paths`, async t => {
+  const paths = await fixture(t, schemaVersion);
   edit(paths.targetPath, "PRAGMA foreign_keys = OFF; UPDATE cluster_media SET media_id = 'missing' WHERE media_id = 'video'");
   assert.throws(() => verifySameSchemaCopies(paths), /foreign key check/);
   const corrupt = join(paths.directory, 'damaged.sqlite');
@@ -173,3 +191,4 @@ test('same-schema verifier checks FK and integrity and CLI suppresses native det
   await writeFile(paths.targetPath, bytes);
   assert.throws(() => verifySameSchemaCopies(paths), /integrity check/);
 });
+}

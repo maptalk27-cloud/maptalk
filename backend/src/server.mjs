@@ -12,6 +12,8 @@ import { mediaByteRange, sendMediaBytes } from './media-range.mjs';
 import { mediaJSON, userJSON } from './user-profile.mjs';
 import { reclaimUnreferencedMedia, userMediaLimitBytes as validateMediaLimit } from './media-storage.mjs';
 import { createResumableUploads, ResumableUploadError, UPLOAD_CHUNK_SIZE } from './resumable-uploads.mjs';
+import { createPOISocialRoutes } from './poi-social.mjs';
+import { poiVisitDay } from './poi-visit-day.mjs';
 
 const ACTIVE_FEED_WINDOW = 72 * 60 * 60 * 1000;
 // Derive activity from first publication so existing 24-hour rows follow the
@@ -20,6 +22,7 @@ const ACTIVE_FEED_WINDOW = 72 * 60 * 60 * 1000;
 const PUBLICATION_TIME_SQL = 'COALESCE(published_at, created_at)';
 const PHOTO_LIMIT = 10 * 1024 * 1024;
 const CATEGORIES = ['viewpoint', 'restaurant', 'coffee', 'nightlife', 'art', 'market', 'hotel', 'airport', 'other'];
+const CUSTOM_POI_EMOJI = new Set(['🫠', '🥹', '😂', '😎', '🥱', '🤯', '🤤', '🤩', '🥲', '😌', '🙃', '🫶', '☕️', '🍜', '🌧️', '🌅', '✨', '💀']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 class APIError extends Error {
@@ -73,10 +76,11 @@ function distanceInMeters(a, b) {
   return 6_371_000 * 2 * Math.asin(Math.sqrt(Math.min(1, haversine)));
 }
 
-function requireNearbyPlace(location, place, directoryKind) {
-  const radius = directoryKind === 'airport' ? 2000 : 150;
-  requireValue(distanceInMeters(location, place) <= radius,
-    `Choose a place within ${radius} meters of the supplied location.`);
+function requireNearbyPlace(input, place) {
+  // Legacy visit fields preserve accepted request hashes, not eligibility.
+  // New check-ins use only the GPS saved with the original publish tap.
+  requireValue(distanceInMeters(input.location, place) <= 500,
+    'Choose a place within 500 meters of your current location.');
 }
 
 function handle(value) {
@@ -94,7 +98,7 @@ function credentials(body) {
 }
 
 function memoryInput(body, time) {
-  object(body, ['id', 'kind', 'visibility', 'location', 'caption', 'mediaIds', 'place', 'placeId', 'capturedAt', 'cluster', 'locationName']);
+  object(body, ['id', 'kind', 'visibility', 'location', 'caption', 'mediaIds', 'place', 'placeId', 'capturedAt', 'cluster', 'locationName', 'locationId', 'placeVisit', 'photoVisit', 'videoVisit']);
   const result = {
     id: id(body.id), kind: body.kind, visibility: visibility(body.visibility),
     location: coordinate(body.location), caption: body.caption ?? '',
@@ -114,6 +118,54 @@ function memoryInput(body, time) {
     result.capturedAt = new Date(captured).toISOString();
   }
   requireValue(result.kind === 'poi' || result.kind === 'reel', 'Kind must be poi or reel.');
+  requireValue(body.photoVisit === undefined || body.videoVisit === undefined,
+    'Use the location from the single attached photo or video.');
+  if (body.placeVisit !== undefined) {
+    requireValue(result.kind === 'poi', 'Only a POI check-in can use a recent visit.');
+    const visit = object(body.placeVisit, ['location', 'recordedAt', 'horizontalAccuracy']);
+    requireValue(typeof visit.recordedAt === 'string'
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(visit.recordedAt),
+    'Visit time must be an ISO 8601 UTC timestamp.');
+    const recorded = Date.parse(visit.recordedAt);
+    requireValue(Number.isSafeInteger(recorded) && recorded >= Date.UTC(2000, 0, 1)
+      && new Date(recorded).toISOString().slice(0, 19) === visit.recordedAt.slice(0, 19),
+    'Visit time must be a valid calendar date.');
+    requireValue(typeof visit.horizontalAccuracy === 'number' && Number.isFinite(visit.horizontalAccuracy)
+      && visit.horizontalAccuracy >= 0 && visit.horizontalAccuracy <= 100,
+    'Choose a recent location accurate to within 100 meters.');
+    // Legacy input only: preserve retry identity, never use this to grant
+    // eligibility or store a trajectory. Absent means absent for old hashes.
+    result.placeVisit = { location: coordinate(visit.location), recordedAt: new Date(recorded).toISOString(),
+      horizontalAccuracy: visit.horizontalAccuracy };
+  }
+  if (body.photoVisit !== undefined) {
+    requireValue(result.kind === 'poi', 'Only a POI check-in can use a photo location.');
+    const photo = object(body.photoVisit, ['location', 'capturedAt']);
+    requireValue(typeof photo.capturedAt === 'string'
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(photo.capturedAt),
+    'Photo time must be an ISO 8601 UTC timestamp.');
+    const captured = Date.parse(photo.capturedAt);
+    requireValue(Number.isSafeInteger(captured) && captured >= Date.UTC(2000, 0, 1)
+      && new Date(captured).toISOString().slice(0, 19) === photo.capturedAt.slice(0, 19),
+    'Photo time must be a valid calendar date.');
+    // Keep absent fields absent for legacy retry hashes. Only the digest is
+    // retained; raw photo location/time are not added to a public memory.
+    result.photoVisit = { location: coordinate(photo.location), capturedAt: new Date(captured).toISOString() };
+  }
+  if (body.videoVisit !== undefined) {
+    requireValue(result.kind === 'poi', 'Only a POI check-in can use a video location.');
+    const video = object(body.videoVisit, ['location', 'capturedAt']);
+    requireValue(typeof video.capturedAt === 'string'
+      && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(video.capturedAt),
+    'Video time must be an ISO 8601 UTC timestamp.');
+    const captured = Date.parse(video.capturedAt);
+    requireValue(Number.isSafeInteger(captured) && captured >= Date.UTC(2000, 0, 1)
+      && new Date(captured).toISOString().slice(0, 19) === video.capturedAt.slice(0, 19),
+    'Video time must be a valid calendar date.');
+    // Separate from photoVisit for attachment-type validation; omit entirely
+    // from old inputs so accepted photo/GPS/legacy retry hashes stay unchanged.
+    result.videoVisit = { location: coordinate(video.location), capturedAt: new Date(captured).toISOString() };
+  }
   if (body.locationName !== undefined) {
     requireValue(result.kind === 'reel', 'Only a Post can name its location.');
     requireValue(typeof body.locationName === 'string', 'Location name must be text.');
@@ -126,12 +178,19 @@ function memoryInput(body, time) {
     // their persisted publication request hashes after this upgrade.
     result.locationName = locationName;
   }
+  if (body.locationId !== undefined) {
+    requireValue(result.kind === 'reel', 'Only a Post can identify its subject location.');
+    // Deliberately omitted for all legacy requests, preserving their hashes.
+    result.locationId = id(body.locationId);
+  }
   requireValue(typeof result.caption === 'string' && result.caption.length <= 2200, 'Caption is too long.');
   result.caption = result.caption.trim();
   requireValue(Array.isArray(result.mediaIds) && result.mediaIds.length <= (result.kind === 'poi' ? 1 : 9),
-    'POI allows at most one photo; Reel allows at most nine.');
+    'POI allows at most one photo or video; Reel allows at most nine.');
   result.mediaIds = result.mediaIds.map(id);
   requireValue(new Set(result.mediaIds).size === result.mediaIds.length, 'Duplicate media.');
+  if (result.photoVisit) requireValue(result.mediaIds.length === 1, 'Keep the selected photo attached to this check-in.');
+  if (result.videoVisit) requireValue(result.mediaIds.length === 1, 'Keep the selected video attached to this check-in.');
   if (body.cluster !== undefined) {
     requireValue(result.kind === 'reel', 'Only a Reel can contain a cluster.');
     object(body.cluster, ['title', 'memoryIds']);
@@ -409,12 +468,22 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       JOIN media ON media.id = memory_media.media_id WHERE memory_id = ? ORDER BY position`).all(row.id);
     const cluster = includeCluster
       ? db.prepare('SELECT title, members_json FROM memory_clusters WHERE memory_id = ?').get(row.id) : null;
+    const feedback = row.kind === 'poi'
+      ? db.prepare('SELECT endorsement, comment FROM memory_feedback WHERE memory_id = ?').get(row.id) : null;
+    const customFeeling = row.kind === 'poi'
+      ? db.prepare('SELECT emoji FROM memory_custom_feelings WHERE memory_id = ?').get(row.id) : null;
     return {
       id: row.id, ownerId: row.owner_id, owner: userJSON(db, owner),
       kind: row.kind, visibility: row.visibility,
       moderationStatus: row.moderation_status,
       location: { latitude: row.latitude, longitude: row.longitude }, caption: row.caption,
       ...(row.location_name ? { locationName: row.location_name } : {}),
+      ...(row.post_location_id ? { locationId: row.post_location_id } : {}),
+      ...(feedback || customFeeling ? { feedback: {
+        endorsement: feedback?.endorsement ?? null, comment: feedback?.comment ?? '',
+        ...(customFeeling ? { customEmoji: customFeeling.emoji } : {}),
+      } } : {}),
+      ...(row.kind === 'poi' && place ? { visitDay: poiVisitDay(row.published_at ?? row.created_at, place.latitude, place.longitude) } : {}),
       place: place ? { id: place.id, name: place.name, category: place.category, sourceId: place.source_id,
         ...(place.directory_kind ? { directoryKind: place.directory_kind } : {}),
         coordinate: { latitude: place.latitude, longitude: place.longitude } } : null,
@@ -467,6 +536,9 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     response.end(body === undefined ? undefined : JSON.stringify(body));
   }
 
+  const poiSocialRoute = createPOISocialRoutes({ db, now, APIError, id, object, requireValue,
+    notFound, authorizedJSON, memoryFor, visibleOwner, visibilitySQL, pageInput, json });
+
   async function route(request, response) {
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -486,7 +558,9 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     const method = request.method;
     if (method === 'GET' && path === '/health') {
       return json(response, 200, { status: 'ok', mode: isBeta ? 'private-beta' : 'local-development', apiVersion: 1,
-        supportsPostLocationNames: true });
+        supportsPostLocationNames: true, supportsPostLocationIdentity: true,
+        poiCheckInRadiusMeters: 500, supportsMediaPlaceVisits: false,
+        features: { poiFeedback: true, poiCustomFeelings: true, poiVisitCounts: true, mediaLikes: true, placeSaves: true, directMessages: true } });
     }
     if (method === 'GET' && path === '/v1/auth/providers') {
       return json(response, 200, { providers: [
@@ -573,7 +647,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
     const isTransfer = resumableMatch && ((!resumableMatch[2] && ['PUT', 'PATCH'].includes(method))
       || (resumableMatch[2] && method === 'POST'));
     if (isTransfer) transferLimit(user.id, response);
-    else if (method !== 'GET') mutationLimit(user.id, response);
+    else if (method !== 'GET' && !(method === 'POST' && path === '/v1/places/visit-counts')) mutationLimit(user.id, response);
     if (method === 'DELETE' && path === '/v1/me') {
       await deleteAccount(user.id);
       return json(response, 204);
@@ -593,6 +667,8 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       return json(response, 204);
     }
     requireBetaAccess(db, user.id, isBeta);
+
+    if (await poiSocialRoute({ request, response, path, method, url, user })) return;
 
     const commentMatch = /^\/v1\/(memories|places)\/([^/]+)\/comments$/.exec(path);
     if (commentMatch && (method === 'GET' || method === 'POST')) {
@@ -883,7 +959,12 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
           return member;
         });
         for (const mediaID of input.mediaIds) {
-          if (!db.prepare('SELECT id FROM media WHERE id = ? AND owner_id = ?').get(mediaID, user.id)) throw notFound();
+          const media = db.prepare('SELECT mime_type FROM media WHERE id = ? AND owner_id = ?').get(mediaID, user.id);
+          if (!media) throw notFound();
+          if (input.photoVisit) requireValue(media.mime_type.startsWith('image/'),
+            'A photo-assisted check-in needs its selected photo.');
+          if (input.videoVisit) requireValue(media.mime_type === 'video/mp4',
+            'A video-assisted check-in needs its selected video.');
         }
         let placeID = input.placeId;
         if (placeID) {
@@ -900,7 +981,7 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
             WHERE place_id = ? AND NOT EXISTS (SELECT 1 FROM memories WHERE place_id = ?)`).get(placeID, placeID);
           if (!visible && !orphanedSource) throw notFound();
           const place = db.prepare('SELECT latitude, longitude, directory_kind FROM places WHERE id = ?').get(placeID);
-          requireNearbyPlace(input.location, place, place.directory_kind);
+          requireNearbyPlace(input, place);
         }
         if (input.place) {
           const source = input.place.sourceId
@@ -912,12 +993,12 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
             // Later clients cannot relocate or rename this canonical place by publishing to it.
             requireValue(input.place.directoryKind === undefined || input.place.directoryKind === source.directory_kind,
               'A check-in cannot change this place type.');
-            requireNearbyPlace(input.location, source, source.directory_kind);
+            requireNearbyPlace(input, source);
             placeID = source.id;
           } else {
             placeID = randomUUID();
             const location = input.place.coordinate ?? input.location;
-            requireNearbyPlace(input.location, location, input.place.directoryKind);
+            requireNearbyPlace(input, location);
             db.prepare('INSERT INTO places(id, name, category, latitude, longitude, directory_kind) VALUES (?, ?, ?, ?, ?, ?)')
               .run(placeID, input.place.name, input.place.category, location.latitude, location.longitude, input.place.directoryKind ?? null);
             if (input.place.sourceId) {
@@ -930,11 +1011,11 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
         const received = now();
         const created = input.capturedAt ? Math.min(Date.parse(input.capturedAt), received) : received;
         db.prepare(`INSERT INTO memories(id, owner_id, kind, visibility, latitude, longitude,
-          caption, place_id, created_at, expires_at, request_hash, published_at, moderation_status, location_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          caption, place_id, created_at, expires_at, request_hash, published_at, moderation_status, location_name, post_location_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(input.id, user.id, input.kind, input.visibility, input.location.latitude, input.location.longitude,
             input.caption, placeID, created,
             created + ACTIVE_FEED_WINDOW, requestHash, input.visibility === 'public' ? created : null,
-            'approved', input.locationName ?? null);
+            'approved', input.locationName ?? null, input.locationId ?? null);
         const attach = db.prepare('INSERT INTO memory_media(memory_id, media_id, position) VALUES (?, ?, ?)');
         input.mediaIds.forEach((mediaID, position) => attach.run(input.id, mediaID, position));
         if (members) {
@@ -1002,6 +1083,53 @@ export function createBackend({ databasePath, now = () => Date.now(), authLimit 
       return json(response, 200, listMemories(`kind = 'poi' AND place_id = ?
         AND visibility = 'public' AND moderation_status = 'approved' AND ${visibilitySQL()}`,
         [placeID, user.id, user.id], page, PUBLICATION_TIME_SQL));
+    }
+
+    const feedbackMatch = /^\/v1\/memories\/([^/]+)\/feedback$/.exec(path);
+    if (method === 'PUT' && feedbackMatch) {
+      const memoryID = id(feedbackMatch[1]);
+      memoryFor(memoryID, user.id, true);
+      const body = object(await authorizedJSON(request, user.id), ['endorsement', 'comment', 'customEmoji']);
+      const endorsement = body.endorsement ?? null;
+      requireValue(endorsement === null || ['hype', 'solid', 'meh', 'questionable'].includes(endorsement),
+        'Choose a supported feeling.');
+      const hasCustomEmoji = Object.hasOwn(body, 'customEmoji');
+      const requestedCustomEmoji = body.customEmoji ?? null;
+      requireValue(requestedCustomEmoji === null || CUSTOM_POI_EMOJI.has(requestedCustomEmoji),
+        'Choose a supported custom feeling.');
+      requireValue(endorsement === null || requestedCustomEmoji === null,
+        'Choose either a rating or a custom feeling.');
+      requireValue(body.comment === undefined || typeof body.comment === 'string', 'Comment must be text.');
+      const comment = (body.comment ?? '').trim();
+      requireValue(comment.length <= 1000, 'Comment is too long.');
+      requireValue(!comment.includes('\u0000'), 'Comment cannot contain null characters.');
+      const memory = transaction(db, () => {
+        // Recheck after reading the body: an in-flight deletion must not be
+        // revived, and knowing a public visit ID never grants write access.
+        const current = memoryFor(memoryID, user.id, true);
+        requireValue(current.kind === 'poi', 'Only a POI check-in can have visit feedback.');
+        // Old clients do not know this field. Comment edits/clears from them
+        // preserve a custom feeling; explicitly choosing a rating replaces it.
+        const customEmoji = endorsement !== null ? null : hasCustomEmoji ? requestedCustomEmoji
+          : db.prepare('SELECT emoji FROM memory_custom_feelings WHERE memory_id = ?').get(memoryID)?.emoji ?? null;
+        if (endorsement === null && comment.length === 0) {
+          db.prepare('DELETE FROM memory_feedback WHERE memory_id = ?').run(memoryID);
+        } else {
+          db.prepare(`INSERT INTO memory_feedback(memory_id, endorsement, comment) VALUES (?, ?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET endorsement = excluded.endorsement, comment = excluded.comment`)
+            .run(memoryID, endorsement, comment);
+        }
+        if (customEmoji === null) {
+          db.prepare('DELETE FROM memory_custom_feelings WHERE memory_id = ?').run(memoryID);
+        } else {
+          db.prepare(`INSERT INTO memory_custom_feelings(memory_id, emoji) VALUES (?, ?)
+            ON CONFLICT(memory_id) DO UPDATE SET emoji = excluded.emoji`).run(memoryID, customEmoji);
+        }
+        // Do not change publication/save times, caption, request hash, media,
+        // visibility, moderation or already-published cluster snapshots.
+        return current;
+      });
+      return json(response, 200, serializeMemory(memory));
     }
 
     const memoryMatch = /^\/v1\/memories\/([^/]+)$/.exec(path);

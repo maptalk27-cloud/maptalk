@@ -119,6 +119,19 @@ enum FriendStoryPageSelection {
     static func pagerPages(in session: FriendStorySession, chronologicalPosts: Bool = false) -> [FriendStoryPage] {
         chronologicalPosts ? session.pagesInPostOrder : session.pagesInStoryOrder
     }
+
+    /// A map pin chooses an entry cursor, never a new order or membership.
+    /// Keep the first source-media slice when one visit has several pages.
+    static func latestPlacePage(placeID: UUID, in groups: [FriendStoryGroup]) -> FriendStoryPage? {
+        groups.lazy.flatMap(\.pages).reduce(nil as FriendStoryPage?) { latest, page in
+            guard case let .poi(place, _, _) = page.content, place.id == placeID else { return latest }
+            guard let latest else { return page }
+            if page.publishedAt != latest.publishedAt {
+                return page.publishedAt > latest.publishedAt ? page : latest
+            }
+            return page.memoryID.uuidString > latest.memoryID.uuidString ? page : latest
+        }
+    }
 }
 
 /// A local browsing session, never the selection/pager owned by the public map.
@@ -152,6 +165,7 @@ final class FriendStoryNavigation: ObservableObject {
     var lastFocusedAuthorID: UUID?
 
     var isActive: Bool { session != nil }
+    var isPlaceScoped: Bool { session?.scopedPlaceID != nil }
     var isBrowsingBubble: Bool {
         if case .bubble? = routes.last?.content { return true }
         return false
@@ -168,22 +182,40 @@ final class FriendStoryNavigation: ObservableObject {
 
     func needsMapFocus(locationKey: String, viewportSize: CGSize, authorID: UUID? = nil) -> Bool {
         lastLocationKey != locationKey || lastViewportSize != viewportSize
-            || (authorID != nil && lastFocusedAuthorID != authorID)
+            || (!isPlaceScoped && authorID != nil && lastFocusedAuthorID != authorID)
     }
 
     func begin(groups: [FriendStoryGroup], authorID: UUID, viewedKeys: Set<String>, origin: MapSnapshot) {
         guard groups.contains(where: { $0.authorID == authorID && !$0.pages.isEmpty })
-            || session?.groups.contains(where: { $0.authorID == authorID }) == true else { return }
+            || (!isPlaceScoped && session?.groups.contains(where: { $0.authorID == authorID }) == true) else { return }
         if self.origin == nil { self.origin = origin }
         // A deliberate avatar tap is a safe boundary to include newly public
         // posts. Background reconciliation still freezes the mounted pager.
         if let refreshed = FriendStorySession(groups: groups, authorID: authorID,
-            viewedKeys: viewedKeys, resuming: session?.resumePageIDs ?? [:]) {
+            viewedKeys: viewedKeys, resuming: isPlaceScoped ? [:] : session?.resumePageIDs ?? [:]) {
             session = refreshed
         } else {
             session?.selectAuthor(id: authorID, viewedKeys: viewedKeys)
         }
         routes.removeAll()
+    }
+
+    /// Only the map entry uses a place-limited, latest-visit-first session.
+    /// Every surviving page keeps that initial position during refreshes.
+    @discardableResult
+    func beginPlace(groups: [FriendStoryGroup], placeID: UUID, entryPageID: String,
+                    origin: MapSnapshot) -> Bool {
+        guard let entry = groups.flatMap(\.pages).first(where: { $0.id == entryPageID }),
+              var next = FriendStorySession(groups: groups, authorID: entry.authorID,
+                                            scopedPlaceID: placeID) else { return false }
+        next.selectPage(id: entryPageID)
+        self.origin = origin
+        session = next
+        routes.removeAll()
+        lastLocationKey = nil
+        lastViewportSize = nil
+        lastFocusedAuthorID = nil
+        return true
     }
 
     /// A native swipe commits exactly one neighboring page from the render
@@ -197,8 +229,9 @@ final class FriendStoryNavigation: ObservableObject {
         guard routes.isEmpty, var session,
               session.selectedAuthorID == fromAuthorID,
               session.currentPage?.id == fromPageID else { return false }
-        if chronologicalPosts {
-            let pages = FriendStoryPageSelection.pagerPages(in: session, chronologicalPosts: true)
+        if chronologicalPosts || session.scopedPlaceID != nil {
+            let pages = FriendStoryPageSelection.pagerPages(in: session,
+                chronologicalPosts: chronologicalPosts)
             guard let sourceIndex = pages.firstIndex(where: { $0.id == fromPageID }),
                   let destinationIndex = pages.firstIndex(where: { $0.id == id }),
                   abs(destinationIndex - sourceIndex) == 1 else { return false }
@@ -304,6 +337,8 @@ struct FriendStoryFlow: View {
     let onClose: () -> Void
     var allowsPlayback = true
     var feedPresentation: MapTalkFeedPresentation = .personStory
+    var showsPlaceAuthors = false
+    var cumulativeVisitDayCount: (UUID, UUID) -> Int? = { _, _ in nil }
     var showsBubbleProgress = false
     var hasMorePosts = false
     var isLoadingPosts = false
@@ -316,6 +351,8 @@ struct FriendStoryFlow: View {
     @State private var placeHistoryRetry: [UUID: Int] = [:]
     @State private var placeHistoryPages: [UUID: BackendStore.PlaceHistoryPage] = [:]
     @State private var placeHistoryLoadFailed: Set<UUID> = []
+    @State private var authoritativeVisitCounts: [BackendPOIVisitCountKey: Int] = [:]
+    @State private var visitCountRevision = 0
 
     private enum PlaceHistoryStatus { case loading, loadingMore, loaded, unavailable }
 
@@ -369,14 +406,27 @@ struct FriendStoryFlow: View {
                     feedPresentation: feedPresentation,
                     showsVisitExpression: feedPresentation == .personStory,
                     showsPersonalVisitCount: feedPresentation == .personStory,
-                    personalVisitCountLabel: recentVisitLabel(for: page, in: group),
+                    personalVisitCountLabel: cumulativeVisitLabel(for: page),
+                    allowsLoadedVisitCountFallback: false,
                     showsHeaderTimestamp: feedPresentation != .personStory,
+                    placeAuthors: currentPlaceAuthors,
                     allowsPOIMediaLightbox: feedPresentation != .personStory
                 )
                 .environment(\.experiencePOIHistoryVisible, feedPresentation != .personStory)
+                // The story root already hydrates its one selected visit.
+                // Hidden place history must not prepare every historical video
+                // merely because the current media card was expanded.
+                .environment(\.experienceLiveMediaHydrationEnabled, feedPresentation != .personStory)
                 .environment(\.experiencePOIRecentSharersVisible, feedPresentation != .personStory)
                 .environment(\.experiencePOIPlaceHeader, instantPlaceHeader(for: page))
                 .environment(\.experiencePOIPlaybackActions, instantPlaybackFooter(for: page))
+                .task(id: "\(page.id):\(visitCountRevision)") {
+                    guard feedPresentation == .personStory, allowsPlayback,
+                          case let .poi(place, _, _) = page.content,
+                          let store = environment.backend else { return }
+                    let authors = navigation.isPlaceScoped ? session.groups.map(\.authorID) : [page.authorID]
+                    await store.ensurePOIVisitDayCounts(placeID: place.id, ownerIDs: authors)
+                }
                 .opacity(navigation.routes.isEmpty ? 1 : 0)
                 .allowsHitTesting(navigation.routes.isEmpty)
                 .accessibilityHidden(!navigation.routes.isEmpty)
@@ -413,6 +463,12 @@ struct FriendStoryFlow: View {
                 }
             }
         }
+        .onReceive(environment.backend?.$poiVisitDayCounts.eraseToAnyPublisher()
+            ?? Just([BackendPOIVisitCountKey: Int]()).eraseToAnyPublisher()) { counts in
+            authoritativeVisitCounts = counts
+        }
+        .onReceive(environment.backend?.$poiVisitCountRevision.eraseToAnyPublisher()
+            ?? Just(0).eraseToAnyPublisher()) { visitCountRevision = $0 }
         .onChangeCompat(of: isExpanded) { expanded in
             guard !expanded else { return }
             returnFromPlaceAfterCollapse()
@@ -420,12 +476,16 @@ struct FriendStoryFlow: View {
     }
 
     private func movePage(_ offset: Int) {
-        if feedPresentation == .posts {
+        if feedPresentation == .posts || navigation.isPlaceScoped {
             guard let session = navigation.session, let page = session.currentPage else { return }
-            let pages = FriendStoryPageSelection.pagerPages(in: session, chronologicalPosts: true)
+            let pages = FriendStoryPageSelection.pagerPages(in: session,
+                chronologicalPosts: feedPresentation == .posts)
             guard let current = pages.firstIndex(where: { $0.id == page.id }) else { return }
             let (target, overflow) = current.addingReportingOverflow(offset)
-            guard !overflow, pages.indices.contains(target) else { return }
+            guard !overflow, pages.indices.contains(target) else {
+                if navigation.isPlaceScoped, offset > 0 { onClose() }
+                return
+            }
             selectPagerPage(pages[target].id, fromAuthorID: page.authorID, fromPageID: page.id)
             return
         }
@@ -474,20 +534,35 @@ struct FriendStoryFlow: View {
         return inheritedRouteColorScheme
     }
 
-    private func recentVisitLabel(for page: FriendStoryPage, in group: FriendStoryGroup) -> String? {
+    private func cumulativeVisitLabel(for page: FriendStoryPage) -> String? {
         guard feedPresentation == .personStory, case let .poi(place, _, _) = page.content else { return nil }
-        // Home owns an active feed, not the author's lifetime place archive.
-        // Count visits rather than media slices and name that scope honestly.
-        let count = Set(group.pages.compactMap { candidate -> UUID? in
-            guard case let .poi(candidatePlace, visit, _) = candidate.content,
-                  candidatePlace.id == place.id, visit.userId == page.authorID else { return nil }
-            return visit.id
-        }).count
-        return count == 1 ? "1 recent visit" : "\(count) recent visits"
+        let count: Int?
+        if environment.backend != nil {
+            count = authoritativeVisitCounts[.init(placeId: place.id, ownerId: page.authorID)]
+        } else {
+            let fullPlace = placeProvider(place.id) ?? place
+            count = cumulativeVisitDayCount(place.id, page.authorID)
+                ?? fullPlace.checkInPeople().first { $0.userID == page.authorID }?.visitDayCount
+        }
+        guard let count, count > 0 else { return nil }
+        return count == 1 ? "1 visit" : "\(count) visits"
+    }
+
+    /// The avatar stack describes this place; it does not own the pager.
+    private var currentPlaceAuthors: [User] {
+        guard showsPlaceAuthors, feedPresentation == .personStory, let session = navigation.session,
+              let current = session.currentPage,
+              case let .poi(currentPlace, _, _) = current.content else { return [] }
+        var seen = Set<UUID>()
+        return session.pagesInStoryOrder.compactMap { page in
+            guard case let .poi(place, _, _) = page.content, place.id == currentPlace.id,
+                  seen.insert(page.authorID).inserted else { return nil }
+            return userProvider(page.authorID) ?? session.groups.first { $0.authorID == page.authorID }?.user
+        }
     }
 
     private func instantPlaceHeader(for page: FriendStoryPage) -> ((UUID) -> AnyView?)? {
-        guard feedPresentation == .personStory, case let .poi(currentPlace, _, _) = page.content else { return nil }
+        guard feedPresentation == .personStory, case .poi = page.content else { return nil }
         let pages = navigation.session?.pagesInStoryOrder ?? []
         return { id in
             let place = placeProvider(id) ?? pages.compactMap { candidate -> RatedPOI? in
@@ -495,16 +570,17 @@ struct FriendStoryFlow: View {
                 return place
             }.first
             guard let place else { return nil }
-            // A neighboring native page can already be mounted while its
-            // swipe is still settling. Only the current heading opens a route.
+            // Instant browsing stays in its own queue. Historical visitor
+            // avatars keep their separate viewer; this heading is display-only.
             return AnyView(POIStoryPlaceHeading(place: place,
-                onOpen: id == currentPlace.id ? { openPlace(id, from: page) } : nil))
+                trailingAction: AnyView(POIStorySaveButton(place: place))))
         }
     }
 
     private func instantPlaybackFooter(for page: FriendStoryPage) -> AnyView? {
-        guard feedPresentation == .personStory, case let .poi(place, _, _) = page.content else { return nil }
-        return AnyView(POIStoryPlaybackFooter(place: place, publishedAt: page.publishedAt))
+        guard feedPresentation == .personStory, case let .poi(place, visit, _) = page.content else { return nil }
+        return AnyView(POIStoryPlaybackFooter(place: place, publishedAt: page.publishedAt,
+            trailingActions: AnyView(POIStoryMediaActions(visit: visit, mediaID: page.mediaID).id(page.id))))
     }
 
     private func openPlace(_ id: UUID, from sourcePage: FriendStoryPage) {

@@ -51,6 +51,24 @@ struct POIFeedbackPreview: View {
     @State private var isPresented = false
     @State private var replayRequest = 0
     @State private var confirmation: String?
+#if DEBUG
+    private enum FlowRound: String, CaseIterable {
+        case current = "新方案", previous = "上一轮"
+    }
+    @State private var flowRound: FlowRound = .current
+    @State private var flowDesign: POIFeedbackFlowDesign? = .inline
+
+    private var flowOptions: [POIFeedbackFlowDesign] {
+        flowRound == .current ? [.inline, .floating, .editor] : [.header, .corner, .ribbon]
+    }
+
+    private var roundSelection: Binding<FlowRound> {
+        Binding(get: { flowRound }, set: { value in
+            flowRound = value
+            flowDesign = value == .current ? .inline : .header
+        })
+    }
+#endif
 
     private static let placeCoordinate = CLLocationCoordinate2D(latitude: 47.6097, longitude: -122.3425)
 
@@ -74,18 +92,7 @@ struct POIFeedbackPreview: View {
                         .transition(.opacity)
                 }
                 if isPresented {
-                    MapTalkPOIFeedbackOverlay(
-                        placeName: activeFixture.placeName,
-                        audience: .livePublic,
-                        style: style,
-                        iconSet: iconSet,
-                        heading: heading,
-                        initialDraft: activeFixture.draft,
-                        onSkip: { finishPreview("Skipped in this preview.") },
-                        onSave: { _, _ in
-                            finishPreview("Saved in this preview only.")
-                        }
-                    )
+                    feedbackPrompt
                     // Style and appearance changes deliberately keep identity,
                     // so they never clear the current rating or typed comment.
                     .id(fixtureID)
@@ -119,6 +126,43 @@ struct POIFeedbackPreview: View {
         }
     }
 
+    @ViewBuilder
+    private var feedbackPrompt: some View {
+#if DEBUG
+        if let flowDesign {
+            POIFeedbackFlowPreview(
+                placeName: activeFixture.placeName,
+                iconSet: iconSet,
+                heading: heading,
+                initialDraft: activeFixture.draft,
+                design: flowDesign,
+                onSkip: { finishPreview("Skipped in this preview.") },
+                onComplete: { emoji, comment in
+                    let mood = emoji ?? "No feeling"
+                    finishPreview("Preview only · \(mood)" + (comment.isEmpty ? "" : "\n\(comment)"))
+                }
+            )
+        } else {
+            originalFeedbackPrompt
+        }
+#else
+        originalFeedbackPrompt
+#endif
+    }
+
+    private var originalFeedbackPrompt: some View {
+        MapTalkPOIFeedbackOverlay(
+            placeName: activeFixture.placeName,
+            audience: .livePublic,
+            style: style,
+            iconSet: iconSet,
+            heading: heading,
+            initialDraft: activeFixture.draft,
+            onSkip: { finishPreview("Skipped in this preview.") },
+            onSave: { _, _, _ in finishPreview("Saved in this preview only.") }
+        )
+    }
+
     private var controls: some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
@@ -126,6 +170,15 @@ struct POIFeedbackPreview: View {
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
+#if DEBUG
+                Picker("预览轮次", selection: roundSelection) {
+                    ForEach(FlowRound.allCases, id: \.self) { round in
+                        Text(round.rawValue).tag(round)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 140)
+#endif
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 13, weight: .semibold))
@@ -136,13 +189,21 @@ struct POIFeedbackPreview: View {
                 .accessibilityLabel("Close UI preview")
             }
 
-            Picker("Feedback style", selection: $style) {
-                ForEach(POIFeedbackStyle.reviewStyles) { option in
-                    Text(option.title).tag(option)
+#if DEBUG
+            Picker("Flow design", selection: $flowDesign) {
+                if flowRound == .previous {
+                    Text("Original").tag(POIFeedbackFlowDesign?.none)
+                }
+                ForEach(flowOptions, id: \.self) { option in
+                    Text(option.rawValue).tag(Optional(option))
                 }
             }
             .pickerStyle(.segmented)
-            .accessibilityIdentifier("maptalk.poi-feedback-preview.style")
+            .accessibilityIdentifier("poi-feedback-preview.flow-design")
+            if flowDesign == nil { originalStylePicker }
+#else
+            originalStylePicker
+#endif
 
             Picker("Rating icons", selection: $iconSet) {
                 ForEach(POIFeedbackIconSet.allCases) { option in
@@ -199,6 +260,16 @@ struct POIFeedbackPreview: View {
         .padding(.top, 4)
         .padding(.bottom, 10)
         .background(.ultraThinMaterial)
+    }
+
+    private var originalStylePicker: some View {
+        Picker("Feedback style", selection: $style) {
+            ForEach(POIFeedbackStyle.reviewStyles) { option in
+                Text(option.title).tag(option)
+            }
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("maptalk.poi-feedback-preview.style")
     }
 
     private func confirmationCard(_ text: String) -> some View {

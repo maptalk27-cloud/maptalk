@@ -12,7 +12,7 @@ import { verifySchema12Copies } from '../scripts/verify-schema12.mjs';
 // Preserve the exact historical 11 -> 12 verifier fixtures after schema 13.
 function openDatabase(path) {
   const db = openCurrentDatabase(path);
-  db.exec('DROP TABLE cluster_media; DROP TABLE memory_clusters; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 12;');
+  db.exec('DROP TABLE IF EXISTS memory_custom_feelings; DROP TABLE direct_messages; DROP TABLE media_likes; DROP TABLE saved_places; DROP INDEX memories_place_owner_visits; DROP TABLE memory_feedback; DROP TABLE cluster_media; DROP TABLE memory_clusters; ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 12;');
   return db;
 }
 

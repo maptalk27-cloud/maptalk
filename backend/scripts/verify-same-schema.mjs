@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
-// Schema-14 release verification only: compare two independent, frozen copies.
+// Same-schema (14 or 16) release verification: compare independent, frozen copies.
 // Never migrate, repair, back up, open the live database, or print stored data.
 class VerificationError extends Error {}
 function requireCheck(condition, message) {
@@ -41,10 +41,12 @@ function snapshotFile(path) {
 }
 function validate(database) {
   database.exec('PRAGMA query_only = ON; PRAGMA temp_store = MEMORY; BEGIN;');
-  requireCheck(database.prepare('PRAGMA user_version').get().user_version === 14, 'Expected schema 14 on both copies.');
+  const schemaVersion = database.prepare('PRAGMA user_version').get().user_version;
+  requireCheck([14, 16].includes(schemaVersion), 'Expected schema 14 or 16 on both copies.');
   const integrity = database.prepare('PRAGMA integrity_check').all();
   requireCheck(integrity.length === 1 && integrity[0].integrity_check === 'ok', 'SQLite integrity check failed.');
   requireCheck(database.prepare('PRAGMA foreign_key_check').all().length === 0, 'SQLite foreign key check failed.');
+  return schemaVersion;
 }
 function objects(database) {
   // Include SQLite autoindexes. Do not normalize SQL: whitespace inside a
@@ -92,12 +94,13 @@ export function verifySameSchemaCopies({ sourcePath, targetPath }) {
   try {
     source = new DatabaseSync(sourceFile.path, { readOnly: true, timeout: 5000 });
     target = new DatabaseSync(targetFile.path, { readOnly: true, timeout: 5000 });
-    validate(source); validate(target);
+    const sourceSchema = validate(source), targetSchema = validate(target);
+    requireCheck(sourceSchema === targetSchema, 'Source and target schema versions must match.');
     const sourceObjects = objects(source), targetObjects = objects(target);
     for (const schema of [sourceObjects, targetObjects]) {
       const tables = schema.filter(object => object.type === 'table' && !object.name.startsWith('sqlite_'))
         .map(object => object.name).sort();
-      requireCheck(JSON.stringify(tables) === JSON.stringify(applicationTables), 'Expected all 27 schema-14 application tables.');
+      requireCheck(JSON.stringify(tables) === JSON.stringify(applicationTables), 'Expected all 27 application tables.');
     }
     requireCheck(JSON.stringify(sourceObjects) === JSON.stringify(targetObjects), 'Schema objects or definitions changed.');
     const tables = [];
@@ -109,7 +112,7 @@ export function verifySameSchemaCopies({ sourcePath, targetPath }) {
       requireCheck(original.count === restored.count && original.sha256 === restored.sha256, `Stored rows changed: ${table}.`);
       tables.push({ table, ...original });
     }
-    return { ok: true, sourceSchema: 14, targetSchema: 14, tableCount: tables.length,
+    return { ok: true, sourceSchema, targetSchema, tableCount: tables.length,
       schemaObjectCount: sourceObjects.length,
       schemaSha256: createHash('sha256').update(JSON.stringify(sourceObjects)).digest('hex'), tables };
   } finally { target?.close(); source?.close(); }

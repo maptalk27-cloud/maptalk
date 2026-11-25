@@ -24,11 +24,9 @@ struct AppRouter: View {
                 .tabItem { Label(AppBrand.name, systemImage: "map") }
                 .tag(0)
 
-            if environment.backend == nil {
-                    FriendsView(viewModel: .init(environment: environment))
+            FriendsView(viewModel: .init(environment: environment))
                 .tabItem { Label("Chats", systemImage: "message") }
                 .tag(1)
-            }
 
             UserMapView(
                 viewModel: .init(

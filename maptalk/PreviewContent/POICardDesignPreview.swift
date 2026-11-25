@@ -2,6 +2,76 @@
 import MapKit
 import SwiftUI
 
+enum POIVisitCountPreviewStyle: String, CaseIterable {
+    case footprint = "A 原版"
+    case softWhite = "B 柔白"
+    case mutedMint = "C 淡薄荷"
+
+    var iconSize: CGFloat {
+        switch self {
+        case .footprint: 12
+        case .softWhite: 16
+        case .mutedMint: 20
+        }
+    }
+
+    var numberSize: CGFloat {
+        switch self {
+        case .footprint: 15
+        case .softWhite: 18
+        case .mutedMint: 20
+        }
+    }
+
+    var iconColor: Color {
+        switch self {
+        case .footprint: .white.opacity(0.55)
+        case .softWhite: .white.opacity(0.72)
+        case .mutedMint: Color(red: 0.69, green: 0.82, blue: 0.77).opacity(0.85)
+        }
+    }
+
+    var numberColor: Color {
+        switch self {
+        case .footprint: .white.opacity(0.78)
+        case .softWhite: .white.opacity(0.88)
+        case .mutedMint: .white.opacity(0.9)
+        }
+    }
+}
+
+private struct POIVisitCountPreviewStyleKey: EnvironmentKey {
+    static let defaultValue: POIVisitCountPreviewStyle? = nil
+}
+
+extension EnvironmentValues {
+    var poiVisitCountPreviewStyle: POIVisitCountPreviewStyle? {
+        get { self[POIVisitCountPreviewStyleKey.self] }
+        set { self[POIVisitCountPreviewStyleKey.self] = newValue }
+    }
+}
+
+/// Presentation-only choices for the existing count; never substitute fixture totals.
+struct POIVisitCountPreviewMark: View {
+    let number: String
+    let style: POIVisitCountPreviewStyle
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 4) {
+            Image(systemName: "shoeprints.fill")
+                .font(.system(size: style.iconSize, weight: .regular))
+                .foregroundStyle(style.iconColor)
+            Text(number)
+                .font(.system(size: style.numberSize, weight: .medium))
+                .foregroundStyle(style.numberColor)
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(height: 40)
+    }
+}
+
 /// Local fixture comparison only; shared card chrome, no account mutations.
 struct POICardDesignPreview: View {
     let onClose: () -> Void
@@ -37,6 +107,7 @@ struct POICardDesignPreview: View {
     @State private var mediaKind: POICardPreviewCase.MediaKind = .mixed
     @State private var hasFeedback = true
     @State private var showsMediaText = true
+    @State private var visitCountStyle: POIVisitCountPreviewStyle = .softWhite
     // Show the latest repeat visit's feeling, note and photo in the author-bar preview.
     @State private var sliceIndex = 2
     @State private var historyPersonID: UUID?
@@ -156,6 +227,7 @@ struct POICardDesignPreview: View {
             backgroundColor: .black,
             content: AnyView(card
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .environment(\.poiVisitCountPreviewStyle, visitCountStyle)
                 .environment(\.profileCardSheetMotion, presentation.motion)
                 .appEnvironment(environment)),
             onDismiss: { _ = presentation.didDismiss(.personStory) }
@@ -218,6 +290,13 @@ struct POICardDesignPreview: View {
                     Text("画面带字").tag(true)
                 }.pickerStyle(.segmented)
                     .disabled(mediaKind == .none)
+                Picker("到访次数样式", selection: $visitCountStyle) {
+                    ForEach(POIVisitCountPreviewStyle.allCases, id: \.self) {
+                        Text($0.rawValue).tag($0)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("poi-preview.visit-count-style")
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(scenario.subtitle).lineLimit(2)

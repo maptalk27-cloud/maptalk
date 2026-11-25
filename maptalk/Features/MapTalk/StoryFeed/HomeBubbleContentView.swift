@@ -41,7 +41,11 @@ struct HomeBubbleContentView: View {
             if case let .poi(rated) = page.mode, page.media != nil {
                 place = rated
             } else { place = nil }
-            return .init(id: page.id.uuidString, place: place)
+            return .init(id: page.id.uuidString, place: place,
+                authorID: page.poiSelection?.checkIn.userId,
+                visitDayKey: page.poiSelection.flatMap { selection in
+                    place.map { POIVisitDay.key(for: selection.checkIn, coordinate: $0.poi.coordinate) }
+                })
         }
     }
     private var selectedIndex: Int {
@@ -80,7 +84,17 @@ struct HomeBubbleContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .fixedPOIChrome(pages: chromePages, selectedID: chromeSelection,
-                       showsPageDots: true)
+                       showsPageDots: true, playbackFooter: poiPlaybackFooter)
+        .environment(\.experiencePOIPlaceHeader, bubblePOIHeading)
+        .overlay(alignment: .bottom) {
+            // Non-media legacy details have no anchored chrome run. Keep
+            // their existing actions without duplicating the media footer.
+            if chromeRun == nil, let poiPlaybackFooter {
+                poiPlaybackFooter
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 12)
+            }
+        }
         .ignoresSafeArea(.container, edges: .bottom)
         .environment(\.experienceLiveMediaHydrationEnabled, false)
         .environment(\.friendStoryPlaybackEnabled,
@@ -102,6 +116,14 @@ struct HomeBubbleContentView: View {
         }
     }
 
+    private var poiPlaybackFooter: AnyView? {
+        guard let currentPage, case let .poi(place) = currentPage.mode,
+              let visit = currentPage.poiSelection?.checkIn else { return nil }
+        return AnyView(POIStoryPlaybackFooter(place: place, publishedAt: visit.activityDate,
+            trailingActions: AnyView(POIStoryMediaActions(visit: visit,
+                mediaID: currentPage.media?.id).id(currentPage.id))))
+    }
+
     private func pageContent(_ page: HomeBubblePage, chromeRun: FriendStoryPOIChromeRun?) -> some View {
         let item = ExperienceDetailView.SequencePager.Item(id: page.id, mode: page.mode)
         let isSelected = currentPage?.id == page.id
@@ -115,7 +137,9 @@ struct HomeBubbleContentView: View {
                 // expanding it must not replace the media with place details.
                 FriendStoryPOIPreview(place: place, media: media, isPlaybackActive: playbackActive,
                     showsPlaceChrome: chromeRun?.contains(page.id.uuidString) != true,
-                    chromePageID: page.id.uuidString)
+                    chromePageID: page.id.uuidString,
+                    onMediaTap: isExpanded ? nil : onExpand)
+                    .environment(\.poiMediaLightboxEnabled, false)
             } else {
                 ExperienceDetailView(
                     mode: page.mode,
@@ -146,6 +170,24 @@ struct HomeBubbleContentView: View {
         .background(isPost(item) ? palette.background : .black)
         .background(ExperiencePagerVerticalBounceGuard())
         .accessibilityHidden(!isSelected)
+    }
+
+    private var bubblePOIHeading: ((UUID) -> AnyView?)? {
+        { id in
+            guard let target = pages.first(where: {
+                if case let .poi(place) = $0.mode { return place.id == id }
+                return false
+            }), case let .poi(place) = target.mode else { return nil }
+            let currentVisit = currentPage?.memberID == target.memberID ? currentPage?.poiSelection?.checkIn : nil
+            return AnyView(VStack(alignment: .leading, spacing: 8) {
+                POIStoryPlaceHeading(place: place,
+                    trailingAction: currentVisit == nil ? nil : AnyView(POIStorySaveButton(place: place)))
+                if let currentVisit {
+                    POIVisitExpression(visit: currentVisit, place: place)
+                        .padding(.leading, 53).padding(.trailing, 44)
+                }
+            })
+        }
     }
 
     private var navigationHeader: some View {

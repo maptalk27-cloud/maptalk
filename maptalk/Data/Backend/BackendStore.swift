@@ -53,6 +53,19 @@ final class BackendStore: ObservableObject {
     @Published private(set) var publicationProgress: [UUID: Double] = [:]
     @Published private(set) var pendingPOIFeedbackIDs: Set<UUID> = []
     @Published private var commentThreads: [BackendCommentTarget: [BackendComment]] = [:]
+    @Published private(set) var poiVisitDayCounts: [BackendPOIVisitCountKey: Int] = [:]
+    @Published private(set) var poiVisitCountRevision = 0
+    @Published private(set) var mediaLikes: [BackendMediaLikeKey: BackendMediaLike] = [:]
+    @Published private(set) var savedPlaceStates: [UUID: Bool] = [:]
+    @Published private(set) var savedPlaces: [BackendSavedPlace] = []
+    @Published private(set) var conversations: [BackendConversation] = []
+    private var visitCountReadDates: [BackendPOIVisitCountKey: Date] = [:]
+    private var visitCountReads: [BackendPOIVisitCountKey: Int] = [:]
+    private var socialReadRevision = 0
+    private var socialWrites: Set<String> = []
+    private var socialItemRevisions: [String: Int] = [:]
+    private var savedPlacesCursor: String?
+    private var conversationsCursor: String?
     private var commentThreadRevisions: [BackendCommentTarget: Int] = [:]
     /// Includes cancellations still waiting for server acknowledgement.
     var hasPendingSyncWork: Bool { !localState.queued.isEmpty || !(localState.poiFeedbackQueue ?? []).isEmpty }
@@ -136,6 +149,200 @@ final class BackendStore: ObservableObject {
     }
 
     func user(for id: UUID) -> User? { users[id] }
+
+    /// Only an authoritative total is labelled as visits. Loaded feed/history
+    /// pages are never a substitute for a lifetime day-distinct count.
+    func visiblePOIVisitDayCount(placeID: UUID, authorID: UUID) -> Int? {
+        guard isActive, !blockedUserIDs.contains(authorID) else { return nil }
+        return poiVisitDayCounts[.init(placeId: placeAliases[placeID] ?? placeID, ownerId: authorID)]
+    }
+
+    func ensurePOIVisitDayCounts(placeID: UUID, ownerIDs: [UUID]) async {
+        guard isActive, !Task.isCancelled else { return }
+        let placeID = placeAliases[placeID] ?? placeID
+        let keys = Array(Set(ownerIDs)).filter { !blockedUserIDs.contains($0) }.map {
+            BackendPOIVisitCountKey(placeId: placeID, ownerId: $0)
+        }.filter { key in
+            visitCountReads[key] != socialReadRevision
+                && visitCountReadDates[key].map { Date().timeIntervalSince($0) < 30 } != true
+        }
+        guard !keys.isEmpty else { return }
+        let revision = socialReadRevision
+        for key in keys { visitCountReads[key] = revision }
+        defer {
+            for key in keys where visitCountReads[key] == revision { visitCountReads.removeValue(forKey: key) }
+        }
+        do {
+            for start in stride(from: 0, to: keys.count, by: 100) {
+                let batch = Array(keys[start..<min(start + 100, keys.count)])
+                let counts = try await api.poiVisitCounts(batch)
+                try requireActive()
+                guard revision == socialReadRevision, !Task.isCancelled else { return }
+                for count in counts {
+                    poiVisitDayCounts[count.key] = count.count
+                    visitCountReadDates[count.key] = .now
+                }
+            }
+        } catch {
+            guard isActive, revision == socialReadRevision else { return }
+            // Old servers and offline failures must not display a partial count.
+            for key in keys { poiVisitDayCounts.removeValue(forKey: key) }
+        }
+    }
+
+    func loadMediaLike(_ key: BackendMediaLikeKey) async throws {
+        try requireActive()
+        let revision = socialReadRevision
+        let writeKey = "like:\(key.memoryID):\(key.mediaID)"
+        let itemRevision = socialItemRevisions[writeKey, default: 0]
+        guard !socialWrites.contains(writeKey) else { return }
+        let value = try await api.mediaLike(key)
+        try requireActive()
+        guard revision == socialReadRevision, !socialWrites.contains(writeKey),
+              itemRevision == socialItemRevisions[writeKey, default: 0] else { return }
+        mediaLikes[key] = value
+    }
+
+    func setMediaLiked(_ key: BackendMediaLikeKey, liked: Bool) async throws {
+        try requireActive()
+        let revision = socialReadRevision
+        let writeKey = "like:\(key.memoryID):\(key.mediaID)"
+        guard socialWrites.insert(writeKey).inserted else { return }
+        socialItemRevisions[writeKey, default: 0] += 1
+        defer { socialWrites.remove(writeKey) }
+        let value = try await api.setMediaLike(key, liked: liked)
+        try requireActive()
+        guard revision == socialReadRevision else { throw CancellationError() }
+        guard value.liked == liked, value.count >= 0 else {
+            throw BackendClientError.message("Your like wasn't confirmed. Please retry.")
+        }
+        mediaLikes[key] = value
+    }
+
+    func loadPlaceSaved(_ id: UUID) async throws {
+        try requireActive()
+        let id = placeAliases[id] ?? id
+        let revision = socialReadRevision
+        let itemRevision = socialItemRevisions["save:\(id)", default: 0]
+        guard !socialWrites.contains("save:\(id)") else { return }
+        let value = try await api.placeSaved(id)
+        try requireActive()
+        guard revision == socialReadRevision, !socialWrites.contains("save:\(id)"),
+              itemRevision == socialItemRevisions["save:\(id)", default: 0] else { return }
+        savedPlaceStates[id] = value.saved
+    }
+
+    func setPlaceSaved(_ id: UUID, saved: Bool) async throws {
+        try requireActive()
+        let revision = socialReadRevision
+        let id = placeAliases[id] ?? id
+        let writeKey = "save:\(id)"
+        guard socialWrites.insert(writeKey).inserted else { return }
+        socialItemRevisions[writeKey, default: 0] += 1
+        defer { socialWrites.remove(writeKey) }
+        let value = try await api.setPlaceSaved(id, saved: saved)
+        try requireActive()
+        guard revision == socialReadRevision else { throw CancellationError() }
+        guard value.saved == saved else {
+            throw BackendClientError.message("Your bookmark wasn't confirmed. Please retry.")
+        }
+        savedPlaceStates[id] = saved
+        if !saved { savedPlaces.removeAll { $0.id == id } }
+    }
+
+    var hasMoreSavedPlaces: Bool { savedPlacesCursor != nil }
+
+    func loadSavedPlaces(more: Bool = false) async throws {
+        try requireActive()
+        if more && savedPlacesCursor == nil { return }
+        let revision = socialReadRevision
+        let itemRevisions = socialItemRevisions
+        let page = try await api.savedPlaces(cursor: more ? savedPlacesCursor : nil)
+        try requireActive()
+        guard revision == socialReadRevision else { return }
+        var unique = Dictionary((more ? savedPlaces : []).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        for saved in page.items {
+            let key = "save:\(saved.id)"
+            guard itemRevisions[key, default: 0] == socialItemRevisions[key, default: 0],
+                  !socialWrites.contains(key) else { continue }
+            unique[saved.id] = saved
+            savedPlaceStates[saved.id] = true
+        }
+        savedPlaces = unique.values.sorted { $0.savedAt > $1.savedAt }
+        guard page.nextCursor == nil || page.nextCursor != savedPlacesCursor || !more else {
+            throw BackendClientError.message("Couldn't load more saved places. Please retry.")
+        }
+        savedPlacesCursor = page.nextCursor
+    }
+
+    var knownMessagePeople: [User] {
+        users.values.filter { $0.id != user.id && !blockedUserIDs.contains($0.id) }
+            .sorted { $0.handle.localizedCaseInsensitiveCompare($1.handle) == .orderedAscending }
+    }
+
+    var hasMoreConversations: Bool { conversationsCursor != nil }
+
+    func loadConversations(more: Bool = false) async throws {
+        try requireActive()
+        if more && conversationsCursor == nil { return }
+        let revision = socialReadRevision
+        let page = try await api.conversations(cursor: more ? conversationsCursor : nil)
+        try requireActive()
+        guard revision == socialReadRevision else { return }
+        var unique = Dictionary((more ? conversations : []).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        for item in page.items where !blockedUserIDs.contains(item.peer.id) {
+            unique[item.id] = item
+            applyProfile(item.peer)
+        }
+        conversations = unique.values.sorted { $0.updatedAt > $1.updatedAt }
+        guard page.nextCursor == nil || page.nextCursor != conversationsCursor || !more else {
+            throw BackendClientError.message("Couldn't load more messages. Please retry.")
+        }
+        conversationsCursor = page.nextCursor
+    }
+
+    func loadDirectMessages(with peer: UUID, cursor: String? = nil) async throws -> BackendMessagePage {
+        try requireActive()
+        guard peer != user.id, !blockedUserIDs.contains(peer) else {
+            throw BackendClientError.message("This conversation isn't available.")
+        }
+        let revision = socialReadRevision
+        let page = try await api.directMessages(with: peer, cursor: cursor)
+        try requireActive()
+        guard revision == socialReadRevision, !blockedUserIDs.contains(peer) else { throw CancellationError() }
+        guard page.items.allSatisfy({ Set([$0.senderId, $0.recipientId]) == Set([user.id, peer]) }) else {
+            throw BackendClientError.message("This conversation couldn't be verified.")
+        }
+        return page
+    }
+
+    func sendDirectMessage(to peer: UUID, id: UUID, text: String,
+                           context: BackendMessageContext?) async throws -> BackendDirectMessage {
+        try requireActive()
+        let revision = socialReadRevision
+        guard peer != user.id, !blockedUserIDs.contains(peer) else {
+            throw BackendClientError.message("This conversation isn't available.")
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.utf16.count <= 1_000, !trimmed.isEmpty || context != nil else {
+            throw BackendClientError.message("Write a message of up to 1,000 characters.")
+        }
+        let saved = try await api.sendDirectMessage(to: peer, id: id, text: trimmed, context: context)
+        try requireActive()
+        guard revision == socialReadRevision, !blockedUserIDs.contains(peer) else { throw CancellationError() }
+        guard saved.id == id, saved.senderId == user.id, saved.recipientId == peer, saved.text == trimmed else {
+            throw BackendClientError.message("Your message wasn't confirmed. Retry the same message.")
+        }
+        return saved
+    }
+
+    private func invalidatePOISocialReads() {
+        socialReadRevision += 1
+        poiVisitDayCounts.removeAll()
+        visitCountReadDates.removeAll()
+        mediaLikes.removeAll()
+        poiVisitCountRevision &+= 1
+    }
 
     /// A cluster is reachable only through its authorized parent Reel. Never
     /// register its private source snapshots as independent map/feed records.
@@ -757,10 +964,15 @@ final class BackendStore: ObservableObject {
     /// Read only the caller's already-authorized scope. In particular this
     /// never fills a map or public profile with private archive records.
     func cachedSnapshot(for memoryIDs: [UUID], publicOnly: Bool = false) -> Snapshot {
-        guard isActive else { return ([], []) }
-        let records = currentRecords(memoryIDs.compactMap { knownMemories[$0] }, publicOnly: publicOnly)
+        project(cachedRecords(for: memoryIDs, publicOnly: publicOnly))
+    }
+
+    /// Metadata for an already-visible scope, including media slots whose bytes
+    /// are still downloading. Never discovers additional records or history.
+    func cachedRecords(for memoryIDs: [UUID], publicOnly: Bool = false) -> [BackendMemory] {
+        guard isActive else { return [] }
+        return currentRecords(memoryIDs.compactMap { knownMemories[$0] }, publicOnly: publicOnly)
             .filter { $0.ownerId == user.id || Self.isPubliclyVisible($0) }
-        return project(records)
     }
 
     /// Read-only readiness for one authorized memory, including attached Bubble
@@ -816,6 +1028,7 @@ final class BackendStore: ObservableObject {
     /// Only that page's media is prepared; older pages require another action.
     /// History never enters the Feed or adopts a partial viewport fallback.
     func loadPlaceHistory(placeID: UUID, after previous: PlaceHistoryPage? = nil,
+                          includeVideos: Bool = true,
                           onUpdate: ((PlaceHistoryPage) -> Void)? = nil) async throws -> PlaceHistoryPage {
         try requireActive()
         let revision = publicContentRevision
@@ -854,7 +1067,7 @@ final class BackendStore: ObservableObject {
                 records: records, requestedCursors: requestedCursors)
         }
         onUpdate?(snapshot())
-        try await prepareMedia(newRecords, includeVideos: true, onProgress: { [weak self] in
+        try await prepareMedia(newRecords, includeVideos: includeVideos, onProgress: { [weak self] in
             guard let self, isActive, !Task.isCancelled, revision == publicContentRevision else { return }
             onUpdate?(snapshot())
         })
@@ -1104,6 +1317,8 @@ final class BackendStore: ObservableObject {
         try requireActive()
         blockedUserIDs.insert(id)
         publicContentRevision += 1
+        invalidatePOISocialReads()
+        conversations.removeAll { $0.peer.id == id }
         invalidatePostReads()
         let removedRecords = knownMemories.values.filter { $0.ownerId == id }
         let ids = Set(removedRecords.map(\.id))
@@ -1199,6 +1414,7 @@ final class BackendStore: ObservableObject {
 
     private func finishMemoryMutation(_ original: BackendMemory, deleted: Bool) {
         publicContentRevision += 1
+        invalidatePOISocialReads()
         invalidatePostReads()
         refreshGeneration += 1
         refreshTask?.task.cancel()
@@ -1383,6 +1599,7 @@ final class BackendStore: ObservableObject {
         if saved.owner.id != user.id { applyProfile(saved.owner) }
         ownedMemories[saved.id] = saved
         knownMemories[saved.id] = saved
+        if saved.kind == "poi" { invalidatePOISocialReads() }
         if let place = saved.place {
             knownPlaceIDs.insert(place.id)
             if let sourceID = place.sourceId { placeAliases[sourceID] = place.id }
@@ -1481,12 +1698,13 @@ final class BackendStore: ObservableObject {
         guard isActive,
               localState.supportsPostLocationNames != true || localState.supportsPostLocationIdentity != true
                 || (localState.poiCheckInRadiusMeters ?? 0) < POISelectionPolicy.searchRadius
-                || localState.supportsPOIFeedback == nil else { return }
+                || localState.supportsPOIFeedback == nil || localState.supportsPOICustomFeelings == nil else { return }
         guard let supported = try? await api.postLocationCapabilities(), isActive else { return }
         localState.supportsPostLocationNames = supported.supportsPostLocationNames == true
         localState.supportsPostLocationIdentity = supported.supportsPostLocationIdentity == true
         localState.poiCheckInRadiusMeters = supported.poiCheckInRadiusMeters
         localState.supportsPOIFeedback = supported.features?.poiFeedback == true
+        localState.supportsPOICustomFeelings = supported.features?.poiCustomFeelings == true
         try? await persistLocalState()
     }
 
@@ -1518,7 +1736,8 @@ final class BackendStore: ObservableObject {
 
     /// Completes when the edit is safely on this phone. Publishing and feedback
     /// use separate durable intents, so a slow upload can never lose its hash.
-    func savePOIFeedback(memoryID: UUID, endorsement: RatedPOI.Endorsement?, comment: String) async throws {
+    func savePOIFeedback(memoryID: UUID, endorsement: RatedPOI.Endorsement?,
+                         customEmoji: String? = nil, comment: String) async throws {
         try requireActive()
         guard let original = ownedMemories[memoryID], original.ownerId == user.id,
               original.kind == "poi", !deletedMemoryIDs.contains(memoryID),
@@ -1529,7 +1748,10 @@ final class BackendStore: ObservableObject {
         guard clean.utf16.count <= 1_000, !clean.contains("\0") else {
             throw BackendClientError.message("Keep your comment to 1,000 characters or fewer.")
         }
-        let feedback = BackendPOIFeedback(endorsement: endorsement?.rawValue, comment: clean)
+        guard customEmoji == nil || (endorsement == nil && POICustomFeeling.normalized(customEmoji) != nil) else {
+            throw BackendClientError.message("Choose one of the available feelings.")
+        }
+        let feedback = BackendPOIFeedback(endorsement: endorsement?.rawValue, comment: clean, customEmoji: customEmoji)
         let previous = localState.poiFeedbackQueue?.first { $0.id == memoryID }
         if previous == nil, feedback == original.feedback || (feedback.isEmpty && original.feedback == nil) { return }
         let entry = QueuedPOIFeedback(id: memoryID, ownerID: user.id, revision: UUID(), feedback: feedback)
@@ -1573,6 +1795,7 @@ final class BackendStore: ObservableObject {
         guard localState.supportsPOIFeedback != false else { return [] }
         return (localState.poiFeedbackQueue ?? []).filter { entry in
             entry.ownerID == user.id && entry.failure == nil && !deletedMemoryIDs.contains(entry.id)
+                && (entry.feedback.customEmoji == nil || localState.supportsPOICustomFeelings != false)
                 && !pendingMemoryMutations.contains(entry.id)
                 && !localState.queued.contains(where: { $0.id == entry.id })
         }
@@ -1583,6 +1806,7 @@ final class BackendStore: ObservableObject {
     private func refreshPOIFeedbackCapability(retryRejected: Bool = false) async {
         guard isActive, let supported = try? await api.postLocationCapabilities(), isActive else { return }
         localState.supportsPOIFeedback = supported.features?.poiFeedback == true
+        localState.supportsPOICustomFeelings = supported.features?.poiCustomFeelings == true
         if retryRejected, localState.supportsPOIFeedback == true, var queued = localState.poiFeedbackQueue {
             for index in queued.indices {
                 queued[index].failure = nil
@@ -1613,7 +1837,9 @@ final class BackendStore: ObservableObject {
             !respectingBackoff || (feedbackRetryDates[$0.id] ?? .distantPast) <= Date()
         }
         guard !ready.isEmpty else { return }
-        if localState.supportsPOIFeedback == nil { await refreshPOIFeedbackCapability() }
+        if localState.supportsPOIFeedback == nil || localState.supportsPOICustomFeelings == nil {
+            await refreshPOIFeedbackCapability()
+        }
         guard isActive, !Task.isCancelled else { return }
         guard localState.supportsPOIFeedback == true else {
             if localState.supportsPOIFeedback == nil { ready.forEach { deferPOIFeedbackRetry($0.id) } }
@@ -1621,8 +1847,13 @@ final class BackendStore: ObservableObject {
         }
         for candidate in ready {
             guard let entry = eligiblePOIFeedback.first(where: { $0.id == candidate.id }) else { continue }
+            if entry.feedback.customEmoji != nil, localState.supportsPOICustomFeelings != true {
+                deferPOIFeedbackRetry(entry.id)
+                continue
+            }
             do {
-                let saved = try await api.updatePOIFeedback(id: entry.id, feedback: entry.feedback)
+                let saved = try await api.updatePOIFeedback(id: entry.id, feedback: entry.feedback,
+                    includeCustomEmoji: localState.supportsPOICustomFeelings == true)
                 try requireActive()
                 guard !deletedMemoryIDs.contains(entry.id),
                       let latest = localState.poiFeedbackQueue?.first(where: { $0.id == entry.id }) else { continue }
@@ -2299,6 +2530,7 @@ final class BackendStore: ObservableObject {
                     localMedia.removeValue(forKey: item.id)
                     localPosters.removeValue(forKey: item.id)
                 }
+                if saved.kind == "poi" { invalidatePOISocialReads() }
                 remember([saved])
                 rebuildLocalProjections()
             } catch is CancellationError {
@@ -2465,6 +2697,12 @@ final class BackendStore: ObservableObject {
         // The account owns a store for one signed-in lifetime. Awaited work from
         // that lifetime must never repopulate its cache after sign-out.
         isActive = false
+        invalidatePOISocialReads()
+        savedPlaceStates.removeAll()
+        savedPlaces.removeAll()
+        conversations.removeAll()
+        socialWrites.removeAll()
+        socialItemRevisions.removeAll()
         invalidatePostReads()
         postVerificationDates.removeAll()
         verifyingPostIDs.removeAll()
@@ -2494,6 +2732,7 @@ final class BackendStore: ObservableObject {
         durable?.mine = currentRecords(localState.mine.filter { feedbackIDs.contains($0.id) })
         durable?.poiFeedbackQueue = localState.poiFeedbackQueue
         durable?.supportsPOIFeedback = localState.supportsPOIFeedback
+        durable?.supportsPOICustomFeelings = localState.supportsPOICustomFeelings
         stateDisk.invalidate(preserving: durable)
         localState.queued.removeAll()
         localState.poiFeedbackQueue = nil
@@ -2716,7 +2955,8 @@ final class BackendStore: ObservableObject {
                 rated.checkIns.append(.init(id: record.id, userId: record.ownerId, createdAt: record.createdAt,
                     endorsement: record.feedback?.endorsement.flatMap(RatedPOI.Endorsement.init(rawValue:)),
                     media: media, tag: nil, publishedAt: record.publishedAt,
-                    comment: record.feedback?.comment.isEmpty == false ? record.feedback?.comment : nil))
+                    comment: record.feedback?.comment.isEmpty == false ? record.feedback?.comment : nil,
+                    visitDay: record.visitDay, customEmoji: record.feedback?.customEmoji))
                 places[place.id] = rated
             }
         }

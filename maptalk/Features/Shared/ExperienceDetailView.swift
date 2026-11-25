@@ -174,6 +174,8 @@ struct ExperienceDetailView: View {
     /// map-pin selection can still ask for the shared place overview.
     let poiBrowsingUserID: UUID?
     let poiOverviewID: UUID?
+    let personalPOISliceCursor: PersonalPOISliceSequence.Cursor?
+    let showsPersonalPOIChrome: Bool
     // A featured story slice does not filter the shared place's visitor history.
     let expandedPOIMedia: RatedPOI.Media?
     // Person stories can supply their one existing pager as the media slot.
@@ -186,7 +188,6 @@ struct ExperienceDetailView: View {
     let onPOIContributorViewed: ([String]) -> Void
     let isPOIContributorUnseen: ([String]) -> Bool
     @Environment(\.appEnv) private var environment
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.experienceLiveMediaHydrationEnabled) var liveMediaHydrationEnabled
     @Environment(\.experiencePOIVisitorSummary) var poiVisitorSummary
@@ -199,6 +200,7 @@ struct ExperienceDetailView: View {
     @Environment(\.colorScheme) private var inheritedCardColorScheme
     @Environment(\.profileCardSheetMotion) private var profileCardSheetMotion
     @Environment(\.postCompactViewportSize) private var postCompactViewportSize
+    @Environment(\.personalPOIHistoryChronological) var personalPOIHistoryChronological
     @AppStorage(PostCardPalette.storageKey) private var preferredPostCardPalette: PostCardPalette = .white
     @State private var storyViewerState: POIStoryViewerState?
     @State private var selectedProfileContext: UserMapViewModel.Context?
@@ -211,6 +213,7 @@ struct ExperienceDetailView: View {
     @State var hydratedPosts: [UUID: RealPost] = [:]
     @State var hydratedPlaces: [UUID: RatedPOI] = [:]
     @State var personalPOIOverviewID: UUID?
+    @State var personalPOICursors: [UUID: PersonalPOISliceSequence.Cursor] = [:]
     @State private var unavailableMediaIDs: Set<UUID> = []
 
     init(
@@ -222,6 +225,8 @@ struct ExperienceDetailView: View {
         poiStorySelection: POIStorySelection? = nil,
         poiBrowsingUserID: UUID? = nil,
         poiOverviewID: UUID? = nil,
+        personalPOISliceCursor: PersonalPOISliceSequence.Cursor? = nil,
+        showsPersonalPOIChrome: Bool = true,
         expandedPOIMedia: RatedPOI.Media? = nil,
         expandedPOIMediaContent: AnyView? = nil,
         onCollapsedTap: (() -> Void)? = nil,
@@ -245,6 +250,8 @@ struct ExperienceDetailView: View {
         self.poiStorySelection = poiStorySelection
         self.poiBrowsingUserID = poiBrowsingUserID
         self.poiOverviewID = poiOverviewID
+        self.personalPOISliceCursor = personalPOISliceCursor
+        self.showsPersonalPOIChrome = showsPersonalPOIChrome
         self.expandedPOIMedia = expandedPOIMedia
         self.expandedPOIMediaContent = expandedPOIMediaContent
         self.onCollapsedTap = onCollapsedTap
@@ -276,6 +283,8 @@ struct ExperienceDetailView: View {
         self.poiStorySelection = nil
         self.poiBrowsingUserID = nil
         self.poiOverviewID = nil
+        self.personalPOISliceCursor = nil
+        self.showsPersonalPOIChrome = true
         self.expandedPOIMedia = nil
         self.expandedPOIMediaContent = nil
         self.onCollapsedTap = onCollapsedTap
@@ -311,6 +320,8 @@ struct ExperienceDetailView: View {
         self.poiStorySelection = nil
         self.poiBrowsingUserID = poiBrowsingUserID
         self.poiOverviewID = poiOverviewID
+        self.personalPOISliceCursor = nil
+        self.showsPersonalPOIChrome = true
         self.expandedPOIMedia = nil
         self.expandedPOIMediaContent = nil
         self.onCollapsedTap = onCollapsedTap
@@ -323,7 +334,13 @@ struct ExperienceDetailView: View {
 
     var body: some View {
         Group {
-            if usesClassicPostPreview, let context = sequenceContext {
+            if personalPOIOverviewID != nil {
+                // The explicit place title temporarily opens history on this
+                // same host; returning restores its saved flat-page cursor.
+                experienceContent
+            } else if let context = personalPOISequenceContext {
+                personalPOISequenceContent(context)
+            } else if usesClassicPostPreview, let context = sequenceContext {
                 classicSequenceContent(context)
             } else {
                 experienceContent
@@ -354,8 +371,18 @@ struct ExperienceDetailView: View {
         return unavailableMediaIDs.contains(visitID) ? .unavailable : .loading
     }
 
+    func personalPOIMediaMetadata(for place: RatedPOI, ownerID: UUID) -> [UUID: [UUID]] {
+        guard liveMediaHydrationEnabled, let backend = environment.backend else { return [:] }
+        // The original card supplies exact membership. Cached metadata may
+        // reserve media slots, never bring another visit into this history.
+        let ids = place.checkIns.filter { $0.userId == ownerID }.map(\.id)
+        return Dictionary(backend.cachedRecords(for: ids).filter { $0.ownerId == ownerID }
+            .map { ($0.id, $0.media.map(\.id)) }, uniquingKeysWith: { first, _ in first })
+    }
+
     private var requestedMediaIDs: [UUID] {
         guard liveMediaHydrationEnabled, scenePhase == .active, isMediaPlaybackActive,
+              personalPOISequenceContext == nil,
               !(usesClassicPostPreview && sequenceContext != nil) else { return [] }
         switch sourceMode {
         case let .real(post, _):
@@ -369,6 +396,108 @@ struct ExperienceDetailView: View {
         case .journey:
             return []
         }
+    }
+
+    private var personalPOISequenceContext: SequenceContext? {
+        guard usesUpdatedPOIStyle, poiStorySelection == nil, personalPOISliceCursor == nil,
+              let ownerID = poiBrowsingUserID else { return nil }
+        if case let .poi(place) = sourceMode,
+           place.id == poiOverviewID || place.id == personalPOIOverviewID { return nil }
+        if let context = sequenceContext {
+            return context.pager.items.contains { item in
+                if case let .poi(place) = item.mode {
+                    return place.id != poiOverviewID && place.checkIns.contains { $0.userId == ownerID }
+                }
+                return false
+            } ? context : nil
+        }
+        guard case let .poi(place) = sourceMode,
+              place.checkIns.contains(where: { $0.userId == ownerID }) else { return nil }
+        return .init(pager: .init(items: [.init(id: place.id, mode: .poi(place))]),
+                     selection: .constant(place.id))
+    }
+
+    private func personalPOISequenceContent(_ context: SequenceContext) -> some View {
+        let items = context.pager.items.map { SequencePager.Item(id: $0.id, mode: mediaResolvedMode($0.mode)) }
+        let metadata = items.reduce(into: [UUID: [UUID]]()) { result, item in
+            guard case let .poi(place) = item.mode, let ownerID = poiBrowsingUserID else { return }
+            result.merge(personalPOIMediaMetadata(for: place, ownerID: ownerID), uniquingKeysWith: { first, _ in first })
+        }
+        let pages = PersonalPOISliceSequence.pages(in: items, ownerID: poiBrowsingUserID!,
+            metadataMediaIDs: metadata, overviewID: poiOverviewID,
+            chronologicalPOIHistory: personalPOIHistoryChronological)
+        let pagesByID = Dictionary(pages.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let selection = Binding<UUID>(get: {
+            let originID = context.selection.wrappedValue
+            let cursor: PersonalPOISliceSequence.Cursor?
+            if let page = pages.first(where: { $0.originID == originID }), case let .poi(place) = page.mode {
+                cursor = personalPOICursors[place.id]
+            } else { cursor = nil }
+            return PersonalPOISliceSequence.selectedPageID(in: pages, originID: originID, cursor: cursor) ?? originID
+        }, set: { identifier in
+            guard isMediaPlaybackActive, let page = pagesByID[identifier] else { return }
+            // One normal adjacent-page selection reaches the original map
+            // binding. Same-place media never causes a second map flight.
+            PersonalPOISliceSequence.select(page, currentOriginID: context.selection.wrappedValue,
+                updateCursor: { personalPOICursors[$0] = $1 },
+                selectOrigin: { context.selection.wrappedValue = $0 })
+        })
+
+        return Group {
+            if usesClassicPostPreview, let motion = profileCardSheetMotion {
+                ProfileSequencePager(items: pages.map(\.item), selection: selection,
+                    isExpanded: isExpanded, motion: motion, background: { item in
+                        if case .real = item.mode { return preferredPostCardPalette.background }
+                        return .black
+                    }) { item in
+                        if let page = pagesByID[item.id] { personalPOISequencePage(page, selection: selection) }
+                    }
+            } else if pages.count == 1, let page = pages.first {
+                personalPOISequencePage(page, selection: selection)
+            } else {
+                TabView(selection: selection) {
+                    ForEach(pages) { page in
+                        personalPOISequencePage(page, selection: selection)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .postPlaceChromePage(postID: page.id)
+                            .tag(page.id)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(isClassicPostPreview ? preferredPostCardPalette.background : .black)
+        .overlay {
+            if let current = personalPOIBrowsingContext {
+                personalPOIChrome(place: current.place, selection: current.selection,
+                    pageProgress: PersonalPOISliceSequence.dayRunProgress(in: pages,
+                        selectedPageID: selection.wrappedValue))
+            }
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+        .accessibilityIdentifier("personal-poi.sequence-pager")
+    }
+
+    private func personalPOISequencePage(_ page: PersonalPOISliceSequence.Page,
+                                        selection: Binding<UUID>) -> some View {
+        let isPost: Bool = { if case .real = page.mode { return true }; return false }()
+        return ExperienceDetailView(mode: page.mode, isExpanded: isExpanded,
+            usesClassicPostPreview: usesClassicPostPreview, usesUpdatedPOIStyle: usesUpdatedPOIStyle,
+            recordsActiveCompactViewportOnly: usesClassicPostPreview,
+            poiBrowsingUserID: poiBrowsingUserID, poiOverviewID: poiOverviewID,
+            personalPOISliceCursor: page.cursor, showsPersonalPOIChrome: false,
+            onCollapsedTap: onCollapsedTap, onJourneyAvatarStackTap: onJourneyAvatarStackTap,
+            journeyProvider: journeyProvider, userProvider: userProvider,
+            onPOIContributorViewed: onPOIContributorViewed, isPOIContributorUnseen: isPOIContributorUnseen)
+            .environment(\.postCardPalette, isPost ? preferredPostCardPalette : .white)
+            .environment(\.colorScheme, isPost && usesClassicPostPreview
+                ? preferredPostCardPalette.colorScheme : inheritedCardColorScheme)
+            .environment(\.friendStoryPlaybackEnabled, isMediaPlaybackActive && selection.wrappedValue == page.id)
+            .background(isPost && usesClassicPostPreview ? preferredPostCardPalette.background : .black)
+            .background(ExperiencePagerVerticalBounceGuard())
+            .accessibilityHidden(selection.wrappedValue != page.id)
+            .id(page.id)
     }
 
     private func adoptHydratedMedia(_ snapshot: BackendStore.Snapshot) {
@@ -428,16 +557,6 @@ struct ExperienceDetailView: View {
             }
         }
         .background((usesNeutralPreviewBackground ? postCardPalette.background : .black).ignoresSafeArea())
-        .modifier(FriendStoryCardHeader(
-            isEnabled: personalPOIBrowsingContext != nil,
-            isVisible: isMediaPlaybackActive && !hasPresentedChildContent,
-            backgroundMaterial: .regular,
-            backgroundTint: Color(white: 0.08).opacity(0.65)
-        ) {
-            personalPOINavigationHeader(onClose: dismiss.callAsFunction)
-                .environment(\.colorScheme, .dark)
-                .environment(\.appEnv, environment)
-        })
         .overlay(alignment: .topTrailing) {
             if isExpanded, let backend = environment.backend, !actionablePosts.isEmpty {
                 BackendContentSafetyMenu(store: backend, posts: actionablePosts,

@@ -56,6 +56,7 @@ struct MapTalkView: View {
     @State private var didApplyInitialStorySelection: Bool = false
     @StateObject private var storyReadStore = StoryReadStore()
     @StateObject private var friendStoryNavigation = FriendStoryNavigation()
+    @State private var showsMapPlaceAuthors = false
     @State private var pendingViewedStoryKey: String?
     @State private var publishDestination: MapTalkPublishDestination?
     @State private var queuedPublishDestination: MapTalkPublishDestination?
@@ -112,12 +113,12 @@ struct MapTalkView: View {
                     placeName: feedback.placeName,
                     audience: feedback.audience,
                     onSkip: { savedPlaceFeedback = nil },
-                    onSave: { endorsement, comment in
+                    onSave: { endorsement, customEmoji, comment in
                         if let backend = environment.backend {
                             try await backend.savePOIFeedback(memoryID: feedback.memoryID,
-                                endorsement: endorsement, comment: comment)
+                                endorsement: endorsement, customEmoji: customEmoji, comment: comment)
                         } else if !environment.myMapArchive.updatePOIFeedback(
-                            checkInID: feedback.memoryID, endorsement: endorsement, comment: comment) {
+                            checkInID: feedback.memoryID, endorsement: endorsement, customEmoji: customEmoji, comment: comment) {
                             throw BackendClientError.message("This check-in is no longer available.")
                         }
                         savedPlaceFeedback = nil
@@ -593,6 +594,24 @@ struct MapTalkView: View {
                 let shouldAnimateSelection = isExpanded == false
 
                 let content: AnyView = {
+                    @MainActor func placeCard(_ rated: RatedPOI) -> AnyView {
+                        let makeCard: (RatedPOI) -> AnyView = { place in
+                            AnyView(ExperienceDetailView(mode: .poi(place), isExpanded: isExpanded,
+                                usesUpdatedPOIStyle: true,
+                                poiBrowsingUserID: viewModel.scopedUser?.id,
+                                onCollapsedTap: presentation.expand,
+                                userProvider: viewModel.user(for:),
+                                onPOIContributorViewed: markStoryReadKeysViewed,
+                                isPOIContributorUnseen: isPOIContributorUnseen)
+                                .environment(\.personalPOIHistoryChronological,
+                                    viewModel.isUserScope && focusedJourneyHeader == nil))
+                        }
+                        if !viewModel.isUserScope && focusedJourneyHeader == nil {
+                            return AnyView(PublicPOIPlaceHistoryHost(place: rated, isExpanded: isExpanded,
+                                isActive: mapWorkEnabled && isCurrent(), content: makeCard))
+                        }
+                        return makeCard(rated)
+                    }
                     if friendStoryNavigation.isActive {
                         return AnyView(FriendStoryFlow(
                             navigation: friendStoryNavigation,
@@ -621,6 +640,7 @@ struct MapTalkView: View {
                             },
                             allowsPlayback: mapWorkEnabled && isCurrent() && !isActivityOverExperiencePresented,
                             feedPresentation: flow,
+                            showsPlaceAuthors: showsMapPlaceAuthors,
                             showsBubbleProgress: !viewModel.isUserScope,
                             hasMorePosts: viewModel.hasMorePosts,
                             isLoadingPosts: viewModel.isLoadingPosts,
@@ -696,7 +716,9 @@ struct MapTalkView: View {
                                     usesClassicPostPreview: viewModel.isUserScope,
                                     usesUpdatedPOIStyle: true,
                                     poiBrowsingUserID: viewModel.scopedUser?.id,
-                                    poiOverviewID: poiOverviewID,
+                                    // Personal map pins open the same media slice
+                                    // as list entries, not the visitor overview.
+                                    poiOverviewID: viewModel.isUserScope ? nil : poiOverviewID,
                                     onCollapsedTap: presentation.expand,
                                     journeyProvider: viewModel.journey(for:),
                                     userProvider: viewModel.user(for:),
@@ -707,6 +729,8 @@ struct MapTalkView: View {
                                     isPOIContributorUnseen: isPOIContributorUnseen,
                                     postPlaceGroups: profilePlaceGroups
                                 )
+                                .environment(\.personalPOIHistoryChronological,
+                                             viewModel.isUserScope && focusedJourneyHeader == nil)
                                 .id(nonce)
                             )
                         } else {
@@ -714,15 +738,7 @@ struct MapTalkView: View {
                         }
                     case let .poi(rated: rated, nonce: nonce):
                         return AnyView(
-                            ExperienceDetailView(
-                                ratedPOI: rated,
-                                isExpanded: isExpanded,
-                                usesUpdatedPOIStyle: true,
-                                onCollapsedTap: presentation.expand,
-                                userProvider: viewModel.user(for:),
-                                onPOIContributorViewed: markStoryReadKeysViewed,
-                                isPOIContributorUnseen: isPOIContributorUnseen
-                            )
+                            placeCard(rated)
                             .id("\(rated.id)-\(nonce)")
                         )
                     case let .real(real: real, nonce: nonce):
@@ -751,15 +767,7 @@ struct MapTalkView: View {
                         )
                     case let .friendPlace(rated: rated, sourceID: sourceID, nonce: nonce):
                         return AnyView(
-                            ExperienceDetailView(
-                                ratedPOI: rated,
-                                isExpanded: isExpanded,
-                                usesUpdatedPOIStyle: true,
-                                onCollapsedTap: presentation.expand,
-                                userProvider: viewModel.user(for:),
-                                onPOIContributorViewed: markStoryReadKeysViewed,
-                                isPOIContributorUnseen: isPOIContributorUnseen
-                            )
+                            placeCard(rated)
                             .accessibilityIdentifier("maptalk.friend-place-preview")
                             .id("\(sourceID)-\(nonce)")
                         )
@@ -867,6 +875,11 @@ struct MapTalkView: View {
                                 canvasSize: geometry.size,
                                 topChromeBottom: friendFootprintTopExclusion
                             )
+                            if openMapPlaceStory(footprint.ratedPOI,
+                                                 source: .footprint(tapped.id), geometry: geometry) {
+                                selectedFriendFootprintID = footprint.id
+                                return
+                            }
                             activeExperience = .friendPlace(
                                 rated: footprint.ratedPOI,
                                 sourceID: footprint.id,
@@ -943,6 +956,9 @@ struct MapTalkView: View {
                             },
                             onTapPOI: { rated in
                                 cardPresentation.perform(in: .personStory) {
+                                    if openMapPlaceStory(rated, source: .place(rated.id), geometry: geometry) {
+                                        return
+                                    }
                                     if isProfilePostBrowsing, focusedJourneyHeader == nil {
                                         flushPendingViewedStory(nil)
                                         openProfilePlace(rated, focus: false)
@@ -1147,9 +1163,9 @@ struct MapTalkView: View {
                     if usesFriendStories && focusedJourneyHeader == nil {
                         if !friendGroups.isEmpty {
                             FriendStoriesRow(
-                                groups: isBrowsingPostPreview ? friendGroups
+                                groups: isBrowsingPostPreview || friendStoryNavigation.isPlaceScoped ? friendGroups
                                     : friendStoryNavigation.session?.groups ?? friendGroups,
-                                selectedAuthorID: isBrowsingPostPreview ? nil
+                                selectedAuthorID: isBrowsingPostPreview || friendStoryNavigation.isPlaceScoped ? nil
                                     : friendStoryNavigation.session?.currentGroup?.authorID,
                                 userProvider: viewModel.user(for:),
                                 isUnseen: { group in group.poiReadKeys.contains { !storyReadStore.isViewed($0) } },
@@ -1523,6 +1539,20 @@ struct MapTalkView: View {
             .onReceive(viewModel.$ratedPOIs) { places in
                 updateStandalonePlacePreview(from: places)
             }
+            .onReceive(viewModel.$activeFeedPOIs) { _ in
+                // The existing expiry scheduler includes map-only visits.
+                // Its feed rebuild also expires a scoped visit absent from
+                // the global feed, without starting another timer.
+                if friendStoryNavigation.isPlaceScoped {
+                    reconcileFriendStories(geometry: geometry)
+                }
+            }
+            .onReceive(environment.backend?.mediaContentChanges.eraseToAnyPublisher()
+                ?? Empty<Set<UUID>, Never>().eraseToAnyPublisher()) { ids in
+                guard let session = friendStoryNavigation.session, session.scopedPlaceID != nil,
+                      session.pagesInStoryOrder.contains(where: { ids.contains($0.memoryID) }) else { return }
+                reconcileFriendStories(geometry: geometry)
+            }
             .onReceive(viewModel.$friendFootprints) { footprints in
                 updateStandalonePlacePreview(from: footprints.map(\.ratedPOI))
             }
@@ -1833,7 +1863,8 @@ private extension MapTalkView {
     }
 
     func rememberPreviewCursor() {
-        guard showsSocialFeedPreview, let session = friendStoryNavigation.session else { return }
+        guard showsSocialFeedPreview, !friendStoryNavigation.isPlaceScoped,
+              let session = friendStoryNavigation.session else { return }
         if isBrowsingPostPreview {
             postPreviewResumePageID = session.currentPage?.id ?? postPreviewResumePageID
         } else {
@@ -1979,6 +2010,54 @@ private extension MapTalkView {
         return true
     }
 
+    /// Recent map entries own a frozen place/author scope. Historical map
+    /// entries retain their independent place card, never the home queue.
+    @discardableResult
+    func openMapPlaceStory(_ rated: RatedPOI, source transitionSource: MapTalkPOITransitionID,
+                           geometry: GeometryProxy) -> Bool {
+        guard usesFriendStories, !viewModel.isUserScope, focusedJourneyHeader == nil,
+              mapWorkEnabled, publishDestination == nil, queuedPublishDestination == nil else { return false }
+        let groups: [FriendStoryGroup]
+        if let backend = environment.backend {
+            let ids = rated.checkIns.map(\.id)
+            let records = backend.cachedRecords(for: ids, publicOnly: true)
+            let cached = backend.cachedSnapshot(for: ids, publicOnly: true).pois.first { $0.id == rated.id }
+            groups = FriendStoryFeed.mapPlaceGroups(for: cached ?? rated, backendRecords: records,
+                viewedKeys: storyReadStore.viewedKeys, userProvider: viewModel.user(for:))
+        } else {
+            groups = FriendStoryFeed.mapPlaceGroups(for: rated,
+                viewedKeys: storyReadStore.viewedKeys, userProvider: viewModel.user(for:))
+        }
+        guard let entry = FriendStoryPageSelection.latestPlacePage(placeID: rated.id, in: groups) else {
+            return false
+        }
+        let origin = friendStoryMapSnapshot()
+        finishFriendStory(restoreMap: false)
+        viewModel.cancelPendingLocationFocus()
+        flightController.cancelActiveTransition()
+        guard friendStoryNavigation.beginPlace(groups: groups, placeID: rated.id,
+            entryPageID: entry.id, origin: origin),
+              let page = friendStoryNavigation.session?.currentPage else { return false }
+        showsMapPlaceAuthors = true
+        poiTransitionSourceID = transitionSource
+        isBrowsingPostPreview = false
+        pendingViewedStoryKey = nil
+        poiOverviewID = nil
+        activeExperience = nil
+        selectedFriendFootprintID = nil
+        selectedStoryId = rated.id
+        selectedRealId = nil
+        viewModel.releaseRetainedActiveFeedItem()
+        experiencePresentation.presentNewContent()
+        // The tapped marker is already visible. Suppress only this initial
+        // focus; later pages go through the unchanged selection/focus chain.
+        friendStoryNavigation.lastLocationKey = page.locationKey
+        friendStoryNavigation.lastViewportSize = geometry.size
+        friendStoryNavigation.lastFocusedAuthorID = page.authorID
+        focusFriendStoryPage(page, geometry: geometry)
+        return true
+    }
+
     func openFriendStory(authorID: UUID, groups: [FriendStoryGroup], geometry: GeometryProxy,
                          postPreviewPageID: String? = nil) {
         let flow: MapTalkFeedPresentation = showsSocialFeedPreview && postPreviewPageID != nil
@@ -1995,6 +2074,7 @@ private extension MapTalkView {
     func showFriendStory(authorID: UUID, groups: [FriendStoryGroup], geometry: GeometryProxy,
                          postPreviewPageID: String?) {
         rememberPreviewCursor()
+        showsMapPlaceAuthors = false
         isBrowsingPostPreview = showsSocialFeedPreview && postPreviewPageID != nil
         viewModel.cancelPendingLocationFocus()
         pendingViewedStoryKey = nil
@@ -2025,6 +2105,7 @@ private extension MapTalkView {
     }
 
     func finishFriendStory(restoreMap: Bool) {
+        showsMapPlaceAuthors = false
         guard friendStoryNavigation.isActive || friendStoryNavigation.origin != nil else { return }
         rememberPreviewCursor()
         isBrowsingPostPreview = false
@@ -2046,6 +2127,18 @@ private extension MapTalkView {
             chronologicalPosts: isBrowsingPostPreview)
         if isBrowsingPostPreview {
             friendStoryNavigation.session?.reconcilePosts(with: postFeedGroups)
+        } else if let session = friendStoryNavigation.session, session.scopedPlaceID != nil,
+                  let backend = environment.backend {
+            // Only refresh surviving IDs from the frozen map queue. An absent
+            // feed record is not a revocation, but an unauthorized cached
+            // record is removed by cachedRecords(publicOnly: true).
+            let ids = Array(Set(session.pagesInStoryOrder.map(\.memoryID)))
+            let records = backend.cachedRecords(for: ids, publicOnly: true)
+            let snapshot = backend.cachedSnapshot(for: ids, publicOnly: true)
+            let refreshed = FriendStoryFeed.groups(reals: [], ratedPOIs: snapshot.pois,
+                backendRecords: records, viewedKeys: storyReadStore.viewedKeys,
+                userProvider: viewModel.user(for:))
+            friendStoryNavigation.session?.reconcile(with: refreshed)
         } else {
             let refreshedGroups = showsSocialFeedPreview
                 ? previewGroups(friendStoryGroups, posts: false) : friendStoryGroups

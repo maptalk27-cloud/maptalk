@@ -9,7 +9,7 @@ import { backupDatabase } from '../src/backup.mjs';
 // Existing migration fixtures compare only the expected new nullable field.
 function withLocationName(table, rows) {
   return table === 'memories'
-    ? rows.map(row => Object.assign(Object.create(null), row, { location_name: null })) : rows;
+    ? rows.map(row => Object.assign(Object.create(null), row, { location_name: null, post_location_id: null })) : rows;
 }
 
 
@@ -32,7 +32,7 @@ test('schema 14 preserves every place reference and old row while allowing hotel
       ) STRICT;
       DROP TABLE places;
       ALTER TABLE places_old RENAME TO places;
-      ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 13;
+      ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 13;
       COMMIT;
       PRAGMA foreign_keys = ON;
       INSERT INTO users VALUES ('owner', 'alice', 'unchanged-hash', 1, NULL);
@@ -56,7 +56,7 @@ test('schema 14 preserves every place reference and old row while allowing hotel
     db = openDatabase(path);
     restored = openDatabase(backupPath);
     for (const migrated of [db, restored]) {
-      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 15);
+      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 19);
       for (const [table, rows] of Object.entries(before)) {
         assert.deepEqual(migrated.prepare(`SELECT * FROM ${table}`).all(), rows, table);
       }

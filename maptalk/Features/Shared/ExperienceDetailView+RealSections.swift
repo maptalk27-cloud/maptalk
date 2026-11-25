@@ -63,6 +63,7 @@ struct LikesAvatarGrid: View {
                             AvatarSquare(
                                 user: entry.user,
                                 endorsement: entry.endorsement,
+                                customEmoji: entry.customEmoji,
                                 highlight: highlightStyle(for: info.contributor)
                             )
                         }
@@ -72,12 +73,12 @@ struct LikesAvatarGrid: View {
                         Button {
                             onUserSelected(user)
                         } label: {
-                            AvatarSquare(user: entry.user, endorsement: entry.endorsement)
+                            AvatarSquare(user: entry.user, endorsement: entry.endorsement, customEmoji: entry.customEmoji)
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("experience.poi.footprint.\(user.id.uuidString)")
                     } else {
-                        AvatarSquare(user: entry.user, endorsement: entry.endorsement)
+                        AvatarSquare(user: entry.user, endorsement: entry.endorsement, customEmoji: entry.customEmoji)
                     }
                 }
             }
@@ -186,6 +187,9 @@ struct POIStoryViewer: View {
                          ExperienceDetailView.POIStoryContributor.Item?) -> AnyView?)?
 
     @Environment(\.appEnv) private var environment
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.friendStoryPlaybackEnabled) private var parentPlaybackEnabled
+    @State private var isViewerVisible = false
     @State private var contributorIndex: Int
     @State private var itemIndex: Int = 0
     @State private var contributorTransitionDirection: ContributorTransitionDirection = .none
@@ -196,7 +200,11 @@ struct POIStoryViewer: View {
     @State private var accumulatedPageElapsed: TimeInterval = 0
     @State private var isPlaybackPaused: Bool = false
 
-    private let playbackTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+    private var playbackClockActive: Bool {
+        isViewerVisible && scenePhase == .active && parentPlaybackEnabled
+            && !isPlaybackPaused && !isInteractionPresented
+            && activeDragDirection == .none && dragCompletion == nil
+    }
 
     init(
         contributors: [ExperienceDetailView.POIStoryContributor],
@@ -240,8 +248,19 @@ struct POIStoryViewer: View {
             }
         }
         .onAppear {
+            isViewerVisible = true
             resetPlaybackClock()
             markCurrentPageViewed()
+        }
+        .onDisappear {
+            isViewerVisible = false
+            setPlaybackPaused(true)
+        }
+        .onChangeCompat(of: scenePhase) { phase in
+            setPlaybackPaused(phase != .active || !parentPlaybackEnabled || isInteractionPresented)
+        }
+        .onChangeCompat(of: parentPlaybackEnabled) { enabled in
+            setPlaybackPaused(!enabled || scenePhase != .active || isInteractionPresented)
         }
         .onChangeCompat(of: contributorIndex) { _ in
             resetPlaybackClock()
@@ -252,12 +271,17 @@ struct POIStoryViewer: View {
             markCurrentPageViewed()
         }
         .onChangeCompat(of: isInteractionPresented) { presented in
-            setPlaybackPaused(presented)
+            setPlaybackPaused(presented || scenePhase != .active || !parentPlaybackEnabled)
         }
         .accessibilityAction(.escape, onClose)
         .accessibilityHint(usesQuietChrome ? "Swipe down to return to the place" : "")
-        .onReceive(playbackTimer) { now in
-            updatePlayback(now: now)
+        .task(id: playbackClockActive) {
+            guard playbackClockActive else { return }
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+                guard !Task.isCancelled, playbackClockActive else { return }
+                updatePlayback(now: .now)
+            }
         }
     }
 
@@ -307,11 +331,12 @@ struct POIStoryViewer: View {
         pageProgress = 0
         accumulatedPageElapsed = 0
         pageStartedAt = Date()
-        isPlaybackPaused = false
+        isPlaybackPaused = !isViewerVisible || scenePhase != .active
+            || !parentPlaybackEnabled || isInteractionPresented
     }
 
     private func updatePlayback(now: Date) {
-        guard isPlaybackPaused == false,
+        guard playbackClockActive,
               !isInteractionPresented,
               activeDragDirection == .none,
               dragCompletion == nil,
@@ -326,7 +351,11 @@ struct POIStoryViewer: View {
         }
     }
 
-    private func setPlaybackPaused(_ paused: Bool) {
+    private func setPlaybackPaused(_ requestedPause: Bool) {
+        // A late swipe-completion callback must not resume a covered or
+        // backgrounded viewer and count that time as watched.
+        let paused = requestedPause || !isViewerVisible || scenePhase != .active
+            || !parentPlaybackEnabled || isInteractionPresented
         guard paused != isPlaybackPaused else { return }
         if paused {
             accumulatedPageElapsed += Date().timeIntervalSince(pageStartedAt)
@@ -1024,6 +1053,7 @@ struct AvatarSquare: View {
     let user: User?
     var size: CGFloat = 44
     var endorsement: RatedPOI.Endorsement? = nil
+    var customEmoji: String? = nil
     var highlight: HighlightStyle = .none
 
     enum HighlightStyle {
@@ -1109,6 +1139,9 @@ struct AvatarSquare: View {
         if let endorsement {
             EndorsementBadgeIcon(endorsement: endorsement, size: 20)
                 .offset(x: endorsementOffset.x, y: endorsementOffset.y)
+        } else if let customEmoji {
+            POICustomFeelingIcon(emoji: customEmoji, size: 20)
+                .offset(x: 5, y: 5)
         }
     }
 
@@ -1166,7 +1199,7 @@ struct CommentThreadRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             profileButton(for: entry.user) {
-                AvatarSquare(user: entry.user, endorsement: entry.endorsement)
+                AvatarSquare(user: entry.user, endorsement: entry.endorsement, customEmoji: entry.customEmoji)
             }
 
             VStack(alignment: .leading, spacing: 6) {

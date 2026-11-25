@@ -363,6 +363,45 @@ struct FriendStoryFeedTests {
     }
 
     @Test(arguments: [false, true])
+    func backendCustomFeelingAppearsWithoutACachedVisit(hasMedia: Bool) throws {
+        var metadata = record(id: 101, author: alice, kind: "poi", ago: 20,
+            media: hasMedia ? [backendMedia(700)] : [])
+        metadata.feedback = .init(endorsement: nil, comment: "Just taking it in", customEmoji: "🫠")
+        let page = try #require(groups(records: [metadata]).first?.pages.first)
+        guard case let .poi(place, visit, _) = page.content else { Issue.record("Missing POI"); return }
+
+        #expect(visit.customEmoji == "🫠")
+        #expect(visit.endorsement == nil)
+        #expect(visit.comment == "Just taking it in")
+        #expect(place.checkIns.first { $0.id == metadata.id }?.customEmoji == "🫠")
+        #expect(place.endorsements == .init(hype: 0, solid: 0, meh: 0, questionable: 0))
+        #expect(page.publishedAt == metadata.publishedAt)
+        #expect(page.isMediaReady == !hasMedia)
+    }
+
+    @Test(arguments: [false, true])
+    func backendCustomFeelingPreservesPendingEditsAndExplicitClear(cleared: Bool) throws {
+        var metadata = record(id: 101, author: alice, kind: "poi", ago: 20,
+            media: [backendMedia(700), backendMedia(701)])
+        metadata.feedback = .init(endorsement: nil, comment: "Older note", customEmoji: "🫠")
+        var projected = visit(id: 101, author: alice, ago: 20, media: [media(700), media(701)])
+        projected.customEmoji = cleared ? nil : "🥹"
+        projected.comment = cleared ? nil : "Newer note"
+        let pages = try #require(groups(places: [place(id: 500, visits: [projected])],
+            records: [metadata]).first?.pages)
+
+        #expect(pages.count == 2)
+        for page in pages {
+            guard case let .poi(place, visit, _) = page.content else { Issue.record("Missing POI"); continue }
+            #expect(visit.customEmoji == projected.customEmoji)
+            #expect(visit.endorsement == nil)
+            #expect(visit.comment == projected.comment)
+            #expect(place.checkIns.first { $0.id == metadata.id }?.customEmoji == projected.customEmoji)
+            #expect(page.publishedAt == metadata.publishedAt)
+        }
+    }
+
+    @Test(arguments: [false, true])
     func backendPOIFeedbackRejectsMismatchedCachedVisit(wrongAuthor: Bool) throws {
         var metadata = record(id: 101, author: alice, kind: "poi", ago: 20)
         metadata.feedback = .init(endorsement: "solid", comment: "The actual author's note")

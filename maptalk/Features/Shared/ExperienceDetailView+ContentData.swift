@@ -226,13 +226,27 @@ extension ExperienceDetailView {
             ? Self.mergingMedia(into: ratedPOI, from: hydratedPlaces[ratedPOI.id]) : ratedPOI
         guard ratedPOI.id != poiOverviewID,
               ratedPOI.id != personalPOIOverviewID,
-              let ownerID = poiBrowsingUserID,
-              let visit = ratedPOI.checkInPeople().first(where: { $0.userID == ownerID })?.latest else {
+              let ownerID = poiBrowsingUserID else {
             return nil
         }
+        if usesUpdatedPOIStyle {
+            let slices = personalPOISlices(for: ratedPOI)
+            guard let index = PersonalPOISliceSequence.index(in: slices,
+                retaining: personalPOISliceCursor ?? personalPOICursors[ratedPOI.id]) else { return nil }
+            return slices[index].selection
+        }
+        guard let visit = ratedPOI.checkInPeople().first(where: { $0.userID == ownerID })?.latest else { return nil }
         // A location-only visit stays location-only. Never borrow a previous
         // visit's photo, another person's media, or apply active-feed expiry.
         return POIStorySelection(checkIn: visit, media: visit.media.first)
+    }
+
+    func personalPOISlices(for ratedPOI: RatedPOI) -> [PersonalPOISliceSequence.Slice] {
+        guard let ownerID = poiBrowsingUserID else { return [] }
+        let place = liveMediaHydrationEnabled
+            ? Self.mergingMedia(into: ratedPOI, from: hydratedPlaces[ratedPOI.id]) : ratedPOI
+        return PersonalPOISliceSequence.slices(in: place, ownerID: ownerID,
+            metadataMediaIDs: personalPOIMediaMetadata(for: place, ownerID: ownerID))
     }
 
     private func compactPOISelection(for ratedPOI: RatedPOI) -> POIStorySelection? {
@@ -354,7 +368,8 @@ extension ExperienceDetailView {
                 badge: nil,
                 timestamp: checkIn.activityDate,
                 replies: [],
-                endorsement: checkIn.endorsement
+                endorsement: checkIn.endorsement,
+                customEmoji: checkIn.customEmoji
             )
         }
     }
@@ -373,7 +388,8 @@ extension ExperienceDetailView {
                 badge: nil,
                 timestamp: visit.activityDate,
                 replies: [],
-                endorsement: visit.endorsement
+                endorsement: visit.endorsement,
+                customEmoji: visit.customEmoji
             )
         }
         return visitNotes + ratedPOI.comments.map { comment in

@@ -66,7 +66,13 @@ final class UserMapViewModel: ObservableObject {
         var category: POICategory { ratedPOI.poi.category }
         var coordinate: CLLocationCoordinate2D { ratedPOI.poi.coordinate }
         var latestVisit: Date? { visits.map(\.activityDate).max() }
-        var totalVisits: Int { visits.count }
+        var totalVisits: Int {
+            Dictionary(grouping: visits, by: \.userId).values.reduce(0) { count, visits in
+                count + Set(visits.map {
+                    POIVisitDay.key(for: $0, coordinate: coordinate)
+                }).count
+            }
+        }
     }
 
     struct MapPin: Identifiable {

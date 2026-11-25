@@ -5,6 +5,41 @@ import Testing
 @MainActor
 struct POIFeedbackFlowTests {
     @Test
+    func quickSelectionOnlySendsBeforeEnteringComposer() {
+        var draft = POIFeedbackDraft()
+        let quickSubmit = draft.select(.solid)
+        #expect(quickSubmit)
+        draft.beginComposing()
+        draft.comment = "A quiet afternoon"
+        let typedSubmit = draft.select(.hype)
+        #expect(!typedSubmit)
+        draft.comment = ""
+        let clearedSubmit = draft.select(.solid)
+        #expect(!clearedSubmit)
+        #expect(draft.isComposing)
+    }
+
+    @Test
+    func customFeelingPreservesCommentAndNeverCountsAsRating() {
+        var draft = POIFeedbackDraft()
+        draft.comment = "Still thinking about this"
+        draft.selectCustom(POICustomFeeling.choices[0])
+        #expect(draft.endorsement == nil)
+        #expect(draft.customEmoji == POICustomFeeling.choices[0])
+        #expect(draft.isValid)
+        let replacedSubmit = draft.select(.solid)
+        #expect(!replacedSubmit)
+        #expect(draft.customEmoji == nil)
+        #expect(draft.comment == "Still thinking about this")
+        draft.selectCustom(POICustomFeeling.choices[1])
+        #expect(draft.endorsement == nil)
+        draft.comment = ""
+        #expect(draft.isValid)
+        draft.comment = "invalid\0text"
+        #expect(!draft.isValid)
+    }
+
+    @Test
     func optionalDraftStartsUnratedAndAcceptsEitherInput() {
         var draft = POIFeedbackDraft()
         #expect(draft.endorsement == nil)

@@ -22,6 +22,8 @@ async function fixture(t) {
   db.exec(`
     PRAGMA foreign_keys = OFF;
     BEGIN IMMEDIATE;
+    DROP TABLE IF EXISTS memory_custom_feelings; DROP TABLE direct_messages; DROP TABLE media_likes; DROP TABLE saved_places; DROP INDEX memories_place_owner_visits;
+    DROP TABLE memory_feedback;
     DROP TABLE cluster_media;
     DROP TABLE memory_clusters;
     DROP TABLE places;
@@ -34,7 +36,7 @@ async function fixture(t) {
       longitude REAL NOT NULL CHECK(longitude BETWEEN -180 AND 180)
     ) STRICT;
     ALTER TABLE places ADD COLUMN directory_kind TEXT CHECK(directory_kind IS NULL OR directory_kind = 'airport');
-    ALTER TABLE memories DROP COLUMN location_name;
+    ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name;
     PRAGMA user_version = 12;
     COMMIT;
     PRAGMA foreign_keys = ON;
@@ -68,7 +70,7 @@ function edit(path, sql) {
 function migrate(path) {
   const db = openDatabase(path);
   // This verifier covers only the historical 12 -> 14 release.
-  db.exec('ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
+  db.exec('DROP TABLE IF EXISTS memory_custom_feelings; DROP TABLE direct_messages; DROP TABLE media_likes; DROP TABLE saved_places; DROP INDEX memories_place_owner_visits; DROP TABLE memory_feedback; ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
   db.close();
 }
 function changePlaceDefinition(path, transform) {

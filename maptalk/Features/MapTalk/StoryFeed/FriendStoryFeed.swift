@@ -35,6 +35,21 @@ struct FriendStoryPage: Identifiable {
         return lhs.id > rhs.id
     }
 
+    /// Map-place browsing runs from the latest visit toward older visits.
+    /// The source order inside one visit is publication order, not a media-ID
+    /// sort and not a reversed photo/video sequence.
+    static func newestVisitOrder(_ pages: [Self]) -> [Self] {
+        pages.enumerated().sorted { lhs, rhs in
+            if lhs.element.publishedAt != rhs.element.publishedAt {
+                return lhs.element.publishedAt > rhs.element.publishedAt
+            }
+            if lhs.element.memoryID != rhs.element.memoryID {
+                return lhs.element.memoryID.uuidString > rhs.element.memoryID.uuidString
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
     /// Availability is not proof of viewing. The UI marks read only after the
     /// current image/video is actually presented, never when this turns true.
     var isMediaReady: Bool {
@@ -73,6 +88,11 @@ struct FriendStoryPage: Identifiable {
         case .reel: return .memory(memoryID)
         case let .poi(rated, _, _): return .place(rated.id)
         }
+    }
+
+    var poiVisitDayKey: String? {
+        guard case let .poi(place, visit, _) = content else { return nil }
+        return POIVisitDay.key(for: visit, coordinate: place.poi.coordinate)
     }
 }
 
@@ -122,7 +142,8 @@ struct FriendStoryGroup: Identifiable {
             if case let .poi(place, _, _) = page.content { placeID = place.id }
             else { placeID = nil }
             if let placeID, let previous = moments.last, previous.placeID == placeID,
-               pages[previous.pageRange.lowerBound].authorID == page.authorID {
+               pages[previous.pageRange.lowerBound].authorID == page.authorID,
+               pages[previous.pageRange.lowerBound].poiVisitDayKey == page.poiVisitDayKey {
                 moments[moments.count - 1] = .init(id: previous.id,
                     pageRange: previous.pageRange.lowerBound..<(index + 1), placeID: placeID)
             } else {
@@ -137,10 +158,48 @@ struct FriendStoryGroup: Identifiable {
     }
 }
 
-/// Feed metadata, not map search results, is the source of membership. With a
-/// backend snapshot supplied, UI projections only supply already-cached media.
+/// The people feed uses feed membership; a map entry uses its exact authorized
+/// place scope. Cached media never adds records outside either source.
 @MainActor
 enum FriendStoryFeed {
+    /// The tapped map projection is an independent, exact visible scope. The
+    /// global feed can lag behind it; neither unread ranking nor unrelated
+    /// cached records may choose this place's three displayed authors.
+    static func mapPlaceGroups(for place: RatedPOI, backendRecords: [BackendMemory]? = nil,
+                               viewedKeys: Set<String> = [], userProvider: (UUID) -> User?,
+                               now: Date = .now) -> [FriendStoryGroup] {
+        let visibleIDs = Set(place.checkIns.map(\.id))
+        let records = backendRecords?.filter {
+            visibleIDs.contains($0.id) && $0.kind == "poi" && $0.place?.id == place.id
+        }
+        let candidates = groups(reals: [], ratedPOIs: [place], backendRecords: records,
+            viewedKeys: viewedKeys, userProvider: userProvider, now: now).sorted {
+                if $0.latestTimestamp != $1.latestTimestamp { return $0.latestTimestamp > $1.latestTimestamp }
+                return $0.authorID.uuidString < $1.authorID.uuidString
+            }
+        guard let first = candidates.first else { return [] }
+        return placeGroups(in: candidates, placeID: place.id, entryAuthorID: first.authorID, now: now)
+    }
+
+    /// A map pin owns only the current place and the people its avatar stack
+    /// can show. Filtering preserves the original author/page order; it never
+    /// pulls separated visits together or invents a new chronological order.
+    static func placeGroups(in groups: [FriendStoryGroup], placeID: UUID,
+                            entryAuthorID: UUID, now: Date = .now) -> [FriendStoryGroup] {
+        let candidates = groups.compactMap { group -> FriendStoryGroup? in
+            let pages = group.pages.filter { page in
+                guard case let .poi(place, _, _) = page.content else { return false }
+                return place.id == placeID && page.expiresAt > now
+                    && StoryReadKeys.isFresh(page.publishedAt, asOf: now)
+            }
+            return pages.isEmpty ? nil : group.replacingPages(pages)
+        }
+        guard candidates.contains(where: { $0.authorID == entryAuthorID }) else { return [] }
+        let others = candidates.lazy.map(\.authorID).filter { $0 != entryAuthorID }.prefix(2)
+        let authors = Set([entryAuthorID] + Array(others))
+        return candidates.filter { authors.contains($0.authorID) }
+    }
+
     static func groups(
         reals: [RealPost],
         ratedPOIs: [RatedPOI],
@@ -284,19 +343,23 @@ enum FriendStoryFeed {
                     uniquingKeysWith: { first, _ in first })
                 let endorsement: RatedPOI.Endorsement?
                 let comment: String?
+                let customEmoji: String?
                 if let existing {
                     // The projection may include a pending edit, including an
                     // explicit clear. Do not revive older server feedback.
                     endorsement = existing.endorsement
                     comment = existing.comment
+                    customEmoji = existing.customEmoji
                 } else {
                     endorsement = record.feedback?.endorsement.flatMap(RatedPOI.Endorsement.init(rawValue:))
                     comment = record.feedback?.comment.isEmpty == false ? record.feedback?.comment : nil
+                    customEmoji = record.feedback?.customEmoji
                 }
                 let visit = RatedPOI.CheckIn(id: record.id, userId: record.ownerId,
                     createdAt: record.createdAt, endorsement: endorsement,
                     media: descriptors.compactMap { cached[$0.id] }, tag: existing?.tag,
-                    publishedAt: record.publishedAt, comment: comment)
+                    publishedAt: record.publishedAt, comment: comment,
+                    visitDay: record.visitDay ?? existing?.visitDay, customEmoji: customEmoji)
                 // Usually the shared projection is already current. Avoid a
                 // copy-on-write of the entire place's visits for every page.
                 if existing != visit {
@@ -381,6 +444,9 @@ enum FriendStoryFeed {
 /// nested-route state. A refresh updates payloads/removes revoked records, but
 /// never inserts new pages or reorders authors beneath a gesture.
 struct FriendStorySession {
+    /// Nil keeps the original people feed. A map entry freezes one place's
+    /// selected (at most three) authors in latest-visit-first order.
+    let scopedPlaceID: UUID?
     private(set) var groups: [FriendStoryGroup] {
         didSet { refreshPageSnapshots() }
     }
@@ -405,9 +471,21 @@ struct FriendStorySession {
     }
 
     init?(groups: [FriendStoryGroup], authorID: UUID, viewedKeys: Set<String> = [],
-          resuming pageIDs: [UUID: String] = [:]) {
+          resuming pageIDs: [UUID: String] = [:], scopedPlaceID: UUID? = nil) {
+        self.scopedPlaceID = scopedPlaceID
+        if let scopedPlaceID {
+            guard Set(groups.map(\.authorID)).count <= 3,
+                  groups.flatMap(\.pages).allSatisfy({ page in
+                      if case let .poi(place, _, _) = page.content { return place.id == scopedPlaceID }
+                      return false
+                  }) else { return nil }
+        }
         var seenAuthors = Set<UUID>()
         self.groups = groups.filter { !$0.pages.isEmpty && seenAuthors.insert($0.authorID).inserted }
+            .map { group in
+                scopedPlaceID == nil ? group
+                    : group.replacingPages(FriendStoryPage.newestVisitOrder(group.pages))
+            }
         refreshPageSnapshots()
         postSessionHead = pagesInPostOrder.first
         guard let group = self.groups.first(where: { $0.authorID == authorID }) else { return nil }
@@ -471,6 +549,7 @@ struct FriendStorySession {
         guard !isEnded else { return }
         let oldCurrentGroup = currentGroup
         let oldCurrentPage = currentPage
+        let previousPlacePages = scopedPlaceID == nil ? [] : pagesInStoryOrder
         let updates = Dictionary(refreshedGroups.map { ($0.authorID, $0) },
             uniquingKeysWith: { first, _ in first })
         groups = groups.compactMap { frozen in
@@ -480,10 +559,11 @@ struct FriendStorySession {
             let retained = frozen.pages.compactMap { old -> FriendStoryPage? in
                 if let validMemoryIDs, !validMemoryIDs.contains(old.memoryID) { return nil }
                 if let page = available[old.id], page.authorID == frozen.authorID,
-                   page.memoryID == old.memoryID, page.expiresAt > now {
+                   page.memoryID == old.memoryID, page.expiresAt > now,
+                   belongsToScope(page) {
                     return page
                 }
-                if retainCurrentExpiredPage, old.id == oldCurrentPage?.id,
+                if scopedPlaceID == nil, retainCurrentExpiredPage, old.id == oldCurrentPage?.id,
                    old.expiresAt <= now, validMemoryIDs?.contains(old.memoryID) == true {
                     return old
                 }
@@ -492,14 +572,18 @@ struct FriendStorySession {
             guard !retained.isEmpty else { return nil }
             return (refreshed ?? frozen).replacingPages(retained)
         }
-        restoreCursor(afterRemovingFrom: oldCurrentGroup, current: oldCurrentPage)
+        if scopedPlaceID != nil {
+            restorePlaceCursor(previous: previousPlacePages, current: oldCurrentPage)
+        } else {
+            restoreCursor(afterRemovingFrom: oldCurrentGroup, current: oldCurrentPage)
+        }
     }
 
     /// The refreshed list is cumulative, not just the latest network page.
     /// Fill historical gaps and append older pages, while keeping posts newer
     /// than this session's original head for a deliberate reopen.
     mutating func reconcilePosts(with refreshedGroups: [FriendStoryGroup]) {
-        guard !isEnded else { return }
+        guard scopedPlaceID == nil, !isEnded else { return }
         let previous = pagesInPostOrder
         let previousCurrent = currentPage
         let oldIDs = Set(previous.map(\.id))
@@ -528,12 +612,15 @@ struct FriendStorySession {
         guard !memoryIDs.isEmpty, !isEnded else { return }
         let oldGroup = currentGroup
         let oldPage = currentPage
+        let previousPlacePages = scopedPlaceID == nil ? [] : pagesInStoryOrder
         let previous = chronologicalPosts ? pagesInPostOrder : []
         groups = groups.compactMap { group in
             let pages = group.pages.filter { !memoryIDs.contains($0.memoryID) }
             return pages.isEmpty ? nil : group.replacingPages(pages)
         }
-        if chronologicalPosts {
+        if scopedPlaceID != nil {
+            restorePlaceCursor(previous: previousPlacePages, current: oldPage)
+        } else if chronologicalPosts {
             restorePostCursor(previous: previous, current: oldPage)
         } else {
             restoreCursor(afterRemovingFrom: oldGroup, current: oldPage)
@@ -564,6 +651,27 @@ struct FriendStorySession {
         resumePageIDs[destination.authorID] = destination.id
     }
 
+    private mutating func restorePlaceCursor(previous: [FriendStoryPage], current oldPage: FriendStoryPage?) {
+        let available = Dictionary(pagesInStoryOrder.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let index = previous.firstIndex { $0.id == oldPage?.id } ?? 0
+        let next = previous.dropFirst(index + 1).compactMap { available[$0.id] }.first
+        let earlier = previous.prefix(index).reversed().compactMap { available[$0.id] }.first
+        guard let destination = oldPage.flatMap({ available[$0.id] }) ?? next ?? earlier else {
+            end()
+            return
+        }
+        resumePageIDs = resumePageIDs.filter { _, id in available[id] != nil }
+        selectedAuthorID = destination.authorID
+        resumePageIDs[destination.authorID] = destination.id
+    }
+
+    private func belongsToScope(_ page: FriendStoryPage) -> Bool {
+        guard let scopedPlaceID else { return true }
+        guard case let .poi(place, _, _) = page.content else { return false }
+        return place.id == scopedPlaceID
+    }
+
     private mutating func restoreCursor(afterRemovingFrom oldGroup: FriendStoryGroup?, current oldPage: FriendStoryPage?) {
         guard let current = currentGroup, let oldGroup, let oldPage else {
             end()
@@ -586,7 +694,20 @@ struct FriendStorySession {
     }
 
     private mutating func refreshPageSnapshots() {
-        pagesInStoryOrder = groups.flatMap(\.pages)
+        let source = groups.flatMap(\.pages)
+        if scopedPlaceID != nil {
+            if pagesInStoryOrder.isEmpty {
+                pagesInStoryOrder = FriendStoryPage.newestVisitOrder(source)
+            } else {
+                // A refresh updates/removes frozen pages; it must not shuffle
+                // the mounted pager or insert later publications beneath it.
+                let available = Dictionary(source.map { ($0.id, $0) },
+                    uniquingKeysWith: { first, _ in first })
+                pagesInStoryOrder = pagesInStoryOrder.compactMap { available[$0.id] }
+            }
+        } else {
+            pagesInStoryOrder = source
+        }
         pagesInPostOrder = pagesInStoryOrder.sorted { FriendStoryPage.newestPostFirst($0, $1) }
     }
 

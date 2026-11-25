@@ -4,18 +4,42 @@ import SwiftUI
 struct POIFeedbackDraft {
     var endorsement: RatedPOI.Endorsement?
     var comment = ""
+    var customEmoji: String?
+    private(set) var isComposing = false
 
     var trimmedComment: String { comment.trimmingCharacters(in: .whitespacesAndNewlines) }
-    var hasContent: Bool { endorsement != nil || !trimmedComment.isEmpty }
-    var isValid: Bool { hasContent && trimmedComment.utf16.count <= 1_000 }
+    var hasContent: Bool { endorsement != nil || customEmoji != nil || !trimmedComment.isEmpty }
+    var isValid: Bool {
+        hasContent && trimmedComment.utf16.count <= 1_000 && !trimmedComment.contains("\0")
+            && (customEmoji == nil || (endorsement == nil && POICustomFeeling.normalized(customEmoji) != nil))
+    }
+
+    mutating func beginComposing() { isComposing = true }
+
+    /// Editing stays explicit even after all of the comment is erased.
+    /// Returns whether the selection should submit immediately.
+    mutating func select(_ value: RatedPOI.Endorsement) -> Bool {
+        if !trimmedComment.isEmpty || customEmoji != nil { isComposing = true }
+        endorsement = value
+        customEmoji = nil
+        return !isComposing
+    }
+
+    mutating func selectCustom(_ value: String) {
+        guard let emoji = POICustomFeeling.normalized(value) else { return }
+        isComposing = true
+        endorsement = nil
+        customEmoji = emoji
+    }
 
     mutating func toggle(_ value: RatedPOI.Endorsement) {
+        customEmoji = nil
         endorsement = endorsement == value ? nil : value
     }
 }
 
 enum POIFeedbackStyle: String, CaseIterable, Identifiable {
-    case glass, clean, lifted, compact, feeling
+    case glass, clean, lifted, compact, feeling, progressive
 
     static let reviewStyles: [Self] = [.clean, .lifted, .compact, .feeling]
 
@@ -27,6 +51,7 @@ enum POIFeedbackStyle: String, CaseIterable, Identifiable {
         case .lifted: "B · Lift"
         case .compact: "C · Slim"
         case .feeling: "D · Feel"
+        case .progressive: "D · Inline"
         }
     }
 }
@@ -53,7 +78,7 @@ struct MapTalkPOIFeedbackOverlay: View {
     let onSkip: () -> Void
     // Both the form and its store are MainActor-isolated. Keep that isolation
     // on the stored callback too, rather than erasing it at the async boundary.
-    let onSave: @MainActor (RatedPOI.Endorsement?, String) async throws -> Void
+    let onSave: @MainActor (RatedPOI.Endorsement?, String?, String) async throws -> Void
 
     @State private var draft = POIFeedbackDraft()
     @State private var isSaving = false
@@ -61,11 +86,11 @@ struct MapTalkPOIFeedbackOverlay: View {
     @FocusState private var isCommentFocused: Bool
 
     init(placeName: String, audience: MapPublishAudience,
-         style: POIFeedbackStyle = .clean, iconSet: POIFeedbackIconSet = .emoji,
+         style: POIFeedbackStyle = .progressive, iconSet: POIFeedbackIconSet = .emoji,
          heading: POIFeedbackHeading = .place,
          initialDraft: POIFeedbackDraft = .init(),
          onSkip: @escaping () -> Void,
-         onSave: @escaping @MainActor (RatedPOI.Endorsement?, String) async throws -> Void) {
+         onSave: @escaping @MainActor (RatedPOI.Endorsement?, String?, String) async throws -> Void) {
         self.placeName = placeName
         self.audience = audience
         self.style = style
@@ -73,7 +98,9 @@ struct MapTalkPOIFeedbackOverlay: View {
         self.heading = heading
         self.onSkip = onSkip
         self.onSave = onSave
-        _draft = State(initialValue: initialDraft)
+        var startingDraft = initialDraft
+        if initialDraft.hasContent { startingDraft.beginComposing() }
+        _draft = State(initialValue: startingDraft)
     }
 
     private let choices: [(RatedPOI.Endorsement, String, String)] = [
@@ -113,6 +140,34 @@ struct MapTalkPOIFeedbackOverlay: View {
     @ViewBuilder
     private var prompt: some View {
         switch style {
+        case .progressive:
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(spacing: 4) {
+                    quietHeader
+                    largeFeelings
+                }
+                if draft.isComposing {
+                    customFeelings
+                    commentInput
+                } else {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { draft.beginComposing() }
+                    } label: {
+                        Label("Add a little more", systemImage: "plus")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isSaving)
+                    .accessibilityIdentifier("maptalk.poi-feedback.more")
+                }
+                issues
+            }
+            .padding(18)
+            .frame(maxWidth: 360)
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 30))
         case .glass:
             originalPrompt
         case .clean:
@@ -256,7 +311,11 @@ struct MapTalkPOIFeedbackOverlay: View {
             ForEach(choices, id: \.0) { choice in
                 let selected = draft.endorsement == choice.0
                 Button {
-                    draft.toggle(choice.0)
+                    if style == .progressive {
+                        if draft.select(choice.0) { save() }
+                    } else {
+                        draft.toggle(choice.0)
+                    }
                 } label: {
                     POIFeedbackIcon(endorsement: choice.0, set: iconSet,
                         size: style == .feeling ? 50 : (style == .lifted ? 49 : (style == .compact ? 39 : 46)))
@@ -284,6 +343,33 @@ struct MapTalkPOIFeedbackOverlay: View {
             }
         }
         .accessibilityLabel("How was it?")
+    }
+
+    private var customFeelings: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 3) {
+                ForEach(POICustomFeeling.choices, id: \.self) { emoji in
+                    let selected = draft.customEmoji == emoji
+                    Button { draft.selectCustom(emoji) } label: {
+                        Text(emoji)
+                            .font(.system(size: 27))
+                            .frame(width: 44, height: 44)
+                            .background(selected ? Color.white.opacity(0.65) : .clear, in: Circle())
+                            .overlay {
+                                if selected { Circle().strokeBorder(.primary.opacity(0.22), lineWidth: 1.5) }
+                            }
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isSaving)
+                    .accessibilityLabel(emoji)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+        .accessibilityLabel("More feelings")
+        .accessibilityIdentifier("maptalk.poi-feedback.custom-feelings")
     }
 
     private var header: some View {
@@ -417,11 +503,12 @@ struct MapTalkPOIFeedbackOverlay: View {
         Task { @MainActor in
             defer { isSaving = false }
             do {
-                try await saveFeedback(endorsement, comment)
+                try await saveFeedback(endorsement, value.customEmoji, comment)
             } catch {
                 // Publishing already succeeded. Keep just this optional draft;
                 // retrying here must never publish the visit a second time.
                 saveIssue = "Your check-in is saved. Couldn't save this feedback; try again or skip."
+                draft.beginComposing()
             }
         }
     }

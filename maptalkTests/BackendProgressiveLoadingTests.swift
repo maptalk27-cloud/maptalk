@@ -20,9 +20,12 @@ struct BackendProgressiveLoadingTests {
         defer { recordsObserver.cancel(); rowObserver.cancel() }
 
         #expect(!context.store.hasPreparedMedia(for: context.recordID), "Unknown records are not ready")
+        #expect(context.store.cachedRecords(for: [context.recordID]).isEmpty)
         try await context.store.refresh()
         #expect(context.store.hasPreparedMedia(for: context.recordID), "A known no-media record is ready")
         #expect(!context.store.hasPreparedMedia(for: UUID()))
+        #expect(context.store.cachedRecords(for: [context.recordID, UUID()]).map(\.id) == [context.recordID],
+            "Exact-scope metadata must not discover the other 31 records")
         #expect(!counts.isEmpty)
         #expect(counts.allSatisfy { $0 == 32 }, "Subscribers must never receive a half-filled metadata batch")
         #expect(counts.count <= 8, "Refreshing 32 owned records must not emit once per record")
@@ -137,6 +140,8 @@ struct BackendProgressiveLoadingTests {
         #expect(beforeAssets.media.map(\.id) == [context.videoID, context.photoID])
         #expect(context.store.feedReels.value.first?.attachments.isEmpty == true)
         #expect(!context.store.hasPreparedMedia(for: context.recordID), "Metadata alone is not media readiness")
+        #expect(context.store.cachedRecords(for: [context.recordID], publicOnly: true).first?.media.map(\.id)
+            == [context.videoID, context.photoID], "Cold video retains its slot before downloading")
         photo.respond(context.photo, contentType: "image/png")
         try await operation.value
         #expect(!context.store.hasPreparedMedia(for: context.recordID), "A loaded photo cannot hide a missing video")
@@ -159,6 +164,7 @@ struct BackendProgressiveLoadingTests {
         #expect(profileRefreshes == 1, "Other people's feed media must not rebuild the owner's Profile")
         context.store.clearLocalMedia()
         #expect(!context.store.hasPreparedMedia(for: context.recordID), "A signed-out store is never ready")
+        #expect(context.store.cachedRecords(for: [context.recordID]).isEmpty)
         #expect(context.store.feedRecords.value.isEmpty, "Sign-out must clear raw metadata as well as cards")
     }
 
@@ -234,6 +240,8 @@ struct BackendProgressiveLoadingTests {
         #expect(context.store.ownPublicReels.isEmpty)
         #expect(context.store.feedReels.value.isEmpty)
         #expect(context.store.cachedSnapshot(for: [context.recordID], publicOnly: true).reels.isEmpty)
+        #expect(context.store.cachedRecords(for: [context.recordID], publicOnly: true).isEmpty)
+        #expect(context.store.cachedRecords(for: [context.recordID]).first?.ownerId == context.store.user.id)
         #expect(!context.store.hasPreparedMedia(for: context.recordID))
 
         let first = Task { try await context.store.ensureMedia(for: [context.recordID]) }
@@ -372,6 +380,7 @@ struct BackendProgressiveLoadingTests {
         #expect(mediaUpdates == 0)
         #expect(context.store.cachedSnapshot(for: [context.recordID]).reels.isEmpty)
         #expect(!context.store.hasPreparedMedia(for: context.recordID), "Deleted or blocked records are never ready")
+        #expect(context.store.cachedRecords(for: [context.recordID]).isEmpty)
         #expect(try await context.store.ensureMedia(for: [context.recordID]).reels.isEmpty)
     }
 

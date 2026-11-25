@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1152.0",
+    "@photostructure/tz-lookup": "https://codeload.github.com/photostructure/tz-lookup/tar.gz/a09cbf7a1874937d81f42ccb1bdad4ac88d0400e",
     "sharp": "0.35.5"
   }
 }

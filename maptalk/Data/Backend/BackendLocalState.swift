@@ -73,6 +73,7 @@ nonisolated struct BackendLocalState: Codable, Sendable {
     // Independent, owner/server-scoped edits; never mutate queued publication inputs.
     var poiFeedbackQueue: [QueuedPOIFeedback]? = nil
     var supportsPOIFeedback: Bool? = nil
+    var supportsPOICustomFeelings: Bool? = nil
 }
 
 nonisolated struct QueuedPOIFeedback: Codable, Sendable, Identifiable {

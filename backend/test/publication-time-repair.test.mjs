@@ -16,6 +16,8 @@ async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'maptalk-publication-time-repair-'));
   const path = join(directory, 'test.sqlite'), db = openDatabase(path);
   t.after(async () => { db.close(); await rm(directory, { recursive: true, force: true }); });
+  // This historical one-time repair deliberately supports only schema 14.
+  db.exec('DROP TABLE IF EXISTS memory_custom_feelings; DROP TABLE memory_feedback; ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
   db.exec(`INSERT INTO users(id, handle, password_hash, created_at) VALUES ('owner', 'alice', 'not-a-real-password-hash', 1);
     INSERT INTO users(id, handle, password_hash, created_at) VALUES ('other-owner', 'bob', 'not-a-real-password-hash', 1);
     INSERT INTO places VALUES ('place', 'Sensitive Airport Café', 'airport', 47.45, -122.31, 'airport');

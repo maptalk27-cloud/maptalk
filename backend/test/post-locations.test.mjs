@@ -60,25 +60,31 @@ function post(overrides = {}) {
 test('named Post coordinates persist across publication, public browsing, caption edits and restart', async t => {
   const api = await fixture(t), owner = api.account('owner'), viewer = api.account('viewer');
   assert.equal(status(await api.call('/health'), 200).supportsPostLocationNames, true);
-  const draft = post({ location: { latitude: 37.3791, longitude: -122.0467 }, locationName: '  Our sunset spot  ' });
+  assert.equal(status(await api.call('/health'), 200).supportsPostLocationIdentity, true);
+  const draft = post({ location: { latitude: 37.3791, longitude: -122.0467 }, locationName: '  Our sunset spot  ',
+    locationId: randomUUID() });
   const saved = status(await api.call('/v1/memories', owner, 'POST', draft), 201);
   assert.deepEqual(saved.location, draft.location);
   assert.equal(saved.locationName, 'Our sunset spot');
+  assert.equal(saved.locationId, draft.locationId);
   assert.equal(saved.place, null, 'A named Post must not create a check-in landmark.');
   assert.equal(api.db(db => db.prepare('SELECT COUNT(*) AS n FROM places').get().n), 0);
   assert.deepEqual(status(await api.call('/v1/memories', owner, 'POST', draft), 200), saved);
   status(await api.call('/v1/memories', owner, 'POST', { ...draft, locationName: 'Different place' }), 409);
+  status(await api.call('/v1/memories', owner, 'POST', { ...draft, locationId: randomUUID() }), 409);
   // Same location is reusable for an independent Post, not an update to the first.
   status(await api.call('/v1/memories', owner, 'POST', { ...draft, id: randomUUID() }), 201);
   for (const path of ['/v1/me/memories', '/v1/posts', `/v1/users/${owner.id}/memories`,
     '/v1/map/memories?west=-123&east=-121&south=37&north=38']) {
     const page = status(await api.call(path, path === '/v1/me/memories' ? owner : viewer), 200);
     assert.equal(page.items.find(item => item.id === saved.id)?.locationName, saved.locationName, path);
+    assert.equal(page.items.find(item => item.id === saved.id)?.locationId, saved.locationId, path);
   }
   status(await api.call(`/v1/memories/${saved.id}`, owner, 'PATCH', { caption: 'Updated caption' }), 200);
   await api.restart();
   const reloaded = status(await api.call(`/v1/memories/${saved.id}`, viewer), 200);
   assert.equal(reloaded.locationName, saved.locationName);
+  assert.equal(reloaded.locationId, saved.locationId);
   assert.deepEqual(reloaded.location, saved.location);
   assert.equal(reloaded.caption, 'Updated caption');
 });
@@ -86,18 +92,21 @@ test('named Post coordinates persist across publication, public browsing, captio
 test('a private Post location name is shared only through an explicitly attached snapshot', async t => {
   const api = await fixture(t), owner = api.account('owner'), viewer = api.account('viewer');
   const source = status(await api.call('/v1/memories', owner, 'POST',
-    post({ visibility: 'private', locationName: 'Family picnic spot' })), 201);
+    post({ visibility: 'private', locationName: 'Family picnic spot', locationId: randomUUID() })), 201);
   status(await api.call(`/v1/memories/${source.id}`, viewer), 404);
   assert.equal(status(await api.call('/v1/posts', viewer), 200).items.length, 0);
   const parent = status(await api.call('/v1/memories', owner, 'POST',
     post({ cluster: { title: 'Weekend', memoryIds: [source.id] } })), 201);
   assert.equal(parent.cluster.members[0].locationName, source.locationName);
+  assert.equal(parent.cluster.members[0].locationId, source.locationId);
   status(await api.call(`/v1/memories/${source.id}`, owner, 'DELETE'), 204);
   await api.restart();
   const viewed = status(await api.call(`/v1/memories/${parent.id}`, viewer), 200);
   assert.equal(viewed.cluster.members[0].locationName, source.locationName);
+  assert.equal(viewed.cluster.members[0].locationId, source.locationId);
   assert.deepEqual(viewed.cluster.members[0].location, source.location);
   assert.equal(Object.hasOwn(viewed, 'locationName'), false, 'A member name must not name the parent.');
+  assert.equal(Object.hasOwn(viewed, 'locationId'), false, 'A member identity must not identify the parent.');
 });
 
 test('location names are optional Reel-only text with an 80 UTF-16 unit boundary', async t => {
@@ -117,7 +126,50 @@ test('location names are optional Reel-only text with an 80 UTF-16 unit boundary
   assert.equal(Object.hasOwn(legacy, 'locationName'), false);
 });
 
-test('schema 14 to 15 preserves original records, backups and old absent-name retry hashes', async t => {
+test('Post identity is optional UUID metadata, never POI association or access to another owner', async t => {
+  const api = await fixture(t), owner = api.account('owner'), viewer = api.account('viewer');
+  for (const locationId of [null, '', 'not-a-uuid', 123, {}, []]) {
+    status(await api.call('/v1/memories', owner, 'POST', post({ locationId })), 422);
+  }
+  status(await api.call('/v1/memories', owner, 'POST', post({ kind: 'poi', caption: '',
+    locationId: randomUUID(), place: { name: 'Real café', category: 'coffee' } })), 422);
+  const locationId = randomUUID();
+  const secret = status(await api.call('/v1/memories', owner, 'POST',
+    post({ visibility: 'private', locationId })), 201);
+  const other = status(await api.call('/v1/memories', viewer, 'POST', post({ locationId: locationId.toUpperCase() })), 201);
+  assert.equal(other.locationId, locationId);
+  assert.equal(other.place, null);
+  status(await api.call(`/v1/memories/${secret.id}`, viewer), 404);
+  assert.deepEqual(status(await api.call('/v1/posts', viewer), 200).items.map(item => item.id), [other.id]);
+  assert.equal(api.db(db => db.prepare('SELECT COUNT(*) AS n FROM places').get().n), 0);
+  const legacy = status(await api.call('/v1/memories', owner, 'POST', post()), 201);
+  assert.equal(Object.hasOwn(legacy, 'locationId'), false);
+});
+
+test('schema 15 to 16 leaves named history unknown and keeps original named retry hashes', async t => {
+  const api = await fixture(t), owner = api.account('owner');
+  const draft = post({ locationName: 'Older named location' });
+  const original = status(await api.call('/v1/memories', owner, 'POST', draft), 201);
+  const expectedHash = api.db(db => db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(draft.id).request_hash);
+  api.db(db => db.exec('ALTER TABLE memories DROP COLUMN post_location_id; PRAGMA user_version = 15;'));
+  const before = api.db(db => db.prepare('SELECT * FROM memories').all());
+  const backup = `${api.databasePath}.backup`;
+  await backupDatabase(api.databasePath, backup);
+  for (const path of [api.databasePath, backup]) {
+    const migrated = openDatabase(path);
+    try {
+      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 19);
+      assert.deepEqual(migrated.prepare('SELECT * FROM memories').all(),
+        before.map(row => Object.assign(Object.create(null), row, { post_location_id: null })));
+      assert.deepEqual(migrated.prepare('PRAGMA foreign_key_check').all(), []);
+    } finally { migrated.close(); }
+  }
+  await api.restart();
+  assert.deepEqual(status(await api.call('/v1/memories', owner, 'POST', draft), 200), original);
+  assert.equal(api.db(db => db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(draft.id).request_hash), expectedHash);
+});
+
+test('schema 14 to 16 preserves original records, backups and old absent-metadata retry hashes', async t => {
   const api = await fixture(t), owner = api.account('owner');
   const draft = post({ capturedAt: new Date().toISOString() });
   const original = status(await api.call('/v1/memories', owner, 'POST', draft), 201);
@@ -128,7 +180,7 @@ test('schema 14 to 15 preserves original records, backups and old absent-name re
   api.db(db => {
     assert.equal(db.prepare('SELECT request_hash FROM memories WHERE id = ?').get(draft.id).request_hash, expectedHash);
     // A genuine pre-feature shape, not just a changed version marker.
-    db.exec('ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
+    db.exec('ALTER TABLE memories DROP COLUMN post_location_id; ALTER TABLE memories DROP COLUMN location_name; PRAGMA user_version = 14;');
   });
   const tables = api.db(db => db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all().map(({ name }) => name));
@@ -138,10 +190,10 @@ test('schema 14 to 15 preserves original records, backups and old absent-name re
   for (const path of [api.databasePath, backup]) {
     const migrated = openDatabase(path);
     try {
-      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 15);
+      assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 19);
       for (const [table, rows] of Object.entries(before)) {
         const expected = table === 'memories'
-          ? rows.map(row => Object.assign(Object.create(null), row, { location_name: null })) : rows;
+          ? rows.map(row => Object.assign(Object.create(null), row, { location_name: null, post_location_id: null })) : rows;
         assert.deepEqual(migrated.prepare(`SELECT * FROM ${table}`).all(), expected, table);
       }
       assert.deepEqual(migrated.prepare('PRAGMA foreign_key_check').all(), []);

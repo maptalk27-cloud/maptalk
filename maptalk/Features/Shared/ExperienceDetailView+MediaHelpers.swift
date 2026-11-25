@@ -33,6 +33,7 @@ extension ExperienceDetailView {
         let timestamp: Date?
         let replies: [FriendEngagement]
         let endorsement: RatedPOI.Endorsement?
+        var customEmoji: String? = nil
     }
 
     static func firstEmoji(in attachments: [RealPost.Attachment]) -> String? {

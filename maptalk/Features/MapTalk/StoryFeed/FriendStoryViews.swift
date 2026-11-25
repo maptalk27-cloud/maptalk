@@ -143,6 +143,7 @@ struct FriendStoryContentView: View {
     var showsVisitExpression = false
     var showsPersonalVisitCount = false
     var personalVisitCountLabel: String? = nil
+    var allowsLoadedVisitCountFallback = true
     var showsHeaderTimestamp = true
     var placeAuthors: [User] = []
     var allowsPOIMediaLightbox = true
@@ -155,10 +156,14 @@ struct FriendStoryContentView: View {
     @Environment(\.appEnv) private var environment
     @Environment(\.postCardPalette) private var postCardPalette
     @Environment(\.profileCardSheetMotion) private var sheetMotion
+#if DEBUG
+    @Environment(\.poiVisitCountPreviewStyle) private var visitCountPreviewStyle
+#endif
     @State private var readyPageIDs: Set<String> = []
     @State private var selectedProfile: UserMapViewModel.Context?
     @State private var isKeyboardVisible = false
     @State private var activeChildPresentations: Set<UUID> = []
+    @State private var mediaLoadFailures: Set<UUID> = []
 
     private var author: User? { userProvider(group.authorID) ?? group.user }
     private var playbackEnabled: Bool {
@@ -173,8 +178,8 @@ struct FriendStoryContentView: View {
     private var mediaRequestID: UUID? { playbackEnabled ? page.memoryID : nil }
 
     private var showsFullBleedPOIPreview: Bool {
-        guard !isExpanded, case let .poi(_, _, media) = page.content else { return false }
-        return media != nil
+        if case .poi = page.content { return true }
+        return false
     }
 
     var body: some View {
@@ -194,9 +199,9 @@ struct FriendStoryContentView: View {
                 }
             }
             .overlay(alignment: .bottom) {
-                if !isExpanded || page.kind == .poiLocationOnly,
-                   let mediaPlaybackFooter {
+                if let mediaPlaybackFooter {
                     mediaPlaybackFooter
+                        .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
                         .padding(.horizontal, 20)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                         .ignoresSafeArea(.container, edges: .bottom)
@@ -236,7 +241,11 @@ struct FriendStoryContentView: View {
             guard let id = mediaRequestID, let backend = environment.backend else { return }
             // Adjacent pages stay mounted for swiping. Only the selected
             // memory requests its video; metadata and cached photos show first.
-            _ = try? await backend.ensureMedia(for: [id])
+            do {
+                _ = try await backend.ensureMedia(for: [id])
+                mediaLoadFailures.remove(id)
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled { mediaLoadFailures.insert(id) } }
         }
         .task(id: readinessTaskID) {
             guard canMarkViewed else { return }
@@ -271,8 +280,12 @@ struct FriendStoryContentView: View {
             showsVisitExpression: showsVisitExpression,
             showsPersonalVisitCount: showsPersonalVisitCount,
             personalVisitCountLabel: personalVisitCountLabel,
+            allowsLoadedVisitCountFallback: allowsLoadedVisitCountFallback,
             showsTimestamp: showsHeaderTimestamp,
             placeAuthors: placeAuthors)
+#if DEBUG
+            .environment(\.poiVisitCountPreviewStyle, visitCountPreviewStyle)
+#endif
     }
 
     private var pageSelection: Binding<String> {
@@ -284,47 +297,19 @@ struct FriendStoryContentView: View {
     }
 
     private var poiChromePages: [FriendStoryPOIChromePage] {
-        pagerPages.map { candidate in
-            let place: RatedPOI?
-            if case let .poi(rated, _, media) = candidate.content, media != nil {
-                place = rated
-            } else { place = nil }
-            return .init(id: candidate.id, place: place)
-        }
+        pagerPages.map(FriendStoryPOIChromePage.storyPage)
     }
 
     @ViewBuilder
     private var postPager: some View {
         if feedPresentation == .posts, let sheetMotion {
             stablePostPager(motion: sheetMotion)
-        } else if case let .poi(place, _, media) = page.content, let media {
-            // A place is the container, not a different card for every visit.
-            // Only the media belongs to the horizontal pager; the place shell
-            // stays mounted while its exact selected slice changes.
+        } else if case .poi = page.content {
+            // Expanding changes the viewport, not the content system. The
+            // exact same media pager and fixed chrome own both detents.
             if isExpanded {
-                ExperienceDetailView(
-                    mode: .poi(Self.placeForCard(place, isExpanded: true, provider: placeProvider)),
-                    isExpanded: true,
-                    expandedPOIMedia: media,
-                    expandedPOIMediaContent: AnyView(
-                        nativePostPager(mediaOnly: true)
-                            .aspectRatio(ExperienceDetailView.POIFeaturedMedia.viewportAspectRatio, contentMode: .fit)
-                            .overlay(alignment: .bottom) {
-                                if mediaPlaybackFooter == nil {
-                                    placePageDots.padding(.bottom, 24)
-                                }
-                            }
-                    ),
-                    onJourneyAvatarStackTap: { onJourney($0, page) },
-                    journeyProvider: journeyProvider,
-                    userProvider: userProvider,
-                    onPOIContributorViewed: { keys in keys.forEach(onReadReady) },
-                    isPOIContributorUnseen: { keys in keys.contains { !viewedKeys.contains($0) } }
-                )
-                .id("story-place:\(page.authorID.uuidString):\(place.id.uuidString)")
-                .environment(\.friendStoryPlaybackEnabled, playbackEnabled)
+                nativePostPager(mediaOnly: true)
                 .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
-                .environment(\.experiencePOIPlaybackActions, mediaPlaybackFooter)
             } else {
                 compactPOIPager(mediaOnly: true)
                     .environment(\.friendStoryChildPresentationChanged, childPresentationChanged)
@@ -428,7 +413,7 @@ struct FriendStoryContentView: View {
     private func nativePostPager(mediaOnly: Bool) -> some View {
         // Each swipe advances one update, including across people at the edge.
         // Keep a single native pager rather than nesting a pager per author.
-        let chromePages = mediaOnly && !isExpanded ? poiChromePages : []
+        let chromePages = mediaOnly ? poiChromePages : []
         let chromeRun = FriendStoryPOIChromeRun(pages: chromePages, selectedID: page.id)
         let postPlaceGroups = feedPresentation == .posts ? PostPlaceGrouping.groups(
             pagerPages.compactMap { candidate in
@@ -479,18 +464,11 @@ struct FriendStoryContentView: View {
     private func mediaPage(for candidate: FriendStoryPage, chromeRun: FriendStoryPOIChromeRun?) -> some View {
         if case let .poi(place, _, media) = candidate.content, let media {
             Group {
-                if isExpanded {
-                    ExperienceDetailView.POIFeaturedMedia(media: media,
-                        accentColor: place.poi.category.accentColor,
-                        isPlaybackActive: playbackEnabled && candidate.id == page.id,
-                        fillsContainer: true)
-                } else {
-                    FriendStoryPOIPreview(place: place, media: media,
-                        isPlaybackActive: playbackEnabled && candidate.id == page.id,
-                        showsPlaceChrome: chromeRun?.contains(candidate.id) != true,
-                        chromePageID: candidate.id,
-                        onMediaTap: allowsPOIMediaLightbox ? nil : onExpand)
-                }
+                FriendStoryPOIPreview(place: place, media: media,
+                    isPlaybackActive: playbackEnabled && candidate.id == page.id,
+                    showsPlaceChrome: chromeRun?.contains(candidate.id) != true,
+                    chromePageID: candidate.id,
+                    onMediaTap: isExpanded || allowsPOIMediaLightbox ? nil : onExpand)
             }
             .overlay {
                 // A per-media sample travels with its image/video, separately
@@ -499,6 +477,38 @@ struct FriendStoryContentView: View {
                     mediaDecoration(media).allowsHitTesting(false)
                 }
             }
+        } else if case let .poi(place, _, _) = candidate.content {
+            ZStack {
+                Color(white: 0.12)
+                VStack(spacing: 10) {
+                    if candidate.kind == .poiLocationOnly {
+                        // This visit legitimately has no image/video. Its
+                        // feeling, comment and actions remain in the chrome.
+                        EmptyView()
+                    } else if mediaLoadFailures.contains(candidate.memoryID) {
+                        Text("Media is unavailable right now")
+                        Button("Try again") {
+                            Task {
+                                guard candidate.id == page.id, let store = environment.backend else { return }
+                                do {
+                                    _ = try await store.ensureMedia(for: [candidate.memoryID])
+                                    mediaLoadFailures.remove(candidate.memoryID)
+                                } catch { mediaLoadFailures.insert(candidate.memoryID) }
+                            }
+                        }
+                    } else {
+                        ProgressView().tint(.white)
+                        Text("Loading this visit’s media…")
+                    }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.65))
+                if chromeRun?.contains(candidate.id) != true {
+                    FriendStoryPOIChrome(place: place)
+                }
+            }
+            .poiChromePageAnchor(id: candidate.id)
+            .ignoresSafeArea(.container, edges: .bottom)
         } else {
             // The adjacent original card remains in the same native sequence.
             // Completing the boundary swipe selects it through the original
@@ -626,9 +636,13 @@ struct FriendStoryNavigationHeader: View {
     var showsVisitExpression = false
     var showsPersonalVisitCount = false
     var personalVisitCountLabel: String? = nil
+    var allowsLoadedVisitCountFallback = true
     var showsTimestamp = true
     var placeAuthors: [User] = []
     var showsProgress = true
+#if DEBUG
+    @Environment(\.poiVisitCountPreviewStyle) private var visitCountPreviewStyle
+#endif
 
     private var usesQuietVisitSummary: Bool { showsPersonalVisitCount && !showsTimestamp }
     private var visitComment: String? {
@@ -646,7 +660,8 @@ struct FriendStoryNavigationHeader: View {
 
     private var visitExpression: RatedPOI.CheckIn? {
         guard showsVisitExpression, case let .poi(_, visit, _) = page.content,
-              visit.endorsement != nil || !(visit.comment?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+              visit.endorsement != nil || visit.customEmoji != nil
+                || !(visit.comment?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         else { return nil }
         return visit
     }
@@ -722,6 +737,10 @@ struct FriendStoryNavigationHeader: View {
                                     .frame(width: 22, height: 20)
                                     .layoutPriority(1)
                                     .accessibilityLabel(feeling.rawValue)
+                            } else if let emoji = visit.customEmoji {
+                                POICustomFeelingIcon(emoji: emoji, size: 16)
+                                    .frame(width: 22, height: 20)
+                                    .layoutPriority(1)
                             }
                             if let comment = visit.comment?.trimmingCharacters(in: .whitespacesAndNewlines),
                                !comment.isEmpty {
@@ -760,7 +779,6 @@ struct FriendStoryNavigationHeader: View {
             VStack(alignment: .leading, spacing: usesQuietVisitSummary ? 3 : 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     authorName
-                    if usesQuietVisitSummary { personalVisitCount }
                     Spacer(minLength: 0)
                     timestamp.opacity(0.8)
                 }
@@ -783,11 +801,23 @@ struct FriendStoryNavigationHeader: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if let visit = visitExpression, let feeling = visit.endorsement {
-                FriendStoryFeelingIcon(visitID: visit.id, endorsement: feeling)
+            if usesQuietVisitSummary {
+                personalVisitCount
                     .layoutPriority(1)
-                    .accessibilityLabel(feeling.rawValue)
-                    .accessibilityIdentifier("friend-story.visit-feeling")
+            }
+
+            if let visit = visitExpression {
+                if let feeling = visit.endorsement {
+                    FriendStoryFeelingIcon(visitID: visit.id, endorsement: feeling)
+                        .layoutPriority(1)
+                        .accessibilityLabel(feeling.rawValue)
+                        .accessibilityIdentifier("friend-story.visit-feeling")
+                } else if let emoji = visit.customEmoji {
+                    POICustomFeelingIcon(emoji: emoji, size: 32)
+                        .frame(width: 40, height: 40)
+                        .layoutPriority(1)
+                        .accessibilityIdentifier("friend-story.visit-feeling")
+                }
             }
         }
         .frame(height: usesQuietVisitSummary ? 40 : 44)
@@ -823,14 +853,51 @@ struct FriendStoryNavigationHeader: View {
     @ViewBuilder
     private var personalVisitCount: some View {
         if showsPersonalVisitCount,
-           let label = personalVisitCountLabel ?? personalVisitTotal.map({ $0 == 1 ? "1 visit" : "\($0) visits" }) {
-            Text(label)
-                .font(.system(size: usesQuietVisitSummary ? 11 : 12, weight: .medium))
-                .foregroundStyle(.white.opacity(usesQuietVisitSummary ? 0.55 : 0.78))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .accessibilityLabel("\(label) to this place")
+           let label = personalVisitCountLabel ?? (allowsLoadedVisitCountFallback
+                ? personalVisitTotal.map({ $0 == 1 ? "1 visit" : "\($0) visits" }) : nil) {
+            Group {
+                if usesQuietVisitSummary, let number = label.split(separator: " ").first {
+                    quietVisitCount(String(number))
+                } else {
+                    Text(label)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(label) to this place")
+            .accessibilityIdentifier("friend-story.visit-count")
         }
+    }
+
+    @ViewBuilder
+    private func quietVisitCount(_ number: String) -> some View {
+#if DEBUG
+        if let visitCountPreviewStyle {
+            POIVisitCountPreviewMark(number: number, style: visitCountPreviewStyle)
+        } else {
+            currentVisitCountMark(number)
+        }
+#else
+        currentVisitCountMark(number)
+#endif
+    }
+
+    private func currentVisitCountMark(_ number: String) -> some View {
+        HStack(alignment: .center, spacing: 4) {
+            Image(systemName: "shoeprints.fill")
+                .font(.system(size: 16, weight: .regular))
+                .foregroundStyle(.white.opacity(0.72))
+            Text(number)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(.white.opacity(0.88))
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .fixedSize(horizontal: true, vertical: false)
+        .frame(height: 40)
     }
 }
 

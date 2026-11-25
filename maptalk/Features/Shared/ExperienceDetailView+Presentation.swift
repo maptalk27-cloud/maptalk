@@ -251,36 +251,15 @@ extension ExperienceDetailView {
 
     private func personalPOIPreview(place: RatedPOI, selection: POIStorySelection,
                                     isPlaybackActive: Bool) -> some View {
-        ZStack {
-            if let media = selection.media {
-                FriendStoryPOIPreview(place: place, media: media,
-                    isPlaybackActive: isPlaybackActive, showsPlaceChrome: false,
-                    onMediaTap: isExpanded ? nil : onCollapsedTap)
-                    .environment(\.poiMediaLightboxEnabled, false)
+        let slices = personalPOISlices(for: place)
+        let index = PersonalPOISliceSequence.index(in: slices,
+            retaining: personalPOISliceCursor ?? personalPOICursors[place.id]) ?? 0
+
+        return ZStack {
+            if slices.indices.contains(index) {
+                personalPOIMediaCanvas(place: place, slice: slices[index], isPlaybackActive: isPlaybackActive)
             } else {
-                // A location-only visit remains its own memory even when an
-                // older visit at this place has attractive, cached media.
-                VStack(spacing: 10) {
-                    switch personalPOIMediaState(for: selection.checkIn.id) {
-                    case .loading:
-                        ProgressView().tint(.white)
-                        Text("Loading this visit’s media…")
-                            .font(.subheadline)
-                    case .unavailable:
-                        Image(systemName: "photo.badge.exclamationmark")
-                            .font(.system(size: 32))
-                        Text("Media is unavailable right now")
-                            .font(.subheadline)
-                    case .empty:
-                        Image(systemName: "mappin.and.ellipse")
-                            .font(.system(size: 40))
-                        Text("No photo or video from this visit")
-                            .font(.subheadline)
-                    }
-                }
-                .foregroundStyle(.white.opacity(0.6))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(white: 0.12))
+                Color(white: 0.12)
             }
             LinearGradient(stops: [
                 .init(color: .black.opacity(0.5), location: 0),
@@ -290,43 +269,89 @@ extension ExperienceDetailView {
             ], startPoint: .top, endPoint: .bottom)
             .allowsHitTesting(false)
         }
-        .overlay(alignment: .topLeading) {
-            POIStoryPlaceHeading(place: place, onOpen: {
-                personalPOIOverviewID = place.id
-                if !isExpanded { onCollapsedTap?() }
-            })
-            .padding(.horizontal, 20)
-            .padding(.top, 28)
-        }
-        .overlay(alignment: .bottom) {
-            POIStoryPlaybackFooter(place: place, publishedAt: selection.checkIn.activityDate)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 12)
+        .overlay {
+            if showsPersonalPOIChrome { personalPOIChrome(place: place, selection: selection) }
         }
         .ignoresSafeArea(.container, edges: .bottom)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("personal-poi.instant.\(selection.checkIn.id.uuidString)")
     }
 
+    func personalPOIChrome(place: RatedPOI, selection: POIStorySelection,
+                           pageProgress: PersonalPOISliceSequence.PageProgress? = nil) -> some View {
+        let day = POIVisitDay.key(for: selection.checkIn, coordinate: place.poi.coordinate)
+        let slices = personalPOISlices(for: place).filter {
+            POIVisitDay.key(for: $0.checkIn, coordinate: place.poi.coordinate) == day
+        }
+        let index = PersonalPOISliceSequence.index(in: slices,
+            retaining: personalPOISliceCursor ?? personalPOICursors[place.id]) ?? 0
+        return Color.clear
+        .allowsHitTesting(false)
+        .overlay(alignment: .topLeading) {
+            VStack(alignment: .leading, spacing: 8) {
+                POIStoryPlaceHeading(place: place,
+                    trailingAction: AnyView(POIStorySaveButton(place: place)))
+                POIVisitExpression(visit: selection.checkIn, place: place)
+                    .padding(.leading, 53)
+                    .padding(.trailing, 44)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 28)
+        }
+        .overlay(alignment: .bottom) {
+            POIStoryPlaybackFooter(place: place, publishedAt: selection.checkIn.activityDate,
+                trailingActions: AnyView(POIStoryMediaActions(visit: selection.checkIn,
+                    mediaID: selection.media?.id).id(selection.checkIn.id.uuidString
+                        + (selection.media?.id.uuidString ?? ""))))
+                .overlay {
+                    FriendStoryPlacePageDots(count: pageProgress?.count ?? slices.count,
+                                             index: pageProgress?.index ?? index)
+                        .allowsHitTesting(false)
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+    }
+
     @ViewBuilder
-    func personalPOINavigationHeader(onClose: @escaping () -> Void) -> some View {
-        if let context = personalPOIBrowsingContext {
-            let visit = context.selection.checkIn
-            let author = userProvider(visit.userId)
-            // Adapter for shared presentation only. The outer Post/POI pager
-            // still owns navigation; no feed expiry or read state is inferred.
-            let page = FriendStoryPage(id: "personal-poi-\(visit.id.uuidString)",
-                authorID: visit.userId, memoryID: visit.id, mediaID: context.selection.media?.id,
-                publishedAt: visit.activityDate, capturedAt: visit.createdAt,
-                expiresAt: .distantFuture, readKey: "", kind: context.selection.media == nil ? .poiLocationOnly : .poiMedia,
-                expectedMedia: [], content: .poi(context.place, visit, context.selection.media))
-            let group = FriendStoryGroup(authorID: visit.userId, user: author, pages: [page])
-            FriendStoryNavigationHeader(author: author, group: group, page: page,
-                pageIndex: 0, canNavigate: false,
-                onAuthor: { if let author { openProfile(for: author) } },
-                onPreviousPage: {}, onNextPage: {}, onSelectPage: { _ in }, onClose: onClose,
-                showsVisitExpression: true, showsPersonalVisitCount: true,
-                showsTimestamp: false, showsProgress: false)
+    private func personalPOIMediaCanvas(place: RatedPOI, slice: PersonalPOISliceSequence.Slice,
+                                        isPlaybackActive: Bool) -> some View {
+        if let media = slice.media {
+            FriendStoryPOIPreview(place: place, media: media,
+                isPlaybackActive: isPlaybackActive, showsPlaceChrome: false,
+                onMediaTap: isExpanded ? nil : onCollapsedTap)
+                .environment(\.poiMediaLightboxEnabled, false)
+        } else {
+            // A reserved cold media slot is not a location-only visit. Never
+            // borrow an older visit's ready media or drop this visit's position.
+            VStack(spacing: 10) {
+                switch personalPOIMediaState(for: slice.checkIn.id) {
+                case .loading:
+                    ProgressView().tint(.white)
+                    Text("Loading this visit’s media…")
+                        .font(.subheadline)
+                case .unavailable:
+                    Image(systemName: "photo.badge.exclamationmark")
+                        .font(.system(size: 32))
+                    Text("Media is unavailable right now")
+                        .font(.subheadline)
+                case .empty:
+                    if slice.id.mediaID != nil {
+                        Image(systemName: "photo.badge.exclamationmark")
+                            .font(.system(size: 32))
+                        Text("Media is unavailable right now")
+                            .font(.subheadline)
+                    } else {
+                        // No media is content absence, not an invented image
+                        // or explanatory card. Keep the visit chrome intact.
+                        EmptyView()
+                    }
+                }
+            }
+            .foregroundStyle(.white.opacity(0.6))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(white: 0.12))
         }
     }
 

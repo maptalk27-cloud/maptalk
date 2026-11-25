@@ -1,3 +1,4 @@
+import Combine
 import MapKit
 import SwiftUI
 import Testing
@@ -10,6 +11,98 @@ import UIKit
 @Suite(.serialized)
 @MainActor
 struct MapNativeFlightDiagnosticTests {
+    @Test(arguments: [false, true])
+    func parentPagerSelectionRetainsActualCameraAnimation(usesMyMap: Bool) async throws {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let scene = try #require(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let origin = CLLocationCoordinate2D(latitude: 47.60, longitude: -122.30)
+        let destination = CLLocationCoordinate2D(latitude: 47.64, longitude: -122.30)
+        let initial = Self.region(origin, meters: 20_000)
+        let target = Self.region(destination, meters: 3_600)
+        let recorder = NativeFlightProbeRecorder(initial: initial, usesMyMap: usesMyMap)
+        let probe = NativeFlightParentPagerProbe(initial: initial)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = UIHostingController(rootView: NativeFlightParentPagerHost(
+            recorder: recorder, probe: probe, initial: initial, target: target))
+        window.makeKeyAndVisible()
+        defer {
+            probe.commitSelection = nil
+            recorder.controller.cancelActiveTransition()
+            recorder.myMapController.cancelActiveTransition()
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        try await Task.sleep(for: .milliseconds(1_800))
+        try #require(!recorder.frames.isEmpty)
+        let commitSelection = try #require(probe.commitSelection)
+        let initialParentRenderCount = probe.parentRenderCount
+        recorder.begin(label: "parent-pager-\(usesMyMap ? "my-map" : "main")")
+        var commit = Transaction(animation: nil)
+        commit.disablesAnimations = true
+        withTransaction(commit) { commitSelection() }
+        try await Task.sleep(for: .milliseconds(1_400))
+        #expect(probe.parentRenderCount > initialParentRenderCount)
+        #expect(probe.renderedSelection == 1)
+        #expect(recorder.renderedParentSelection == 1, "The map child must receive the parent's changed selection")
+        #expect(probe.regionCallbackCount == 1)
+        recorder.report()
+        recorder.verifyAnimatedMovement(from: origin, to: destination)
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func pagerCommitRetainsActualCameraAnimation(usesMyMap: Bool, disablesAnimations: Bool) async throws {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let scene = try #require(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let origin = CLLocationCoordinate2D(latitude: 47.60, longitude: -122.30)
+        let destination = CLLocationCoordinate2D(latitude: 47.64, longitude: -122.30)
+        let recorder = NativeFlightProbeRecorder(initial: Self.region(origin, meters: 20_000),
+                                                 usesMyMap: usesMyMap)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.windowLevel = .normal + 1
+        window.rootViewController = UIHostingController(rootView: NativeFlightProbeMap(recorder: recorder))
+        window.makeKeyAndVisible()
+        defer {
+            recorder.controller.cancelActiveTransition()
+            recorder.myMapController.cancelActiveTransition()
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        try await Task.sleep(for: .milliseconds(1_800))
+        try #require(!recorder.frames.isEmpty, "The native Map must report actual camera frames")
+        recorder.begin(label: "pager-\(usesMyMap ? "my-map" : "main")-disabled-\(disablesAnimations)")
+
+        // Reproduce the no-animation transaction surrounding a native pager's
+        // selection commit. Both controllers must still animate their explicit
+        // camera commands; command counts alone do not prove visible motion.
+        var commit = Transaction(animation: nil)
+        commit.disablesAnimations = disablesAnimations
+        withTransaction(commit) {
+            if usesMyMap {
+                recorder.myMapController.handleRegionChange(currentRegion: recorder.latestRegion,
+                    targetRegion: Self.region(destination, meters: 3_600), cause: .poi,
+                    cameraPosition: recorder.myMapBinding,
+                    onRegionUpdate: { recorder.latestRegion = $0 })
+            } else {
+                recorder.controller.handleRegionChange(currentRegion: recorder.latestRegion,
+                    targetRegion: Self.region(destination, meters: 3_600), cause: .poi,
+                    cameraPosition: recorder.store.commandBinding,
+                    onRegionUpdate: { recorder.latestRegion = $0 })
+            }
+        }
+        try await Task.sleep(for: .milliseconds(1_400))
+        recorder.report()
+        recorder.verifyAnimatedMovement(from: origin, to: destination)
+    }
+
     @Test
     func honoluluLanaiActualCameraFrames() async throws {
         guard !UIAccessibility.isReduceMotionEnabled else { return }
@@ -132,7 +225,7 @@ struct MapNativeFlightDiagnosticTests {
 }
 
 @MainActor
-private final class NativeFlightProbeRecorder {
+private final class NativeFlightProbeRecorder: ObservableObject {
     struct Frame {
         let time: CFTimeInterval
         let center: CLLocationCoordinate2D
@@ -142,9 +235,13 @@ private final class NativeFlightProbeRecorder {
     }
 
     let controller = MapFlightController()
+    let myMapController = MyMapFlightController()
     let store: MapCameraPositionStore
+    let usesMyMap: Bool
+    @Published private var myMapPosition: MapCameraPosition
     var latestRegion: MKCoordinateRegion
     var frames: [Frame] = []
+    var renderedParentSelection: Int?
     private var commands: [String] = []
     private var transactions: [String] = []
     private var nativeEvents: [String] = []
@@ -155,9 +252,17 @@ private final class NativeFlightProbeRecorder {
     private var startedAt = CACurrentMediaTime()
     private var label = "prepare"
 
-    init(initial: MKCoordinateRegion) {
+    init(initial: MKCoordinateRegion, usesMyMap: Bool = false) {
         store = MapCameraPositionStore(.region(initial))
+        self.usesMyMap = usesMyMap
+        myMapPosition = .region(initial)
         latestRegion = initial
+    }
+
+    // Mirrors private MyMapCameraState.binding: @Published storage and the
+    // value-only setter used by both the controller and the native Map.
+    var myMapBinding: Binding<MapCameraPosition> {
+        Binding(get: { self.myMapPosition }, set: { self.myMapPosition = $0 })
     }
 
     var commandBinding: Binding<MapCameraPosition> {
@@ -179,7 +284,8 @@ private final class NativeFlightProbeRecorder {
     }
 
     var nativeBinding: Binding<MapCameraPosition> {
-        Binding(get: { self.store.position }, set: { position, transaction in
+        if usesMyMap { return myMapBinding }
+        return Binding(get: { self.store.position }, set: { position, transaction in
             self.nativeEvents.append("t=\(self.time()) user=\(position.positionedByUser) animation=\(String(describing: transaction.animation))")
             // Same semantics as MapTalk's native Map binding.
             if position.positionedByUser { self.controller.cancelActiveTransition() }
@@ -283,6 +389,23 @@ private final class NativeFlightProbeRecorder {
         }
     }
 
+    func verifyAnimatedMovement(from origin: CLLocationCoordinate2D, to destination: CLLocationCoordinate2D) {
+        let routeDistance = origin.distance(to: destination)
+        let intermediate = frames.filter {
+            $0.center.distance(to: origin) > routeDistance * 0.05
+                && $0.center.distance(to: destination) > routeDistance * 0.05
+        }
+        let movingPairs = zip(intermediate, intermediate.dropFirst()).filter {
+            $0.center.distance(to: $1.center) > 1
+        }
+        let duration = (intermediate.last?.time ?? startedAt) - (intermediate.first?.time ?? startedAt)
+        print("NATIVE-PAGER \(label) intermediateFrames=\(intermediate.count) movingPairs=\(movingPairs.count) intermediateSeconds=\(Self.f(duration))")
+        #expect(movingPairs.count >= 1, "Explicit cross-place flight must render distinct intermediate camera frames")
+        #expect(duration > 0.04, "A native flight must animate over time, not teleport to its destination")
+        #expect((frames.last?.center.distance(to: destination) ?? .infinity) < 100,
+                "The new place must actually become the native Map's visible destination")
+    }
+
     func verifyNativeEndHandoff(at target: MKCoordinateRegion) {
         #expect(cameraCommands.count == 2, "Long routes retain native lift and cruise camera commands")
         #expect(regionCommandTimes.count == 1, "A flight must issue exactly one region landing")
@@ -333,18 +456,118 @@ private final class NativeFlightProbeRecorder {
     }
 }
 
+/// A live SwiftUI parent, not a controller-only callback. The Main path
+/// publishes its view-model region synchronously and writes parent @State in
+/// onRegionUpdate. MyMap instead stores its sampled region outside @State.
 @MainActor
-private struct NativeFlightProbeMap: View {
-    let recorder: NativeFlightProbeRecorder
-    @ObservedObject private var store: MapCameraPositionStore
+private final class NativeFlightParentPagerProbe: ObservableObject {
+    @Published var targetRegion: MKCoordinateRegion
+    var commitSelection: (() -> Void)?
+    var parentRenderCount = 0
+    var renderedSelection = 0
+    var regionCallbackCount = 0
 
-    init(recorder: NativeFlightProbeRecorder) {
+    init(initial: MKCoordinateRegion) { targetRegion = initial }
+
+    func rendered(selection: Int) {
+        parentRenderCount += 1
+        renderedSelection = selection
+    }
+}
+
+@MainActor
+private struct NativeFlightParentPagerHost: View {
+    let recorder: NativeFlightProbeRecorder
+    @ObservedObject var probe: NativeFlightParentPagerProbe
+    @ObservedObject private var store: MapCameraPositionStore
+    let initial: MKCoordinateRegion
+    let target: MKCoordinateRegion
+    @State private var selection = 0
+    @State private var alignmentRevision = 0
+    @State private var currentRegion: MKCoordinateRegion
+
+    init(recorder: NativeFlightProbeRecorder, probe: NativeFlightParentPagerProbe,
+         initial: MKCoordinateRegion, target: MKCoordinateRegion) {
         self.recorder = recorder
-        self._store = ObservedObject(wrappedValue: recorder.store)
+        self.probe = probe
+        self.initial = initial
+        self.target = target
+        _store = ObservedObject(wrappedValue: recorder.store)
+        _currentRegion = State(initialValue: initial)
+    }
+
+    private var pagerSelection: Binding<Int> {
+        Binding(get: { selection }, set: { value in
+            guard value != selection else { return }
+            selection = value
+            if recorder.usesMyMap {
+                recorder.myMapController.handleRegionChange(currentRegion: recorder.latestRegion,
+                    targetRegion: target, cause: .poi, cameraPosition: recorder.myMapBinding) {
+                    recorder.latestRegion = $0
+                    probe.regionCallbackCount += 1
+                }
+            } else {
+                // Mirrors viewModel.focus -> $region -> onReceive in Main.
+                probe.targetRegion = target
+            }
+            alignmentRevision += 1
+        })
     }
 
     var body: some View {
-        Map(position: recorder.nativeBinding) { }
+        let _ = probe.rendered(selection: selection)
+        NativeFlightProbeMap(recorder: recorder, selectedPlaceIndex: selection,
+                             places: [initial.center, target.center])
+            .overlay(alignment: .topLeading) {
+                Text("\(selection):\(alignmentRevision):\(currentRegion.center.latitude)")
+            }
+            .overlay(alignment: .bottom) {
+                TabView(selection: pagerSelection) {
+                    Text("First place").tag(0)
+                    Text("Next place").tag(1)
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .frame(height: 60)
+            }
+            .onReceive(probe.$targetRegion.dropFirst()) { region in
+                guard !recorder.usesMyMap else { return }
+                recorder.controller.handleRegionChange(currentRegion: currentRegion,
+                    targetRegion: region, cause: .poi, cameraPosition: store.commandBinding) {
+                    currentRegion = $0
+                    probe.regionCallbackCount += 1
+                }
+            }
+            .onAppear { probe.commitSelection = { pagerSelection.wrappedValue = 1 } }
+    }
+}
+
+@MainActor
+private struct NativeFlightProbeMap: View {
+    @ObservedObject var recorder: NativeFlightProbeRecorder
+    @ObservedObject private var store: MapCameraPositionStore
+    let selectedPlaceIndex: Int?
+    let places: [CLLocationCoordinate2D]
+
+    init(recorder: NativeFlightProbeRecorder, selectedPlaceIndex: Int? = nil,
+         places: [CLLocationCoordinate2D] = []) {
+        self.recorder = recorder
+        self._store = ObservedObject(wrappedValue: recorder.store)
+        self.selectedPlaceIndex = selectedPlaceIndex
+        self.places = places
+    }
+
+    var body: some View {
+        let _ = recorder.renderedParentSelection = selectedPlaceIndex
+        Map(position: recorder.nativeBinding) {
+            if let selectedPlaceIndex {
+                ForEach(places.indices, id: \.self) { index in
+                    Annotation("", coordinate: places[index]) {
+                        Circle().fill(index == selectedPlaceIndex ? Color.red : Color.gray)
+                            .frame(width: 12, height: 12)
+                    }
+                }
+            }
+        }
             .mapStyle(.standard(elevation: .flat))
             .ignoresSafeArea()
             .onMapCameraChange(frequency: .continuous) { recorder.frame($0) }

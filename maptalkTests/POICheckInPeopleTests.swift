@@ -119,6 +119,53 @@ struct POICheckInPeopleTests {
         #expect(restricted.first?.items.map(\.id) == [latest.id])
     }
 
+    @Test(arguments: [false, true])
+    func personalMediaSlicePreservesAggregatedPlaceHistoryInBothCardSizes(expanded: Bool) {
+        let person = UUID()
+        let visits = [
+            checkIn(user: person, secondsAgo: StoryReadKeys.freshWindow + 100),
+            checkIn(user: person, secondsAgo: 10)
+        ]
+        let place = rated(visits)
+        // Both list and map entries use the same slice, keeping the original
+        // place history available for an explicit place open.
+        let detail = ExperienceDetailView(mode: .poi(place), isExpanded: expanded,
+                                         usesUpdatedPOIStyle: true, poiBrowsingUserID: person)
+        #expect(detail.browsingPOISelection(for: place)?.checkIn.id == visits.last?.id)
+        #expect(detail.galleryItems(for: place).count == 1)
+        #expect(detail.poi?.checkIns.map(\.id) == visits.map(\.id))
+        #expect(POIPlaceHistoryPresentation.contributors(for: place,
+            userProvider: { _ in nil }).first?.items.count == 2)
+    }
+
+    @Test
+    func visitDayCountsKeepAllOriginalMediaButCountEachPersonDayOnce() throws {
+        let owner = UUID()
+        var first = checkIn(user: owner, secondsAgo: 300)
+        var repeated = checkIn(user: owner, secondsAgo: 200)
+        var anotherDay = checkIn(user: owner, secondsAgo: 100)
+        first.visitDay = "2026-11-23"
+        repeated.visitDay = "2026-11-23"
+        anotherDay.visitDay = "2026-11-24"
+        let place = rated([first, repeated, anotherDay])
+        let person = try #require(place.checkInPeople().first)
+        #expect(person.visitDayCount == 2)
+        #expect(person.checkIns.count == 3)
+        #expect(person.checkIns.flatMap(\.media).count == 3)
+        #expect(UserMapViewModel.Footprint(ratedPOI: place, visits: place.checkIns).totalVisits == 2)
+    }
+
+    @Test
+    func canonicalVisitDayWinsAndLegacyFallbackUsesFixedCoordinateRounding() {
+        let midnight = Date(timeIntervalSince1970: 0)
+        var visit = RatedPOI.CheckIn(userId: UUID(), createdAt: midnight)
+        visit.visitDay = "2026-11-24"
+        #expect(POIVisitDay.key(for: visit, coordinate: .init(latitude: 0, longitude: -180)) == "2026-11-24")
+        #expect(POIVisitDay.key(for: midnight, coordinate: .init(latitude: 0, longitude: -7.5)) == "1970-01-01")
+        #expect(POIVisitDay.key(for: midnight, coordinate: .init(latitude: 0, longitude: -7.6)) == "1969-12-31")
+        #expect(POIVisitDay.key(for: midnight, coordinate: .init(latitude: 0, longitude: 180)) == "1970-01-01")
+    }
+
     private func checkIn(user: UUID, secondsAgo: Double, media: Bool = true) -> RatedPOI.CheckIn {
         .init(userId: user, createdAt: now.addingTimeInterval(-secondsAgo),
             media: media ? [.init(kind: .photo(URL(fileURLWithPath: "/tmp/photo.jpg")))] : [])
